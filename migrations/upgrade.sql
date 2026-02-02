@@ -135,6 +135,9 @@ END $$;
 -- Migration from 2.22 to 2.23: Add table size tracking for bloat detection
 \i migrations/2.22_to_2.23.sql
 
+-- Migration from 2.23 to 2.24: Vacuum Control Enhancements
+\i migrations/2.23_to_2.24.sql
+
 -- =============================================================================
 -- Post-upgrade verification
 -- =============================================================================

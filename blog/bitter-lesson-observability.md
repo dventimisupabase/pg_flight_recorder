@@ -19,10 +19,10 @@ This curation represents genuine expertise. Someone who's debugged a thousand da
 
 But this approach has costs:
 
-1. **Implicit assumptions** — The thresholds encode what *usually* matters, which may not be what matters for *your* workload
-2. **Lost signal** — Pre-aggregation destroys information that might have been diagnostic
-3. **Brittleness** — The system catches problems the designers anticipated, and misses the ones they didn't
-4. **Expertise bottleneck** — The tool is only as good as the knowledge encoded in it
+1. **Implicit assumptions** :: The thresholds encode what *usually* matters, which may not be what matters for *your* workload
+2. **Lost signal** :: Pre-aggregation destroys information that might have been diagnostic
+3. **Brittleness** :: The system catches problems the designers anticipated, and misses the ones they didn't
+4. **Expertise bottleneck** :: The tool is only as good as the knowledge encoded in it
 
 ## The New Calculus
 
