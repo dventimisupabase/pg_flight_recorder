@@ -140,6 +140,14 @@ SELECT * FROM flight_recorder.get_current_profile();
 | `get_optimization_profiles()` | Ring buffer optimization presets |
 | `apply_optimization_profile(name)` | Apply ring buffer optimization |
 
+### Export/Offline Analysis
+
+| Function | Purpose |
+|----------|---------|
+| `_populate_relation_names()` | Populate OID-to-name lookup table for export |
+| `_safe_relname(oid)` | Resolve OID to name using `relation_names` table |
+| `_get_setting_from_snapshots(name, default)` | Get setting from captured `config_snapshots` |
+
 ## Views
 
 ### Real-time (from ring buffers)
@@ -186,8 +194,8 @@ SELECT * FROM flight_recorder.get_current_profile();
 
 - `snapshots` - System stats (WAL, checkpoints, I/O)
 - `statement_snapshots` - Query stats (from pg_stat_statements)
-- `table_snapshots` - Per-table stats
-- `index_snapshots` - Per-index stats
+- `table_snapshots` - Per-table stats (see note on deprecated columns)
+- `index_snapshots` - Per-index stats (see note on deprecated columns)
 - `config_snapshots` - PostgreSQL configuration
 - `db_role_config_snapshots` - Database/role config overrides
 - `replication_snapshots` - Replication state
@@ -197,6 +205,18 @@ SELECT * FROM flight_recorder.get_current_profile();
 
 - `config` - Flight Recorder configuration
 - `collection_stats` - Collection job metrics
+- `relation_names` - OID to relation name mappings (for offline analysis)
+
+### Deprecated Columns
+
+The following columns in `table_snapshots` and `index_snapshots` are **deprecated** and will be NULL in new data:
+
+| Table | Deprecated Columns | Use Instead |
+|-------|-------------------|-------------|
+| `table_snapshots` | `schemaname`, `relname` | `relid::regclass` or `relation_names` lookup |
+| `index_snapshots` | `schemaname`, `relname`, `indexrelname` | `relid::regclass`, `indexrelid::regclass` |
+
+This change eliminates joins to `pg_catalog` during collection, avoiding even `AccessShareLock`. Relation names are now derived on-the-fly when queried. Existing data with names is preserved.
 
 ## Safety Features
 
@@ -335,6 +355,57 @@ SELECT flight_recorder.disable();
 -- Drop schema
 DROP SCHEMA flight_recorder CASCADE;
 ```
+
+## Offline Analysis (PGLite)
+
+Flight Recorder data can be exported and analyzed locally using [PGLite](https://pglite.dev/) without requiring a PostgreSQL server.
+
+### Export from Production
+
+```bash
+# Prepare data (populates relation_names lookup table)
+psql -d your_database -f pglite/export.sql
+
+# Export data
+pg_dump -d your_database -n flight_recorder --data-only -f flight_recorder_data.sql
+```
+
+### Import into PGLite (Node.js)
+
+```javascript
+import { PGlite } from '@electric-sql/pglite';
+import fs from 'fs';
+
+const db = new PGlite();
+
+// Install analysis-only schema
+await db.exec(fs.readFileSync('pglite/install.sql', 'utf8'));
+
+// Import data
+await db.exec(fs.readFileSync('flight_recorder_data.sql', 'utf8'));
+
+// Run analysis
+const result = await db.query(`
+  SELECT * FROM flight_recorder.anomaly_report(
+    '2024-01-15 00:00'::timestamptz,
+    '2024-01-15 23:59'::timestamptz
+  )
+`);
+```
+
+### Available in PGLite
+
+The analysis-only schema includes:
+
+- All data tables (for import)
+- Core analysis functions: `compare()`, `anomaly_report()`, `wait_summary()`, `statement_compare()`
+- Capacity functions: `table_hotspots()`, `unused_indexes()`
+- Configuration functions: `config_at()`, `config_changes()`
+- Views: `deltas`, `recent_waits`, `recent_activity`, `recent_locks`
+
+**Not included**: Collection functions (`sample()`, `snapshot()`, `enable()`, `disable()`), pg_cron integration.
+
+See `pglite/README.md` for complete documentation.
 
 ## Testing
 
