@@ -479,6 +479,19 @@ CREATE INDEX IF NOT EXISTS config_snapshots_name_idx
 COMMENT ON TABLE flight_recorder.config_snapshots IS 'PostgreSQL configuration snapshots for change tracking and incident context';
 
 
+-- Stores relation OID to name mappings for offline analysis (e.g., PGLite)
+-- Populated by _populate_relation_names() before data export
+-- Enables analysis functions to resolve OIDs without access to pg_class
+CREATE TABLE IF NOT EXISTS flight_recorder.relation_names (
+    oid             OID PRIMARY KEY,
+    nspname         TEXT NOT NULL,
+    relname         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS relation_names_name_idx
+    ON flight_recorder.relation_names(nspname, relname);
+COMMENT ON TABLE flight_recorder.relation_names IS 'OID to relation name mappings for offline analysis. Populated at export time, not during collection.';
+
+
 -- Captures database-level and role-level configuration overrides from pg_db_role_setting
 -- These settings override global GUCs and are often overlooked during incident analysis
 -- Complementary to config_snapshots which tracks global settings
@@ -562,6 +575,72 @@ END;
 $$;
 COMMENT ON FUNCTION flight_recorder._interpolate_metric IS
 'Linear interpolation helper for time-travel debugging. Calculates estimated metric value at a target timestamp between two known data points. Returns rounded value (4 decimal places). Handles edge cases: NULL inputs, same timestamps, and clamps ratio to [0,1] to prevent extrapolation.';
+
+
+-- Populates relation_names table from pg_class for offline analysis
+-- Run this before exporting data for use with PGLite or other offline analysis tools
+-- This is an EXPORT-TIME operation, not a collection-time operation
+CREATE OR REPLACE FUNCTION flight_recorder._populate_relation_names()
+RETURNS INTEGER
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_count INTEGER;
+BEGIN
+    -- Truncate and repopulate to ensure consistency
+    TRUNCATE flight_recorder.relation_names;
+
+    INSERT INTO flight_recorder.relation_names (oid, nspname, relname)
+    SELECT c.oid, n.nspname, c.relname
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+      AND c.relkind IN ('r', 'i', 'S', 'v', 'm', 'p');  -- tables, indexes, sequences, views, matviews, partitioned
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN v_count;
+END;
+$$;
+COMMENT ON FUNCTION flight_recorder._populate_relation_names IS
+'Populates relation_names lookup table for offline analysis. Run before pg_dump when exporting data for PGLite. Returns count of relations captured.';
+
+
+-- Resolves OID to schema-qualified relation name using relation_names lookup table
+-- Falls back to OID string if not found (for offline analysis compatibility)
+CREATE OR REPLACE FUNCTION flight_recorder._safe_relname(p_oid OID)
+RETURNS TEXT
+LANGUAGE sql STABLE AS $$
+    SELECT COALESCE(
+        (SELECT nspname || '.' || relname FROM flight_recorder.relation_names WHERE oid = p_oid),
+        'OID:' || p_oid::text
+    )
+$$;
+COMMENT ON FUNCTION flight_recorder._safe_relname IS
+'Resolves OID to relation name using relation_names table. Returns OID:nnn if not found. For offline analysis where pg_class is unavailable.';
+
+
+-- Retrieves a PostgreSQL setting from config_snapshots history
+-- For offline analysis where pg_settings is unavailable
+-- Returns most recent captured value, or default if not found
+CREATE OR REPLACE FUNCTION flight_recorder._get_setting_from_snapshots(
+    p_name TEXT,
+    p_default TEXT DEFAULT NULL
+)
+RETURNS TEXT
+LANGUAGE sql STABLE AS $$
+    SELECT COALESCE(
+        (
+            SELECT cs.setting
+            FROM flight_recorder.config_snapshots cs
+            JOIN flight_recorder.snapshots s ON s.id = cs.snapshot_id
+            WHERE cs.name = p_name
+            ORDER BY s.captured_at DESC
+            LIMIT 1
+        ),
+        p_default
+    )
+$$;
+COMMENT ON FUNCTION flight_recorder._get_setting_from_snapshots IS
+'Retrieves PostgreSQL setting from config_snapshots for offline analysis. Returns most recent captured value or default if not found.';
 
 
 -- Returns the PostgreSQL major version number
@@ -2666,6 +2745,7 @@ DECLARE
         'autovacuum_analyze_scale_factor',
         'autovacuum_vacuum_cost_delay',
         'autovacuum_vacuum_cost_limit',
+        'autovacuum_freeze_max_age',
         -- Logging
         'log_min_duration_statement',
         'log_lock_waits',
