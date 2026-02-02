@@ -11,6 +11,7 @@
 --   - Add autovacuum_freeze_max_age to captured config settings
 --   - Deprecate schemaname/relname columns in table_snapshots (make nullable)
 --   - Deprecate schemaname/relname/indexrelname columns in index_snapshots (make nullable)
+--   - Update vacuum_control_report() to use COALESCE for deprecated columns
 --
 -- Data preservation: All existing data is preserved. Name columns become nullable
 --                    but existing values remain. New rows will have NULL names.
@@ -135,7 +136,145 @@ COMMENT ON FUNCTION flight_recorder._get_setting_from_snapshots IS
 'Retrieves PostgreSQL setting from config_snapshots for offline analysis. Returns most recent captured value or default if not found.';
 
 -- =============================================================================
--- Step 4: Update Version
+-- Step 4: Update vacuum_control_report to handle deprecated columns
+-- =============================================================================
+
+-- The vacuum_control_report function must use COALESCE with ::regclass fallback
+-- since schemaname/relname columns are now nullable
+CREATE OR REPLACE FUNCTION flight_recorder.vacuum_control_report(
+    p_start_time TIMESTAMPTZ,
+    p_end_time TIMESTAMPTZ
+)
+RETURNS TABLE(
+    schemaname                  TEXT,
+    relname                     TEXT,
+    relid                       OID,
+    operating_mode              TEXT,
+    mode_reason                 TEXT,
+    diagnostic_classification   TEXT,
+    diagnostic_confidence       TEXT,
+    current_scale_factor        NUMERIC,
+    recommended_scale_factor    NUMERIC,
+    change_pct                  NUMERIC,
+    should_recommend            BOOLEAN,
+    last_recommendation_at      TIMESTAMPTZ,
+    alter_table_sql             TEXT
+)
+LANGUAGE plpgsql STABLE AS $$
+DECLARE
+    v_enabled BOOLEAN;
+    v_hysteresis_pct NUMERIC;
+    v_rate_limit_minutes INTEGER;
+BEGIN
+    -- Check if feature is enabled
+    v_enabled := COALESCE(
+        flight_recorder._get_config('vacuum_control_enabled', 'true')::boolean,
+        true
+    );
+
+    IF NOT v_enabled THEN
+        RETURN;
+    END IF;
+
+    -- Get config values
+    v_hysteresis_pct := COALESCE(
+        flight_recorder._get_config('vacuum_control_hysteresis_pct', '25')::numeric,
+        25
+    );
+    v_rate_limit_minutes := COALESCE(
+        flight_recorder._get_config('vacuum_control_rate_limit_minutes', '60')::integer,
+        60
+    );
+
+    RETURN QUERY
+    WITH latest_snapshots AS (
+        SELECT DISTINCT ON (ts.relid)
+            ts.relid,
+            COALESCE(ts.schemaname, split_part(ts.relid::regclass::text, '.', 1)) AS schemaname,
+            COALESCE(ts.relname, split_part(ts.relid::regclass::text, '.', 2)) AS relname,
+            ts.n_dead_tup,
+            ts.reltuples,
+            ts.n_live_tup
+        FROM flight_recorder.table_snapshots ts
+        JOIN flight_recorder.snapshots s ON s.id = ts.snapshot_id
+        WHERE s.captured_at BETWEEN p_start_time AND p_end_time
+        ORDER BY ts.relid, s.captured_at DESC
+    ),
+    mode_info AS (
+        SELECT
+            ls.relid,
+            (flight_recorder.vacuum_control_mode(ls.relid)).*
+        FROM latest_snapshots ls
+    ),
+    diag_info AS (
+        SELECT
+            ls.relid,
+            (flight_recorder.vacuum_diagnostic(ls.relid)).*
+        FROM latest_snapshots ls
+    ),
+    scale_info AS (
+        SELECT
+            ls.relid,
+            (flight_recorder.compute_recommended_scale_factor(ls.relid)).*
+        FROM latest_snapshots ls
+    ),
+    state_info AS (
+        SELECT
+            vcs.relid,
+            vcs.last_recommendation_at,
+            vcs.last_recommended_scale_factor
+        FROM flight_recorder.vacuum_control_state vcs
+    )
+    SELECT
+        ls.schemaname,
+        ls.relname,
+        ls.relid,
+        mi.mode AS operating_mode,
+        mi.reason AS mode_reason,
+        di.classification AS diagnostic_classification,
+        di.confidence AS diagnostic_confidence,
+        si.current_scale_factor,
+        si.recommended_scale_factor,
+        si.change_pct,
+        -- Should recommend: passes hysteresis AND rate limit
+        CASE
+            WHEN si.recommended_scale_factor IS NULL THEN false
+            WHEN ABS(COALESCE(si.change_pct, 0)) < v_hysteresis_pct THEN false
+            WHEN sti.last_recommendation_at IS NOT NULL
+                 AND sti.last_recommendation_at > now() - make_interval(mins => v_rate_limit_minutes)
+                 THEN false
+            ELSE true
+        END AS should_recommend,
+        sti.last_recommendation_at,
+        -- Generate ALTER TABLE SQL
+        CASE
+            WHEN si.recommended_scale_factor IS NOT NULL
+                 AND ABS(COALESCE(si.change_pct, 0)) >= v_hysteresis_pct
+            THEN format(
+                'ALTER TABLE %I.%I SET (autovacuum_vacuum_scale_factor = %s);',
+                ls.schemaname, ls.relname, si.recommended_scale_factor
+            )
+            ELSE NULL
+        END AS alter_table_sql
+    FROM latest_snapshots ls
+    LEFT JOIN mode_info mi ON mi.relid = ls.relid
+    LEFT JOIN diag_info di ON di.relid = ls.relid
+    LEFT JOIN scale_info si ON si.relid = ls.relid
+    LEFT JOIN state_info sti ON sti.relid = ls.relid
+    WHERE mi.mode IS NOT NULL
+    ORDER BY
+        CASE mi.mode
+            WHEN 'safety' THEN 1
+            WHEN 'catch_up' THEN 2
+            ELSE 3
+        END,
+        COALESCE(ls.n_dead_tup, 0) DESC;
+END;
+$$;
+COMMENT ON FUNCTION flight_recorder.vacuum_control_report(TIMESTAMPTZ, TIMESTAMPTZ) IS 'Returns vacuum control recommendations for all monitored tables with hysteresis and rate limiting';
+
+-- =============================================================================
+-- Step 5: Update Version
 -- =============================================================================
 UPDATE flight_recorder.config
 SET value = '2.25', updated_at = now()
@@ -144,7 +283,7 @@ WHERE key = 'schema_version';
 COMMIT;
 
 -- =============================================================================
--- Step 5: Post-migration verification
+-- Step 6: Post-migration verification
 -- =============================================================================
 DO $$
 DECLARE
@@ -162,6 +301,9 @@ BEGIN
     RAISE NOTICE '  - _populate_relation_names() for export preparation';
     RAISE NOTICE '  - _safe_relname() for safe OID lookup';
     RAISE NOTICE '  - _get_setting_from_snapshots() for offline config access';
+    RAISE NOTICE '';
+    RAISE NOTICE 'Updates:';
+    RAISE NOTICE '  - vacuum_control_report() uses COALESCE for deprecated columns';
     RAISE NOTICE '';
     RAISE NOTICE 'Deprecations:';
     RAISE NOTICE '  - table_snapshots.schemaname/relname now NULL (use relid)';

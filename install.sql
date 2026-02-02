@@ -5422,8 +5422,8 @@ BEGIN
     WITH latest_snapshots AS (
         SELECT DISTINCT ON (ts.relid)
             ts.relid,
-            ts.schemaname,
-            ts.relname,
+            COALESCE(ts.schemaname, split_part(ts.relid::regclass::text, '.', 1)) AS schemaname,
+            COALESCE(ts.relname, split_part(ts.relid::regclass::text, '.', 2)) AS relname,
             ts.n_dead_tup,
             ts.reltuples,
             ts.n_live_tup
