@@ -114,8 +114,8 @@ CREATE TABLE IF NOT EXISTS flight_recorder.statement_snapshots (
 -- Table-level statistics
 CREATE TABLE IF NOT EXISTS flight_recorder.table_snapshots (
     snapshot_id         INTEGER REFERENCES flight_recorder.snapshots(id) ON DELETE CASCADE,
-    schemaname          TEXT NOT NULL,
-    relname             TEXT NOT NULL,
+    schemaname          TEXT,             -- DEPRECATED: derive via relid or relation_names
+    relname             TEXT,             -- DEPRECATED: derive via relid or relation_names
     relid               OID NOT NULL,
     seq_scan            BIGINT,
     seq_tup_read        BIGINT,
@@ -147,9 +147,9 @@ CREATE INDEX IF NOT EXISTS table_snapshots_relid_idx ON flight_recorder.table_sn
 -- Index-level statistics
 CREATE TABLE IF NOT EXISTS flight_recorder.index_snapshots (
     snapshot_id         INTEGER REFERENCES flight_recorder.snapshots(id) ON DELETE CASCADE,
-    schemaname          TEXT NOT NULL,
-    relname             TEXT NOT NULL,
-    indexrelname        TEXT NOT NULL,
+    schemaname          TEXT,             -- DEPRECATED: derive via relid or relation_names
+    relname             TEXT,             -- DEPRECATED: derive via relid or relation_names
+    indexrelname        TEXT,             -- DEPRECATED: derive via indexrelid or relation_names
     relid               OID NOT NULL,
     indexrelid          OID NOT NULL,
     idx_scan            BIGINT,
@@ -1074,8 +1074,8 @@ BEGIN
 
     RETURN QUERY
     SELECT
-        e.schemaname,
-        e.relname,
+        COALESCE(e.schemaname, split_part(flight_recorder._safe_relname(e.relid), '.', 1)) AS schemaname,
+        COALESCE(e.relname, split_part(flight_recorder._safe_relname(e.relid), '.', 2)) AS relname,
         COALESCE(e.seq_scan - s.seq_scan, e.seq_scan) AS seq_scan_delta,
         COALESCE(e.idx_scan - s.idx_scan, e.idx_scan) AS idx_scan_delta,
         COALESCE(e.n_tup_ins - s.n_tup_ins, e.n_tup_ins) AS n_tup_ins_delta,
@@ -1111,9 +1111,9 @@ LANGUAGE plpgsql STABLE AS $$
 BEGIN
     RETURN QUERY
     SELECT DISTINCT ON (i.indexrelid)
-        i.schemaname,
-        i.relname,
-        i.indexrelname,
+        COALESCE(i.schemaname, split_part(flight_recorder._safe_relname(i.relid), '.', 1)) AS schemaname,
+        COALESCE(i.relname, split_part(flight_recorder._safe_relname(i.relid), '.', 2)) AS relname,
+        COALESCE(i.indexrelname, split_part(flight_recorder._safe_relname(i.indexrelid), '.', 2)) AS indexrelname,
         i.idx_scan,
         flight_recorder._pretty_bytes(i.index_size_bytes) AS index_size
     FROM flight_recorder.index_snapshots i
@@ -1121,7 +1121,7 @@ BEGIN
     WHERE s.captured_at > now() - p_lookback
       AND i.idx_scan = 0
       AND i.index_size_bytes >= p_min_size_bytes
-      AND i.indexrelname NOT LIKE '%_pkey'
+      AND COALESCE(i.indexrelname, flight_recorder._safe_relname(i.indexrelid)) NOT LIKE '%_pkey'
     ORDER BY i.indexrelid, i.index_size_bytes DESC;
 END;
 $$;
