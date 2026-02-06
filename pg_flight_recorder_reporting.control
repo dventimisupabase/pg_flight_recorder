@@ -1,4 +1,3 @@
 comment = 'Reporting and analysis functions for pg_flight_recorder'
 default_version = '0.0.0'
 relocatable = false
-requires = 'pg_flight_recorder'
