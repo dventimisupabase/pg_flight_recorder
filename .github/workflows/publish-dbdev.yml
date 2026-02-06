@@ -60,6 +60,16 @@ jobs:
           cp pg_flight_recorder_reporting.control pkg_reporting/
           sed -i "s/^default_version = .*/default_version = '${VER}'/" pkg_reporting/pg_flight_recorder_reporting.control
 
+          # dbdev requires a README.md in the package directory
+          cat > pkg_reporting/README.md <<'READMEEOF'
+          # pg_flight_recorder_reporting
+
+          Reporting and analysis functions for [pg_flight_recorder](https://database.dev/dventimi/pg_flight_recorder).
+
+          Requires `pg_flight_recorder` core to be installed first.
+          READMEEOF
+          sed -i 's/^ *//' pkg_reporting/README.md
+
           # Safety: verify dbdev size limit
           SIZE=$(wc -c < "pkg_reporting/pg_flight_recorder_reporting--${VER}.sql")
           echo "Reporting package size: ${SIZE} chars"
