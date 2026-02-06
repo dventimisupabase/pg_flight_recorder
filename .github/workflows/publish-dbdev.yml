@@ -95,7 +95,7 @@ jobs:
       - name: Publish core package
         run: |
           # Hide reporting control file so dbdev sees only the core one
-          mv pg_flight_recorder_reporting.control pkg_reporting/
+          rm pg_flight_recorder_reporting.control
           dbdev publish
 
       - name: Publish reporting package
