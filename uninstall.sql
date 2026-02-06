@@ -123,28 +123,51 @@ DROP FUNCTION IF EXISTS flight_recorder.apply_profile(TEXT) CASCADE;
 DROP FUNCTION IF EXISTS flight_recorder.list_profiles() CASCADE;
 DROP FUNCTION IF EXISTS flight_recorder.config_recommendations() CASCADE;
 
--- Analysis functions
+-- Analysis functions (from install.sql core)
 DROP FUNCTION IF EXISTS flight_recorder.compare(TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ) CASCADE;
 DROP FUNCTION IF EXISTS flight_recorder.wait_summary(TIMESTAMPTZ, TIMESTAMPTZ) CASCADE;
-DROP FUNCTION IF EXISTS flight_recorder.table_hotspots(TIMESTAMPTZ, TIMESTAMPTZ) CASCADE;
-DROP FUNCTION IF EXISTS flight_recorder.table_compare(TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ) CASCADE;
-DROP FUNCTION IF EXISTS flight_recorder.index_efficiency(TIMESTAMPTZ, TIMESTAMPTZ) CASCADE;
-DROP FUNCTION IF EXISTS flight_recorder.config_changes(TIMESTAMPTZ, TIMESTAMPTZ) CASCADE;
-DROP FUNCTION IF EXISTS flight_recorder.db_role_config_changes(TIMESTAMPTZ, TIMESTAMPTZ) CASCADE;
-DROP FUNCTION IF EXISTS flight_recorder.anomaly_report(TIMESTAMPTZ, TIMESTAMPTZ) CASCADE;
-DROP FUNCTION IF EXISTS flight_recorder.report(TIMESTAMPTZ, TIMESTAMPTZ) CASCADE;
-DROP FUNCTION IF EXISTS flight_recorder.report(INTERVAL) CASCADE;
 DROP FUNCTION IF EXISTS flight_recorder.export_for_upgrade() CASCADE;
 DROP FUNCTION IF EXISTS flight_recorder.health_check() CASCADE;
 
--- Capacity planning functions
-DROP FUNCTION IF EXISTS flight_recorder.capacity_status() CASCADE;
-DROP FUNCTION IF EXISTS flight_recorder.growth_analysis(TEXT, INTEGER) CASCADE;
-DROP FUNCTION IF EXISTS flight_recorder.forecast(TEXT, INTEGER) CASCADE;
-
--- Statement analysis functions
-DROP FUNCTION IF EXISTS flight_recorder.statement_trends(TIMESTAMPTZ, TIMESTAMPTZ, INTEGER) CASCADE;
-DROP FUNCTION IF EXISTS flight_recorder.top_queries(TIMESTAMPTZ, TIMESTAMPTZ, TEXT, INTEGER) CASCADE;
+-- Reporting functions (from reporting.sql, may or may not be installed)
+DROP FUNCTION IF EXISTS flight_recorder.dead_tuple_growth_rate(OID, INTERVAL) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.table_size_growth_rate(OID, INTERVAL) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.estimate_table_bloat(OID) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.bloat_report(INTERVAL) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.modification_rate(OID, INTERVAL) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.hot_update_ratio(OID) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.time_to_budget_exhaustion(OID, BIGINT) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.oid_consumption_rate(INTERVAL) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.time_to_oid_exhaustion() CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.anomaly_report(TIMESTAMPTZ, TIMESTAMPTZ) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.summary_report(TIMESTAMPTZ, TIMESTAMPTZ) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.detect_query_storms(INTERVAL, NUMERIC) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder._diagnose_regression_causes(BIGINT) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.detect_regressions(INTERVAL, NUMERIC) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.performance_report(INTERVAL) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.check_alerts(INTERVAL) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.report(TIMESTAMPTZ, TIMESTAMPTZ) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.report(INTERVAL) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.preflight_check() CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.preflight_check_with_summary() CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.quarterly_review() CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.quarterly_review_with_summary() CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.capacity_summary(INTERVAL) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.capacity_report(INTERVAL) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.table_compare(TIMESTAMPTZ, TIMESTAMPTZ, INTEGER) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.table_hotspots(TIMESTAMPTZ, TIMESTAMPTZ) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.unused_indexes(INTERVAL) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.index_efficiency(TIMESTAMPTZ, TIMESTAMPTZ, INTEGER) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.config_changes(TIMESTAMPTZ, TIMESTAMPTZ) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.config_at(TIMESTAMPTZ, TEXT) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.config_health_check() CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.db_role_config_at(TIMESTAMPTZ, TEXT, TEXT, TEXT) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.db_role_config_changes(TIMESTAMPTZ, TIMESTAMPTZ) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.db_role_config_summary() CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.what_happened_at(TIMESTAMPTZ, INTERVAL) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.incident_timeline(TIMESTAMPTZ, TIMESTAMPTZ) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.blast_radius(TIMESTAMPTZ, TIMESTAMPTZ) CASCADE;
+DROP FUNCTION IF EXISTS flight_recorder.blast_radius_report(TIMESTAMPTZ, TIMESTAMPTZ) CASCADE;
 
 DO $$
 BEGIN

@@ -56,6 +56,9 @@ run_single_version() {
     echo "Installing pg-flight-recorder..."
     $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres -f /install.sql > /dev/null
 
+    echo "Installing reporting functions..."
+    $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres -f /reporting.sql > /dev/null
+
     echo "Installing pgTAP extension..."
     $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pgtap;" > /dev/null
 
@@ -105,6 +108,7 @@ run_all_parallel() {
         (
             $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_cron;" > /dev/null
             $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -f /install.sql > /dev/null
+            $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -f /reporting.sql > /dev/null
             $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pgtap;" > /dev/null
             $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -c "SELECT flight_recorder.disable();" > /dev/null
         ) &

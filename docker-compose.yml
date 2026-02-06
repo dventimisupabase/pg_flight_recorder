@@ -16,6 +16,7 @@ services:
     volumes:
       - postgres15_data:/var/lib/postgresql/data
       - ./install.sql:/install.sql:ro
+      - ./reporting.sql:/reporting.sql:ro
       - ./tests:/tests:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
@@ -40,6 +41,7 @@ services:
     volumes:
       - postgres16_data:/var/lib/postgresql/data
       - ./install.sql:/install.sql:ro
+      - ./reporting.sql:/reporting.sql:ro
       - ./tests:/tests:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
@@ -64,6 +66,7 @@ services:
     volumes:
       - postgres17_data:/var/lib/postgresql/data
       - ./install.sql:/install.sql:ro
+      - ./reporting.sql:/reporting.sql:ro
       - ./tests:/tests:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
