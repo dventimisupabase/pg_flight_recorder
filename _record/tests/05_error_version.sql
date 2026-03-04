@@ -480,8 +480,8 @@ SELECT lives_ok(
 
 -- Test _pg_version() returns 15, 16, or 17
 SELECT ok(
-    pgfr_record._pg_version() IN (15, 16, 17),
-    'Phase 4: _pg_version() should return 15, 16, or 17'
+    pgfr_record._pg_version() IN (15, 16, 17, 18),
+    'Phase 4: _pg_version() should return 15, 16, 17, or 18'
 );
 
 -- Test version is stored in snapshots table
@@ -496,8 +496,8 @@ BEGIN
     -- Check if snapshot was actually created (not skipped)
     IF (SELECT COUNT(*) FROM pgfr_record.snapshots) > v_snapshot_count THEN
         SELECT pg_version INTO v_pg_version FROM pgfr_record.snapshots ORDER BY id DESC LIMIT 1;
-        IF v_pg_version IS NULL OR v_pg_version NOT IN (15, 16, 17) THEN
-            RAISE EXCEPTION 'Phase 4: snapshot() should store pg_version in (15, 16, 17)';
+        IF v_pg_version IS NULL OR v_pg_version NOT IN (15, 16, 17, 18) THEN
+            RAISE EXCEPTION 'Phase 4: snapshot() should store pg_version in (15, 16, 17, 18)';
         END IF;
     END IF;
 END $$;
@@ -1022,7 +1022,7 @@ DECLARE
 BEGIN
     v_pg_version := pgfr_record._pg_version();
 
-    IF v_pg_version = 17 THEN
+    IF v_pg_version >= 17 THEN
         PERFORM pgfr_record.snapshot();
 
         SELECT ckpt_timed INTO v_ckpt_timed
@@ -1044,7 +1044,7 @@ DECLARE
 BEGIN
     v_pg_version := pgfr_record._pg_version();
 
-    IF v_pg_version = 17 THEN
+    IF v_pg_version >= 17 THEN
         PERFORM pgfr_record.snapshot();
 
         SELECT checkpoint_lsn INTO v_ckpt_lsn
@@ -1067,7 +1067,7 @@ DECLARE
 BEGIN
     v_pg_version := pgfr_record._pg_version();
 
-    IF v_pg_version = 17 THEN
+    IF v_pg_version >= 17 THEN
         PERFORM pgfr_record.snapshot();
 
         SELECT ckpt_timed, ckpt_requested INTO v_ckpt_timed, v_ckpt_req
@@ -1089,7 +1089,7 @@ DECLARE
 BEGIN
     v_pg_version := pgfr_record._pg_version();
 
-    IF v_pg_version = 17 THEN
+    IF v_pg_version >= 17 THEN
         PERFORM pgfr_record.snapshot();
 
         SELECT io_checkpointer_writes INTO v_io_writes
@@ -1112,7 +1112,7 @@ DECLARE
 BEGIN
     v_pg_version := pgfr_record._pg_version();
 
-    IF v_pg_version = 17 THEN
+    IF v_pg_version >= 17 THEN
         SELECT id INTO v_start_id FROM pgfr_record.snapshots ORDER BY id DESC LIMIT 1;
         PERFORM pg_sleep(0.1);
         PERFORM pgfr_record.snapshot();
@@ -1135,7 +1135,7 @@ DECLARE
 BEGIN
     v_pg_version := pgfr_record._pg_version();
 
-    IF v_pg_version = 17 THEN
+    IF v_pg_version >= 17 THEN
         -- Verify expected checkpoint columns exist
         SELECT EXISTS (
             SELECT 1 FROM information_schema.columns
@@ -1160,7 +1160,7 @@ DECLARE
 BEGIN
     v_pg_version := pgfr_record._pg_version();
 
-    IF v_pg_version = 17 THEN
+    IF v_pg_version >= 17 THEN
         PERFORM pgfr_record.snapshot();
         PERFORM pg_sleep(0.1);
         PERFORM pgfr_record.snapshot();
@@ -1183,7 +1183,7 @@ DECLARE
 BEGIN
     v_pg_version := pgfr_record._pg_version();
 
-    IF v_pg_version = 17 THEN
+    IF v_pg_version >= 17 THEN
         -- pg_control_checkpoint() should be available in PG17
         SELECT checkpoint_lsn INTO v_checkpoint_lsn
         FROM pg_control_checkpoint();
@@ -1204,7 +1204,7 @@ DECLARE
 BEGIN
     v_pg_version := pgfr_record._pg_version();
 
-    IF v_pg_version = 17 THEN
+    IF v_pg_version >= 17 THEN
         -- Verify pg_stat_bgwriter still exists in PG17
         SELECT EXISTS (
             SELECT 1 FROM pg_views WHERE viewname = 'pg_stat_bgwriter'
@@ -1228,7 +1228,7 @@ DECLARE
 BEGIN
     v_pg_version := pgfr_record._pg_version();
 
-    IF v_pg_version = 17 THEN
+    IF v_pg_version >= 17 THEN
         PERFORM pgfr_record.snapshot();
         PERFORM pg_sleep(0.1);
         PERFORM pgfr_record.snapshot();

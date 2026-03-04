@@ -2905,7 +2905,63 @@ BEGIN
     EXCEPTION WHEN OTHERS THEN
         RAISE WARNING 'pgfr_record: Database conflict stats collection failed: %', SQLERRM;
     END;
-    IF v_pg_version = 17 THEN
+    IF v_pg_version >= 18 THEN
+        INSERT INTO pgfr_record.snapshots (
+            captured_at, pg_version,
+            wal_records, wal_fpi, wal_bytes, wal_write_time, wal_sync_time,
+            checkpoint_lsn, checkpoint_time,
+            ckpt_timed, ckpt_requested, ckpt_write_time, ckpt_sync_time, ckpt_buffers,
+            bgw_buffers_clean, bgw_maxwritten_clean, bgw_buffers_alloc,
+            bgw_buffers_backend, bgw_buffers_backend_fsync,
+            autovacuum_workers, slots_count, slots_max_retained_wal,
+            io_checkpointer_reads, io_checkpointer_read_time,
+            io_checkpointer_writes, io_checkpointer_write_time, io_checkpointer_fsyncs, io_checkpointer_fsync_time,
+            io_autovacuum_reads, io_autovacuum_read_time,
+            io_autovacuum_writes, io_autovacuum_write_time,
+            io_client_reads, io_client_read_time,
+            io_client_writes, io_client_write_time,
+            io_bgwriter_reads, io_bgwriter_read_time,
+            io_bgwriter_writes, io_bgwriter_write_time,
+            temp_files, temp_bytes,
+            xact_commit, xact_rollback, blks_read, blks_hit,
+            connections_active, connections_total, connections_max,
+            db_size_bytes, datfrozenxid_age,
+            archived_count, last_archived_wal, last_archived_time,
+            failed_count, last_failed_wal, last_failed_time, archiver_stats_reset,
+            confl_tablespace, confl_lock, confl_snapshot, confl_bufferpin, confl_deadlock, confl_active_logicalslot,
+            max_catalog_oid, large_object_count
+        )
+        SELECT
+            v_captured_at, v_pg_version,
+            -- pg18: pg_stat_wal dropped wal_write_time and wal_sync_time; store null
+            w.wal_records, w.wal_fpi, w.wal_bytes::bigint, NULL, NULL,
+            v_checkpoint_info.redo_lsn,
+            v_checkpoint_info.checkpoint_time,
+            c.num_timed, c.num_requested, c.write_time, c.sync_time, c.buffers_written,
+            b.buffers_clean, b.maxwritten_clean, b.buffers_alloc,
+            NULL, NULL,
+            v_autovacuum_workers, v_slots_count, v_slots_max_retained,
+            v_io_ckpt_reads, v_io_ckpt_read_time,
+            v_io_ckpt_writes, v_io_ckpt_write_time, v_io_ckpt_fsyncs, v_io_ckpt_fsync_time,
+            v_io_av_reads, v_io_av_read_time,
+            v_io_av_writes, v_io_av_write_time,
+            v_io_client_reads, v_io_client_read_time,
+            v_io_client_writes, v_io_client_write_time,
+            v_io_bgw_reads, v_io_bgw_read_time,
+            v_io_bgw_writes, v_io_bgw_write_time,
+            v_temp_files, v_temp_bytes,
+            v_xact_commit, v_xact_rollback, v_blks_read, v_blks_hit,
+            v_connections_active, v_connections_total, v_connections_max,
+            v_db_size_bytes, v_datfrozenxid_age,
+            v_archived_count, v_last_archived_wal, v_last_archived_time,
+            v_failed_count, v_last_failed_wal, v_last_failed_time, v_archiver_stats_reset,
+            v_confl_tablespace, v_confl_lock, v_confl_snapshot, v_confl_bufferpin, v_confl_deadlock, v_confl_active_logicalslot,
+            v_max_catalog_oid, v_large_object_count
+        FROM pg_stat_wal w
+        CROSS JOIN pg_stat_checkpointer c
+        CROSS JOIN pg_stat_bgwriter b
+        RETURNING id INTO v_snapshot_id;
+    ELSIF v_pg_version = 17 THEN
         INSERT INTO pgfr_record.snapshots (
             captured_at, pg_version,
             wal_records, wal_fpi, wal_bytes, wal_write_time, wal_sync_time,
@@ -3053,7 +3109,7 @@ BEGIN
         CROSS JOIN pg_stat_bgwriter b
         RETURNING id INTO v_snapshot_id;
     ELSE
-        RAISE EXCEPTION 'Unsupported PostgreSQL version: %. Requires 15, 16, or 17.', v_pg_version;
+        RAISE EXCEPTION 'Unsupported PostgreSQL version: %. Requires 15, 16, 17, or 18.', v_pg_version;
     END IF;
     PERFORM pgfr_record._record_section_success(v_stat_id);
     BEGIN
@@ -3140,93 +3196,79 @@ BEGIN
                     IF v_stmt_status = 'HIGH_CHURN' THEN
                         RAISE WARNING 'pgfr_record: Skipping pg_stat_statements collection - high churn detected (>95%% utilization)';
                     ELSE
-                WITH current_stmts AS (
+                -- pg18 renamed blk_read_time -> shared_blk_read_time in pg_stat_statements.
+                -- case when cannot reference a nonexistent column even in a dead branch;
+                -- use execute with the correct column name chosen at runtime.
+                EXECUTE format(
+                    $q$
+                    WITH current_stmts AS (
+                        SELECT
+                            s.queryid, s.userid, s.dbid,
+                            left(s.query, 500) AS query_preview,
+                            s.calls, s.total_exec_time, s.min_exec_time,
+                            s.max_exec_time, s.mean_exec_time, s.rows,
+                            s.shared_blks_hit, s.shared_blks_read,
+                            s.shared_blks_dirtied, s.shared_blks_written,
+                            s.temp_blks_read, s.temp_blks_written,
+                            s.%I AS blk_read_time,
+                            s.%I AS blk_write_time,
+                            s.wal_records, s.wal_bytes
+                        FROM pg_stat_statements s
+                        WHERE s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+                          AND s.calls >= COALESCE(pgfr_record._get_config('statements_min_calls', '1')::integer, 1)
+                        ORDER BY CASE
+                            WHEN pgfr_record._get_config('statements_ranking_metric', 'buffers') = 'time'
+                            THEN s.total_exec_time
+                            ELSE s.shared_blks_hit + s.shared_blks_read + s.temp_blks_read + s.temp_blks_written
+                        END DESC
+                        LIMIT COALESCE(pgfr_record._get_config('statements_top_n', '50')::integer, 50)
+                    )
+                    INSERT INTO pgfr_record.statement_snapshots (
+                        snapshot_id, queryid, userid, dbid, query_preview,
+                        calls, total_exec_time, min_exec_time, max_exec_time,
+                        mean_exec_time, rows,
+                        shared_blks_hit, shared_blks_read, shared_blks_dirtied, shared_blks_written,
+                        temp_blks_read, temp_blks_written,
+                        blk_read_time, blk_write_time,
+                        wal_records, wal_bytes,
+                        calls_delta, total_exec_time_delta, rows_delta,
+                        shared_blks_hit_delta, shared_blks_read_delta,
+                        shared_blks_dirtied_delta, shared_blks_written_delta,
+                        temp_blks_read_delta, temp_blks_written_delta,
+                        blk_read_time_delta, blk_write_time_delta,
+                        wal_records_delta, wal_bytes_delta
+                    )
                     SELECT
-                        s.queryid,
-                        s.userid,
-                        s.dbid,
-                        left(s.query, 500) AS query_preview,
-                        s.calls,
-                        s.total_exec_time,
-                        s.min_exec_time,
-                        s.max_exec_time,
-                        s.mean_exec_time,
-                        s.rows,
-                        s.shared_blks_hit,
-                        s.shared_blks_read,
-                        s.shared_blks_dirtied,
-                        s.shared_blks_written,
-                        s.temp_blks_read,
-                        s.temp_blks_written,
-                        s.blk_read_time,
-                        s.blk_write_time,
-                        s.wal_records,
-                        s.wal_bytes
-                    FROM pg_stat_statements s
-                    WHERE s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
-                      AND s.calls >= COALESCE(pgfr_record._get_config('statements_min_calls', '1')::integer, 1)
-                    ORDER BY CASE
-                        WHEN pgfr_record._get_config('statements_ranking_metric', 'buffers') = 'time'
-                        THEN s.total_exec_time
-                        ELSE s.shared_blks_hit + s.shared_blks_read + s.temp_blks_read + s.temp_blks_written
-                    END DESC
-                    LIMIT COALESCE(pgfr_record._get_config('statements_top_n', '50')::integer, 50)
-                )
-                INSERT INTO pgfr_record.statement_snapshots (
-                    snapshot_id, queryid, userid, dbid, query_preview,
-                    calls, total_exec_time, min_exec_time, max_exec_time,
-                    mean_exec_time, rows,
-                    shared_blks_hit, shared_blks_read, shared_blks_dirtied, shared_blks_written,
-                    temp_blks_read, temp_blks_written,
-                    blk_read_time, blk_write_time,
-                    wal_records, wal_bytes,
-                    calls_delta, total_exec_time_delta, rows_delta,
-                    shared_blks_hit_delta, shared_blks_read_delta,
-                    shared_blks_dirtied_delta, shared_blks_written_delta,
-                    temp_blks_read_delta, temp_blks_written_delta,
-                    blk_read_time_delta, blk_write_time_delta,
-                    wal_records_delta, wal_bytes_delta
-                )
-                SELECT
-                    v_snapshot_id,
-                    c.queryid,
-                    c.userid,
-                    c.dbid,
-                    c.query_preview,
-                    c.calls,
-                    c.total_exec_time,
-                    c.min_exec_time,
-                    c.max_exec_time,
-                    c.mean_exec_time,
-                    c.rows,
-                    c.shared_blks_hit,
-                    c.shared_blks_read,
-                    c.shared_blks_dirtied,
-                    c.shared_blks_written,
-                    c.temp_blks_read,
-                    c.temp_blks_written,
-                    c.blk_read_time,
-                    c.blk_write_time,
-                    c.wal_records,
-                    c.wal_bytes,
-                    CASE WHEN prev.calls IS NOT NULL AND c.calls >= prev.calls THEN c.calls - prev.calls ELSE NULL END,
-                    CASE WHEN prev.total_exec_time IS NOT NULL AND c.total_exec_time >= prev.total_exec_time THEN c.total_exec_time - prev.total_exec_time ELSE NULL END,
-                    CASE WHEN prev.rows IS NOT NULL AND c.rows >= prev.rows THEN c.rows - prev.rows ELSE NULL END,
-                    CASE WHEN prev.shared_blks_hit IS NOT NULL AND c.shared_blks_hit >= prev.shared_blks_hit THEN c.shared_blks_hit - prev.shared_blks_hit ELSE NULL END,
-                    CASE WHEN prev.shared_blks_read IS NOT NULL AND c.shared_blks_read >= prev.shared_blks_read THEN c.shared_blks_read - prev.shared_blks_read ELSE NULL END,
-                    CASE WHEN prev.shared_blks_dirtied IS NOT NULL AND c.shared_blks_dirtied >= prev.shared_blks_dirtied THEN c.shared_blks_dirtied - prev.shared_blks_dirtied ELSE NULL END,
-                    CASE WHEN prev.shared_blks_written IS NOT NULL AND c.shared_blks_written >= prev.shared_blks_written THEN c.shared_blks_written - prev.shared_blks_written ELSE NULL END,
-                    CASE WHEN prev.temp_blks_read IS NOT NULL AND c.temp_blks_read >= prev.temp_blks_read THEN c.temp_blks_read - prev.temp_blks_read ELSE NULL END,
-                    CASE WHEN prev.temp_blks_written IS NOT NULL AND c.temp_blks_written >= prev.temp_blks_written THEN c.temp_blks_written - prev.temp_blks_written ELSE NULL END,
-                    CASE WHEN prev.blk_read_time IS NOT NULL AND c.blk_read_time >= prev.blk_read_time THEN c.blk_read_time - prev.blk_read_time ELSE NULL END,
-                    CASE WHEN prev.blk_write_time IS NOT NULL AND c.blk_write_time >= prev.blk_write_time THEN c.blk_write_time - prev.blk_write_time ELSE NULL END,
-                    CASE WHEN prev.wal_records IS NOT NULL AND c.wal_records >= prev.wal_records THEN c.wal_records - prev.wal_records ELSE NULL END,
-                    CASE WHEN prev.wal_bytes IS NOT NULL AND c.wal_bytes >= prev.wal_bytes THEN c.wal_bytes - prev.wal_bytes ELSE NULL END
-                FROM current_stmts c
-                LEFT JOIN pgfr_record.statement_snapshots prev
-                    ON prev.snapshot_id = v_prev_snapshot_id
-                   AND prev.queryid = c.queryid
-                   AND prev.dbid = c.dbid;
+                        $1, c.queryid, c.userid, c.dbid, c.query_preview,
+                        c.calls, c.total_exec_time, c.min_exec_time,
+                        c.max_exec_time, c.mean_exec_time, c.rows,
+                        c.shared_blks_hit, c.shared_blks_read,
+                        c.shared_blks_dirtied, c.shared_blks_written,
+                        c.temp_blks_read, c.temp_blks_written,
+                        c.blk_read_time, c.blk_write_time,
+                        c.wal_records, c.wal_bytes,
+                        CASE WHEN prev.calls IS NOT NULL AND c.calls >= prev.calls THEN c.calls - prev.calls ELSE NULL END,
+                        CASE WHEN prev.total_exec_time IS NOT NULL AND c.total_exec_time >= prev.total_exec_time THEN c.total_exec_time - prev.total_exec_time ELSE NULL END,
+                        CASE WHEN prev.rows IS NOT NULL AND c.rows >= prev.rows THEN c.rows - prev.rows ELSE NULL END,
+                        CASE WHEN prev.shared_blks_hit IS NOT NULL AND c.shared_blks_hit >= prev.shared_blks_hit THEN c.shared_blks_hit - prev.shared_blks_hit ELSE NULL END,
+                        CASE WHEN prev.shared_blks_read IS NOT NULL AND c.shared_blks_read >= prev.shared_blks_read THEN c.shared_blks_read - prev.shared_blks_read ELSE NULL END,
+                        CASE WHEN prev.shared_blks_dirtied IS NOT NULL AND c.shared_blks_dirtied >= prev.shared_blks_dirtied THEN c.shared_blks_dirtied - prev.shared_blks_dirtied ELSE NULL END,
+                        CASE WHEN prev.shared_blks_written IS NOT NULL AND c.shared_blks_written >= prev.shared_blks_written THEN c.shared_blks_written - prev.shared_blks_written ELSE NULL END,
+                        CASE WHEN prev.temp_blks_read IS NOT NULL AND c.temp_blks_read >= prev.temp_blks_read THEN c.temp_blks_read - prev.temp_blks_read ELSE NULL END,
+                        CASE WHEN prev.temp_blks_written IS NOT NULL AND c.temp_blks_written >= prev.temp_blks_written THEN c.temp_blks_written - prev.temp_blks_written ELSE NULL END,
+                        CASE WHEN prev.blk_read_time IS NOT NULL AND c.blk_read_time >= prev.blk_read_time THEN c.blk_read_time - prev.blk_read_time ELSE NULL END,
+                        CASE WHEN prev.blk_write_time IS NOT NULL AND c.blk_write_time >= prev.blk_write_time THEN c.blk_write_time - prev.blk_write_time ELSE NULL END,
+                        CASE WHEN prev.wal_records IS NOT NULL AND c.wal_records >= prev.wal_records THEN c.wal_records - prev.wal_records ELSE NULL END,
+                        CASE WHEN prev.wal_bytes IS NOT NULL AND c.wal_bytes >= prev.wal_bytes THEN c.wal_bytes - prev.wal_bytes ELSE NULL END
+                    FROM current_stmts c
+                    LEFT JOIN pgfr_record.statement_snapshots prev
+                        ON prev.snapshot_id = $2
+                       AND prev.queryid = c.queryid
+                       AND prev.dbid = c.dbid
+                    $q$,
+                    CASE WHEN v_pg_version >= 18 THEN 'shared_blk_read_time'  ELSE 'blk_read_time'  END,
+                    CASE WHEN v_pg_version >= 18 THEN 'shared_blk_write_time' ELSE 'blk_write_time' END
+                ) USING v_snapshot_id, v_prev_snapshot_id;
                     PERFORM pgfr_record._record_section_success(v_stat_id);
                     END IF;
                 END IF;
@@ -3335,12 +3377,14 @@ BEGIN
         raise warning 'pgfr_record: _ensure_partition(statement_snapshots_v2) failed [%]: %', sqlstate, sqlerrm;
     end;
     begin
-        perform pgfr_record._ensure_partition('table_snapshots_v2', current_date);
+        perform pgfr_record._ensure_partition('table_snapshots_v2', current_date,
+            'relid, dbid, sample_ts desc');
     exception when others then
         raise warning 'pgfr_record: _ensure_partition(table_snapshots_v2) failed [%]: %', sqlstate, sqlerrm;
     end;
     begin
-        perform pgfr_record._ensure_partition('index_snapshots_v2', current_date);
+        perform pgfr_record._ensure_partition('index_snapshots_v2', current_date,
+            'indexrelid, dbid, sample_ts desc');
     exception when others then
         raise warning 'pgfr_record: _ensure_partition(index_snapshots_v2) failed [%]: %', sqlstate, sqlerrm;
     end;
@@ -5394,6 +5438,7 @@ returns void
 language plpgsql as $$
 declare
     v_sample_ts         INT4;
+    v_pg_version        INTEGER;
     v_pgss_reset        TIMESTAMPTZ;
     v_last_sample_ts    INT4;
     v_last_dealloc      bigint;
@@ -5408,7 +5453,8 @@ begin
     -- Ensure partition exists for today (O(1) on happy path)
     perform pgfr_record._ensure_partition('statement_snapshots_v2', CURRENT_DATE);
 
-    v_sample_ts := extract(EPOCH from now() - pgfr_record.epoch())::INT4;
+    v_sample_ts   := extract(EPOCH from now() - pgfr_record.epoch())::INT4;
+    v_pg_version  := pgfr_record._pg_version();
 
     -- -----------------------------------------------------------------------
     -- PGSS collection section — wrapped in BEGIN/EXCEPTION so failure here
@@ -5503,64 +5549,43 @@ begin
         --         Insert condition: new queryid OR calls increased OR calls dropped
         --         (calls drop = pg_stat_statements_reset() partial/full reset)
         -- -------------------------------------------------------------------
-        insert into pgfr_record.statement_snapshots_v2 (
-            snapshot_id,
-            sample_ts,
-            queryid,
-            userid,
-            dbid,
-            toplevel,
-            query_preview,
-            calls,
-            total_exec_time,
-            min_exec_time,
-            max_exec_time,
-            mean_exec_time,
-            rows,
-            shared_blks_hit,
-            shared_blks_read,
-            shared_blks_dirtied,
-            shared_blks_written,
-            temp_blks_read,
-            temp_blks_written,
-            blk_read_time,
-            blk_write_time,
-            wal_records,
-            wal_bytes,
-            pgss_dealloc_warning
-        )
-        select
-            p_snapshot_id,
-            v_sample_ts,
-            pss.queryid,
-            pss.userid,
-            pss.dbid,
-            pss.toplevel,
-            left(pss.query, 500),
-            pss.calls,
-            pss.total_exec_time,
-            pss.min_exec_time,
-            pss.max_exec_time,
-            pss.mean_exec_time,
-            pss.rows,
-            pss.shared_blks_hit,
-            pss.shared_blks_read,
-            pss.shared_blks_dirtied,
-            pss.shared_blks_written,
-            pss.temp_blks_read,
-            pss.temp_blks_written,
-            pss.blk_read_time,
-            pss.blk_write_time,
-            pss.wal_records,
-            pss.wal_bytes,
-            v_dealloc_warning
-        from pg_stat_statements pss
-        left join pgfr_record.statement_last_state ls
-            using (queryid, dbid, userid, toplevel)
-        where
-            ls.queryid is null          -- first appearance (new queryid or post-rebuild baseline)
-            or pss.calls > ls.calls     -- query was called since last tick
-            or pss.calls < ls.calls;    -- calls dropped: pg_stat_statements_reset() occurred
+        -- pg18 renamed blk_read_time -> shared_blk_read_time in pg_stat_statements.
+        -- case when cannot reference a nonexistent column even in a dead branch,
+        -- so use execute with the correct column name chosen at runtime.
+        execute format(
+            $q$
+            insert into pgfr_record.statement_snapshots_v2 (
+                snapshot_id, sample_ts, queryid, userid, dbid, toplevel,
+                query_preview, calls, total_exec_time, min_exec_time,
+                max_exec_time, mean_exec_time, rows,
+                shared_blks_hit, shared_blks_read, shared_blks_dirtied,
+                shared_blks_written, temp_blks_read, temp_blks_written,
+                blk_read_time, blk_write_time,
+                wal_records, wal_bytes, pgss_dealloc_warning
+            )
+            select
+                $1, $2,
+                pss.queryid, pss.userid, pss.dbid, pss.toplevel,
+                left(pss.query, 500),
+                pss.calls, pss.total_exec_time, pss.min_exec_time,
+                pss.max_exec_time, pss.mean_exec_time, pss.rows,
+                pss.shared_blks_hit, pss.shared_blks_read,
+                pss.shared_blks_dirtied, pss.shared_blks_written,
+                pss.temp_blks_read, pss.temp_blks_written,
+                pss.%I, pss.%I,
+                pss.wal_records, pss.wal_bytes,
+                $3
+            from pg_stat_statements pss
+            left join pgfr_record.statement_last_state ls
+                using (queryid, dbid, userid, toplevel)
+            where
+                ls.queryid is null
+                or pss.calls > ls.calls
+                or pss.calls < ls.calls
+            $q$,
+            case when v_pg_version >= 18 then 'shared_blk_read_time'  else 'blk_read_time'  end,
+            case when v_pg_version >= 18 then 'shared_blk_write_time' else 'blk_write_time' end
+        ) using p_snapshot_id, v_sample_ts, v_dealloc_warning;
 
         get diagnostics v_rows_inserted = ROW_COUNT;
 
