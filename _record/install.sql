@@ -6159,3 +6159,569 @@ comment on function pgfr_record._ensure_partition(text, date, text) is
 'SECURITY: p_btree_cols is injected via %s (not %I) — must only be called with '
 'compile-time string literals, never from user input or config values. '
 'Otherwise identical to _ensure_partition(text, date). See Issue #8.';
+
+--------------------------------------------------------------------------------
+-- RING BUFFER v2: N-partition TRUNCATE-based rotation
+-- Follows pg_ash design (ash-install.sql). Replaces the UPDATE-based ring buffer
+-- (samples_ring / wait_samples_ring / lock_samples_ring) with a LOGGED, partitioned,
+-- INSERT-only design. Dual operation during migration — legacy tables preserved.
+--
+-- Key differences from pg_ash:
+--   - N configurable partitions (default 3, min 3) vs hardcoded 3
+--   - Separate wait_samples and lock_samples tables (not a single ash.sample)
+--   - pgfr_record namespace, snake_case identifiers throughout
+--------------------------------------------------------------------------------
+
+-- 1. New config entries (ring_buffer_partitions, ring_rotation_period)
+insert into pgfr_record.config (key, value) values
+    ('ring_buffer_partitions', '3'),
+    ('ring_rotation_period',   '2 hours')
+on conflict (key) do nothing;
+
+comment on table pgfr_record.config is
+'Key-value configuration store for pgfr_record. '
+'ring_buffer_partitions: number of ring buffer partitions (min 3, default 3). '
+'ring_rotation_period: how often to rotate ring partitions (default 2 hours).';
+
+-- 2. Ring config singleton — num_slots and rotation_period set from config at install time
+create table if not exists pgfr_record.ring_config (
+    singleton       bool primary key default true check (singleton),
+    current_slot    smallint  not null default 0,
+    num_slots       smallint  not null default 3,
+    rotation_period interval  not null default '2 hours',
+    rotated_at      timestamptz not null default clock_timestamp()
+);
+
+comment on table pgfr_record.ring_config is
+'Ring buffer rotation state singleton. '
+'current_slot: partition currently being written (0..num_slots-1). '
+'num_slots: number of partitions, set at install time from ring_buffer_partitions config. '
+'rotation_period: how often to advance the slot. '
+'rotated_at: timestamp of last rotation.';
+
+insert into pgfr_record.ring_config (singleton, num_slots, rotation_period)
+select
+    true,
+    greatest(3, coalesce(pgfr_record._get_config('ring_buffer_partitions', '3')::smallint, 3)),
+    coalesce(pgfr_record._get_config('ring_rotation_period', '2 hours')::interval, '2 hours')
+on conflict do nothing;
+
+-- 3. Wait event dictionary — shared singleton, never truncated
+-- Maps (state, type, event) → compact smallint id.
+-- Bounded by the number of distinct PG wait events (~600 max).
+create table if not exists pgfr_record.wait_event_map (
+    id    smallint primary key generated always as identity (start with 1),
+    state text not null,
+    type  text not null,
+    event text not null,
+    unique (state, type, event)
+);
+
+comment on table pgfr_record.wait_event_map is
+'Wait event dictionary: maps (state, type, event) → smallint id. '
+'Shared singleton — never truncated. Max ~600 entries (bounded by PG wait events). '
+'Used to compress wait event data in the encoded integer[] arrays of wait_samples.';
+
+-- 4. Dynamic partition creation for wait_samples, lock_samples, query_map_N
+do $$
+declare
+    v_n smallint;
+    i   smallint;
+begin
+    select num_slots into v_n from pgfr_record.ring_config where singleton;
+
+    -- wait_samples parent: LOGGED, partitioned by LIST(slot)
+    -- Stores encoded integer[] per-database wait event snapshots.
+    -- Encoding: [-wait_id, count, qid, qid, ..., -next_wait_id, count, ...]
+    execute $t$
+        create table if not exists pgfr_record.wait_samples (
+            sample_ts    int4     not null,
+            datid        oid      not null,
+            active_count smallint not null,
+            data         integer[] not null
+                         check (data[1] < 0 and array_length(data, 1) >= 3),
+            slot         smallint not null
+        ) partition by list (slot)
+    $t$;
+
+    -- lock_samples parent: LOGGED, partitioned by LIST(slot)
+    execute $t$
+        create table if not exists pgfr_record.lock_samples (
+            sample_ts           int4     not null,
+            blocked_pid         int4     not null,
+            blocked_qid         int4,
+            blocked_duration_s  int4,
+            blocking_pid        int4     not null,
+            blocking_qid        int4,
+            lock_type           smallint not null,
+            locked_relation_oid oid,
+            slot                smallint not null
+        ) partition by list (slot)
+    $t$;
+
+    -- create N partitions + query_maps
+    for i in 0..(v_n - 1) loop
+        -- wait_samples_N
+        execute format(
+            'create table if not exists pgfr_record.wait_samples_%s '
+            'partition of pgfr_record.wait_samples for values in (%s)',
+            i, i
+        );
+        execute format(
+            'create index if not exists wait_samples_%s_ts_idx '
+            'on pgfr_record.wait_samples_%s (sample_ts)',
+            i, i
+        );
+
+        -- lock_samples_N
+        execute format(
+            'create table if not exists pgfr_record.lock_samples_%s '
+            'partition of pgfr_record.lock_samples for values in (%s)',
+            i, i
+        );
+        execute format(
+            'create index if not exists lock_samples_%s_ts_idx '
+            'on pgfr_record.lock_samples_%s (sample_ts)',
+            i, i
+        );
+
+        -- query_map_N: per-partition query_id dictionary, TRUNCATE with partition on rotation
+        execute format(
+            'create table if not exists pgfr_record.query_map_%s ('
+            '    id       int4 primary key generated always as identity (start with 1),'
+            '    query_id int8 not null unique'
+            ')',
+            i
+        );
+    end loop;
+end;
+$$;
+
+comment on table pgfr_record.wait_samples is
+'Ring buffer v2: encoded wait event samples. One row per (database, wait group) per tick. '
+'data integer[] encoding: [-wait_id, count, query_map_id, ...] groups, repeated per wait event. '
+'Partitioned by LIST(slot); TRUNCATE replaces old slot on rotation. Never DELETEd.';
+
+comment on table pgfr_record.lock_samples is
+'Ring buffer v2: lock contention samples. One row per blocked/blocking pair per tick. '
+'Partitioned by LIST(slot); TRUNCATE replaces old slot on rotation.';
+
+-- 5. query_map_all view — union of all N per-partition query dictionaries
+-- Must be created after the DO block (N is dynamic).
+-- Recreate on each install to pick up num_slots changes.
+do $$
+declare
+    v_n     smallint;
+    v_parts text[] := array[]::text[];
+    i       smallint;
+    v_sql   text;
+begin
+    select num_slots into v_n from pgfr_record.ring_config where singleton;
+    for i in 0..(v_n - 1) loop
+        v_parts := v_parts || format(
+            'select %s::smallint as slot, id, query_id from pgfr_record.query_map_%s',
+            i, i
+        );
+    end loop;
+    v_sql := 'create or replace view pgfr_record.query_map_all as '
+             || array_to_string(v_parts, ' union all ');
+    execute v_sql;
+end;
+$$;
+
+comment on view pgfr_record.query_map_all is
+'Union of all per-partition query_map tables. '
+'Planner eliminates non-matching partitions when slot is a constant in reader queries. '
+'Recreated on each install to reflect num_slots.';
+
+-- 6. Helper functions
+
+-- Current slot (stable — reads ring_config singleton)
+create or replace function pgfr_record.ring_current_slot()
+returns smallint
+language sql stable parallel safe
+as $$
+    select current_slot from pgfr_record.ring_config where singleton
+$$;
+
+comment on function pgfr_record.ring_current_slot() is
+'Returns the current ring buffer slot (0..num_slots-1). '
+'Stable within a transaction. Use this in INSERT statements to target the correct partition.';
+
+-- Register wait event (upsert, returns id) — race-safe, same pattern as ash._register_wait()
+create or replace function pgfr_record._register_wait(p_state text, p_type text, p_event text)
+returns smallint
+language plpgsql
+as $$
+declare
+    v_id smallint;
+begin
+    -- fast path: already registered
+    select id into v_id
+    from pgfr_record.wait_event_map
+    where state = p_state and type = p_type and event = p_event;
+    if v_id is not null then
+        return v_id;
+    end if;
+
+    -- insert, ignore race
+    insert into pgfr_record.wait_event_map (state, type, event)
+    values (p_state, p_type, p_event)
+    on conflict (state, type, event) do nothing
+    returning id into v_id;
+
+    if v_id is not null then
+        return v_id;
+    end if;
+
+    -- race condition: another session inserted first
+    select id into v_id
+    from pgfr_record.wait_event_map
+    where state = p_state and type = p_type and event = p_event;
+    return v_id;
+end;
+$$;
+
+comment on function pgfr_record._register_wait(text, text, text) is
+'Upsert (state, type, event) into wait_event_map and return its smallint id. '
+'Race-safe: three-step insert with concurrent-insert fallback. '
+'Called once per distinct wait event per sample tick.';
+
+-- Register query_id in current slot''s query_map (dynamic dispatch)
+create or replace function pgfr_record._register_query(p_query_id int8)
+returns int4
+language plpgsql
+as $$
+declare
+    v_slot smallint;
+    v_id   int4;
+begin
+    v_slot := pgfr_record.ring_current_slot();
+    execute format(
+        'insert into pgfr_record.query_map_%s (query_id) values ($1) '
+        'on conflict (query_id) do nothing',
+        v_slot
+    ) using p_query_id;
+    execute format(
+        'select id from pgfr_record.query_map_%s where query_id = $1',
+        v_slot
+    ) into v_id using p_query_id;
+    return v_id;
+end;
+$$;
+
+comment on function pgfr_record._register_query(int8) is
+'Register a query_id in the current slot''s query_map table. '
+'Returns the local int4 id (sequence-based, resets on TRUNCATE at rotation). '
+'Called during sample_ring() to build the query_map ids used in data encoding.';
+
+-- 7. rotate_ring() — N-partition TRUNCATE rotation
+-- Advisory lock prevents concurrent rotation from pg_cron overlap.
+-- Advances current_slot first, then TRUNCATEs the oldest partition.
+create or replace function pgfr_record.rotate_ring()
+returns text
+language plpgsql
+as $$
+declare
+    v_old_slot        smallint;
+    v_new_slot        smallint;
+    v_truncate_slot   smallint;
+    v_num_slots       smallint;
+    v_rotation_period interval;
+    v_rotated_at      timestamptz;
+begin
+    if not pg_try_advisory_lock(hashtext('pgfr_rotate_ring')) then
+        return 'skipped: another rotation in progress';
+    end if;
+
+    begin
+        select current_slot, num_slots, rotation_period, rotated_at
+        into v_old_slot, v_num_slots, v_rotation_period, v_rotated_at
+        from pgfr_record.ring_config where singleton;
+
+        -- idempotent: skip if rotated too recently (within 90% of rotation_period)
+        if now() - v_rotated_at < v_rotation_period * 0.9 then
+            perform pg_advisory_unlock(hashtext('pgfr_rotate_ring'));
+            return 'skipped: rotated too recently at ' || v_rotated_at::text;
+        end if;
+
+        set local lock_timeout = '2s';
+
+        v_new_slot      := (v_old_slot + 1) % v_num_slots;
+        -- truncate the slot that's now two steps ahead (oldest data)
+        v_truncate_slot := (v_new_slot + 1) % v_num_slots;
+
+        -- advance slot FIRST: new inserts go to v_new_slot before we truncate
+        update pgfr_record.ring_config
+        set current_slot = v_new_slot, rotated_at = now()
+        where singleton;
+
+        -- lockstep TRUNCATE — zero bloat, no dead tuples, no GC needed
+        execute format('truncate pgfr_record.wait_samples_%s', v_truncate_slot);
+        execute format('truncate pgfr_record.lock_samples_%s', v_truncate_slot);
+        execute format('truncate pgfr_record.query_map_%s', v_truncate_slot);
+        -- restart identity sequence so ids are compact after rotation
+        execute format(
+            'alter table pgfr_record.query_map_%s alter column id restart',
+            v_truncate_slot
+        );
+
+        perform pg_advisory_unlock(hashtext('pgfr_rotate_ring'));
+        return format('rotated: slot %s -> %s, truncated slot %s',
+                      v_old_slot, v_new_slot, v_truncate_slot);
+
+    exception when lock_not_available then
+        perform pg_advisory_unlock(hashtext('pgfr_rotate_ring'));
+        return 'failed: lock timeout on truncate, will retry next cycle';
+    when others then
+        perform pg_advisory_unlock(hashtext('pgfr_rotate_ring'));
+        raise;
+    end;
+end;
+$$;
+
+comment on function pgfr_record.rotate_ring() is
+'Rotate ring buffer partitions: advance current_slot, TRUNCATE the oldest partition '
+'and its matching query_map. Dynamic N-partition support (reads num_slots from ring_config). '
+'Idempotent within 90% of rotation_period. Advisory lock prevents concurrent rotation. '
+'Returns text status: rotated / skipped / failed.';
+
+-- 8. sample_ring() — INSERT-based sampler (replaces UPDATE pattern)
+-- Implements the same integer[] encoding as ash.take_sample():
+--   [-wait_id, count, qmap_id, qmap_id, ...]  — one group per (datid, wait_event)
+-- Keeps existing pgfr_record.sample() intact for dual operation during migration.
+create or replace function pgfr_record.sample_ring()
+returns timestamptz
+language plpgsql
+as $$
+declare
+    v_slot              smallint;
+    v_sample_ts         int4;
+    v_captured_at       timestamptz;
+    v_include_bg        bool;
+    v_debug_logging     bool;
+    v_current_slot      smallint;
+    v_rec               record;
+    v_datid_rec         record;
+    v_data              integer[];
+    v_active_count      smallint;
+    v_seen_waits        text[] := '{}';
+    v_rows_inserted     int    := 0;
+begin
+    v_captured_at := clock_timestamp();
+    v_sample_ts   := extract(epoch from (v_captured_at - pgfr_record.epoch()))::int4;
+    v_slot        := pgfr_record.ring_current_slot();
+
+    -- config (reuse existing config helpers)
+    v_include_bg    := coalesce(pgfr_record._get_config('include_bg_workers', 'false')::bool, false);
+    v_debug_logging := coalesce(pgfr_record._get_config('debug_logging', 'false')::bool, false);
+
+    -- -----------------------------------------------------------------------
+    -- Read 1: register new wait events; walk pg_stat_activity once.
+    -- CPU* = active backend with no wait event (genuine CPU or uninstrumented).
+    -- IdleTx = idle in transaction (may hold locks).
+    -- -----------------------------------------------------------------------
+    for v_rec in
+        select
+            sa.pid,
+            sa.state,
+            coalesce(sa.wait_event_type,
+                case
+                    when sa.state = 'active'                   then 'CPU*'
+                    when sa.state like 'idle in transaction%'  then 'IdleTx'
+                end
+            ) as wait_type,
+            coalesce(sa.wait_event,
+                case
+                    when sa.state = 'active'                   then 'CPU*'
+                    when sa.state like 'idle in transaction%'  then 'IdleTx'
+                end
+            ) as wait_event,
+            sa.backend_type,
+            sa.query_id
+        from pg_stat_activity sa
+        where sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
+          and (sa.backend_type = 'client backend'
+           or (v_include_bg and sa.backend_type in (
+                   'autovacuum worker', 'logical replication worker',
+                   'parallel worker', 'background worker')))
+          and sa.pid <> pg_backend_pid()
+    loop
+        -- dedup in memory; avoid per-row catalog lookup
+        if not (v_rec.state || '|' || v_rec.wait_type || '|' || v_rec.wait_event = any(v_seen_waits)) then
+            v_seen_waits := v_seen_waits
+                || (v_rec.state || '|' || v_rec.wait_type || '|' || v_rec.wait_event);
+            if not exists (
+                select from pgfr_record.wait_event_map
+                where state = v_rec.state and type = v_rec.wait_type and event = v_rec.wait_event
+            ) then
+                perform pgfr_record._register_wait(v_rec.state, v_rec.wait_type, v_rec.wait_event);
+            end if;
+        end if;
+
+        if v_debug_logging then
+            raise log 'pgfr_record.sample_ring: pid=% state=% wait_type=% wait_event=% backend_type=% query_id=%',
+                v_rec.pid, v_rec.state, v_rec.wait_type, v_rec.wait_event,
+                v_rec.backend_type, coalesce(v_rec.query_id::text, '(null)');
+        end if;
+    end loop;
+
+    -- -----------------------------------------------------------------------
+    -- Read 2: register query_ids into current slot's query_map
+    -- 50k hard cap per partition to prevent unbounded growth (PG14/15 volatile
+    -- SQL comments can flood query_map; PG16+ normalises comments).
+    -- -----------------------------------------------------------------------
+    execute format(
+        'insert into pgfr_record.query_map_%s (query_id) '
+        'select distinct sa.query_id '
+        'from pg_stat_activity sa '
+        'where sa.query_id is not null '
+        '  and sa.state in (''active'', ''idle in transaction'', ''idle in transaction (aborted)'') '
+        '  and (sa.backend_type = ''client backend'' '
+        '   or ($1 and sa.backend_type in ('
+        '       ''autovacuum worker'', ''logical replication worker'', '
+        '       ''parallel worker'', ''background worker''))) '
+        '  and sa.pid <> pg_backend_pid() '
+        '  and (select reltuples from pg_class '
+        '       where oid = ''pgfr_record.query_map_%s''::regclass) < 50000 '
+        'on conflict (query_id) do nothing',
+        v_slot, v_slot
+    ) using v_include_bg;
+
+    -- -----------------------------------------------------------------------
+    -- Reads 3+4: per-database encoding — same CTE pattern as ash.take_sample()
+    -- Snapshot pg_stat_activity, group by (datid, wait_event), encode integer[].
+    -- Format: [-wait_id, count, qmap_id, qmap_id, ..., -next_wait_id, ...]
+    -- -----------------------------------------------------------------------
+    for v_datid_rec in
+        select distinct coalesce(sa.datid, 0::oid) as datid
+        from pg_stat_activity sa
+        where sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
+          and (sa.backend_type = 'client backend'
+           or (v_include_bg and sa.backend_type in (
+                   'autovacuum worker', 'logical replication worker',
+                   'parallel worker', 'background worker')))
+          and sa.pid <> pg_backend_pid()
+    loop
+        begin
+            -- single query: snapshot → group by wait → encode → flatten
+            -- mirrors ash.take_sample() CTE exactly, adapted to pgfr_record
+            execute format(
+                'with snapshot as ( '
+                '    select '
+                '        wm.id as wait_id, '
+                '        coalesce(m.id, 0) as map_id '
+                '    from pg_stat_activity sa '
+                '    join pgfr_record.wait_event_map wm '
+                '         on wm.state = sa.state '
+                '        and wm.type = coalesce(sa.wait_event_type, '
+                '            case when sa.state = ''active'' then ''CPU*'' '
+                '                 when sa.state like ''idle in transaction%%'' then ''IdleTx'' end) '
+                '        and wm.event = coalesce(sa.wait_event, '
+                '            case when sa.state = ''active'' then ''CPU*'' '
+                '                 when sa.state like ''idle in transaction%%'' then ''IdleTx'' end) '
+                '    left join pgfr_record.query_map_all m '
+                '           on m.slot = %s::smallint and m.query_id = sa.query_id '
+                '    where sa.state in (''active'', ''idle in transaction'', ''idle in transaction (aborted)'') '
+                '      and (sa.backend_type = ''client backend'' '
+                '       or ($1 and sa.backend_type in ( '
+                '           ''autovacuum worker'', ''logical replication worker'', '
+                '           ''parallel worker'', ''background worker''))) '
+                '      and sa.pid <> pg_backend_pid() '
+                '      and coalesce(sa.datid, 0::oid) = $2 '
+                '), '
+                'groups as ( '
+                '    select '
+                '        row_number() over (order by s.wait_id) as gnum, '
+                '        array[(-s.wait_id)::integer, count(*)::integer] '
+                '            || array_agg(s.map_id::integer) as group_arr '
+                '    from snapshot s '
+                '    group by s.wait_id '
+                '), '
+                'flat as ( '
+                '    select array_agg(el order by g.gnum, u.ord) as data '
+                '    from groups g, '
+                '         lateral unnest(g.group_arr) with ordinality as u(el, ord) '
+                '), '
+                'backend_count as ( '
+                '    select count(*)::smallint as cnt from snapshot '
+                ') '
+                'select f.data, bc.cnt from flat f, backend_count bc',
+                v_slot
+            ) into v_data, v_active_count using v_include_bg, v_datid_rec.datid;
+
+            if v_data is not null and array_length(v_data, 1) >= 3 then
+                insert into pgfr_record.wait_samples (sample_ts, datid, active_count, data, slot)
+                values (v_sample_ts, v_datid_rec.datid, v_active_count, v_data, v_slot);
+                v_rows_inserted := v_rows_inserted + 1;
+            end if;
+
+        exception when others then
+            raise warning 'pgfr_record.sample_ring: error encoding sample for datid % [%]: %',
+                v_datid_rec.datid, sqlstate, sqlerrm;
+        end;
+    end loop;
+
+    return v_captured_at;
+end;
+$$;
+
+comment on function pgfr_record.sample_ring() is
+'Ring buffer v2 sampler: INSERT-based replacement for the UPDATE pattern in sample(). '
+'Encodes wait events as integer[] arrays: [-wait_id, count, qmap_id, ...] per database. '
+'Follows the ash.take_sample() encoding exactly. '
+'Dual operation: existing sample() continues to work during migration. '
+'Call via pg_cron; use rotate_ring() separately on a slower schedule.';
+
+-- 9. pg_cron wiring for ring rotation
+do $$
+begin
+    if exists (select from pg_extension where extname = 'pg_cron') then
+        -- ring sampler (every minute, same cadence as sample())
+        perform cron.schedule('pgfr-sample-ring', '* * * * *',
+            'set statement_timeout = ''500ms''; select pgfr_record.sample_ring()')
+        where not exists (select 1 from cron.job where jobname = 'pgfr-sample-ring');
+
+        -- ring rotation (every 2 hours)
+        perform cron.schedule('pgfr-rotate-ring', '0 */2 * * *',
+            'select pgfr_record.rotate_ring()')
+        where not exists (select 1 from cron.job where jobname = 'pgfr-rotate-ring');
+
+        -- clear nodename so pg_cron uses unix socket (not TCP)
+        update cron.job set nodename = ''
+        where jobname in ('pgfr-sample-ring', 'pgfr-rotate-ring')
+          and nodename <> '';
+    end if;
+exception when others then
+    null; -- pg_cron not installed or accessible, skip silently
+end $$;
+
+-- 10. Reader view: recent_waits_v2
+-- Decodes the integer[] format to human-readable wait events.
+-- Finds all negative elements (wait_event_id markers) in each data array
+-- and joins to wait_event_map. For full per-backend decode see ash.decode_sample().
+create or replace view pgfr_record.recent_waits_v2 as
+select
+    pgfr_record.epoch() + s.sample_ts * interval '1 second' as captured_at,
+    s.datid,
+    s.active_count,
+    wem.state,
+    wem.type  as wait_event_type,
+    wem.event as wait_event,
+    s.slot
+from pgfr_record.wait_samples s
+cross join lateral (
+    select abs(s.data[i])::smallint as wid
+    from generate_subscripts(s.data, 1) as i
+    where s.data[i] < 0
+) ids
+join pgfr_record.wait_event_map wem on wem.id = ids.wid;
+
+comment on view pgfr_record.recent_waits_v2 is
+'Ring buffer v2 reader: decodes wait_samples integer[] encoding to readable rows. '
+'One row per (sample, database, wait_event). '
+'For count and query_id resolution, use ash.decode_sample()-style decoding.';
+
+--------------------------------------------------------------------------------
+-- End of ring buffer v2 section
+--------------------------------------------------------------------------------
