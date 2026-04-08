@@ -96,6 +96,5 @@ SELECT * FROM pgfr_record.deltas;
 ## Related extensions
 
 - [pgfr_analyze](https://database.dev/dventimi/pgfr_analyze) -- reporting, anomaly detection, time-travel forensics
-- [pgfr_control](https://database.dev/dventimi/pgfr_control) -- vacuum diagnostics, scale factor tuning, bloat analysis
 
 See the [top-level README](https://github.com/dventimisupabase/pg-flight-recorder/blob/main/README.md) and [REFERENCE.md](https://github.com/dventimisupabase/pg-flight-recorder/blob/main/REFERENCE.md) for full documentation.

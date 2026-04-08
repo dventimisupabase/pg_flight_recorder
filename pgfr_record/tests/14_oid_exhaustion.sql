@@ -2,11 +2,11 @@
 -- pgfr_record pgTAP Tests - OID Exhaustion Metrics
 -- =============================================================================
 -- Tests: OID exhaustion columns exist and are populated with reasonable values
--- Test count: 14
+-- Test count: 10
 -- =============================================================================
 
 BEGIN;
-SELECT plan(14);
+SELECT plan(10);
 
 -- =============================================================================
 -- 1. COLUMN EXISTENCE (2 tests)
@@ -86,39 +86,6 @@ SELECT ok(
         WHERE anomaly_type = 'OID_EXHAUSTION_RISK'
     ),
     'Fresh database should not trigger OID exhaustion anomalies'
-);
-
--- =============================================================================
--- 5. RATE FUNCTION TESTS (4 tests)
--- =============================================================================
-
--- Verify oid_consumption_rate function exists and runs
-SELECT lives_ok(
-    $$SELECT pgfr_control.oid_consumption_rate('1 hour'::interval)$$,
-    'oid_consumption_rate() should run without error'
-);
-
--- Verify time_to_oid_exhaustion function exists and runs
-SELECT lives_ok(
-    $$SELECT pgfr_control.time_to_oid_exhaustion()$$,
-    'time_to_oid_exhaustion() should run without error'
-);
-
--- Rate returns NULL when insufficient data or non-negative when data exists
-SELECT ok(
-    (SELECT pgfr_control.oid_consumption_rate('1 hour'::interval)) IS NULL
-    OR (SELECT pgfr_control.oid_consumption_rate('1 hour'::interval)) >= 0,
-    'oid_consumption_rate() should return NULL or non-negative value'
-);
-
--- Take another snapshot and verify rate calculation works
-SELECT pgfr_record.snapshot();
-
--- After multiple snapshots, rate should still be NULL or non-negative
-SELECT ok(
-    (SELECT pgfr_control.oid_consumption_rate('1 hour'::interval)) IS NULL
-    OR (SELECT pgfr_control.oid_consumption_rate('1 hour'::interval)) >= 0,
-    'oid_consumption_rate() should return NULL or non-negative value after multiple snapshots'
 );
 
 SELECT * FROM finish();

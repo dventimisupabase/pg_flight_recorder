@@ -523,9 +523,6 @@ BEGIN
     RAISE NOTICE '  - pgfr_record.recent_locks      (lock contention, last 2 hours from ring buffer)';
     RAISE NOTICE '  - pgfr_record.recent_replication (replication lag, last 2 hours)';
     RAISE NOTICE '';
-    RAISE NOTICE 'For autovacuum control functions (vacuum diagnostics, scale factor tuning, bloat analysis):';
-    RAISE NOTICE '  psql --single-transaction -f pgfr_control/install.sql';
-    RAISE NOTICE '';
     RAISE NOTICE 'For analysis & reporting functions (anomaly detection, capacity planning, etc.):';
     RAISE NOTICE '  psql --single-transaction -f pgfr_analyze/install.sql';
     RAISE NOTICE '';

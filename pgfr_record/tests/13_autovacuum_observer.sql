@@ -2,11 +2,11 @@
 -- pgfr_record pgTAP Tests - Autovacuum Observer Enhancements (v2.7)
 -- =============================================================================
 -- Tests: n_mod_since_analyze column, rate calculation functions, sampling modes
--- Test count: 35
+-- Test count: 27
 -- =============================================================================
 
 BEGIN;
-SELECT plan(35);
+SELECT plan(27);
 
 -- =============================================================================
 -- 1. SCHEMA TESTS - n_mod_since_analyze COLUMN (3 tests)
@@ -54,14 +54,8 @@ SELECT is(
 );
 
 -- =============================================================================
--- 3. FUNCTION EXISTENCE TESTS (4 tests)
+-- 3. FUNCTION EXISTENCE TESTS (2 tests)
 -- =============================================================================
-
-SELECT has_function(
-    'pgfr_control', 'dead_tuple_growth_rate',
-    ARRAY['oid', 'interval'],
-    'dead_tuple_growth_rate(oid, interval) function should exist'
-);
 
 SELECT has_function(
     'pgfr_analyze', 'modification_rate',
@@ -73,12 +67,6 @@ SELECT has_function(
     'pgfr_analyze', 'hot_update_ratio',
     ARRAY['oid'],
     'hot_update_ratio(oid) function should exist'
-);
-
-SELECT has_function(
-    'pgfr_control', 'time_to_budget_exhaustion',
-    ARRAY['oid', 'bigint'],
-    'time_to_budget_exhaustion(oid, bigint) function should exist'
 );
 
 -- =============================================================================
@@ -119,26 +107,8 @@ SELECT lives_ok(
 );
 
 -- =============================================================================
--- 5. RATE FUNCTION TESTS - EXECUTION WITHOUT ERROR (8 tests)
+-- 5. RATE FUNCTION TESTS - EXECUTION WITHOUT ERROR (4 tests)
 -- =============================================================================
-
--- Test dead_tuple_growth_rate executes without error
-SELECT lives_ok(
-    $$SELECT pgfr_control.dead_tuple_growth_rate(
-        (SELECT relid FROM pg_stat_user_tables LIMIT 1),
-        '1 hour'::interval
-      )$$,
-    'dead_tuple_growth_rate should execute without error'
-);
-
--- Test dead_tuple_growth_rate returns NUMERIC
-SELECT ok(
-    pg_typeof(pgfr_control.dead_tuple_growth_rate(
-        (SELECT relid FROM pg_stat_user_tables LIMIT 1),
-        '1 hour'::interval
-    ))::text = 'numeric',
-    'dead_tuple_growth_rate should return NUMERIC type'
-);
 
 -- Test modification_rate executes without error
 SELECT lives_ok(
@@ -172,24 +142,6 @@ SELECT ok(
         (SELECT relid FROM pg_stat_user_tables LIMIT 1)
     ))::text = 'numeric',
     'hot_update_ratio should return NUMERIC type'
-);
-
--- Test time_to_budget_exhaustion executes without error
-SELECT lives_ok(
-    $$SELECT pgfr_control.time_to_budget_exhaustion(
-        (SELECT relid FROM pg_stat_user_tables LIMIT 1),
-        10000::bigint
-      )$$,
-    'time_to_budget_exhaustion should execute without error'
-);
-
--- Test time_to_budget_exhaustion returns INTERVAL
-SELECT ok(
-    pg_typeof(pgfr_control.time_to_budget_exhaustion(
-        (SELECT relid FROM pg_stat_user_tables LIMIT 1),
-        10000::bigint
-    ))::text = 'interval',
-    'time_to_budget_exhaustion should return INTERVAL type'
 );
 
 -- =============================================================================
@@ -280,16 +232,10 @@ SELECT lives_ok(
 );
 
 -- =============================================================================
--- 7. EDGE CASE TESTS (4 tests)
+-- 7. EDGE CASE TESTS (2 tests)
 -- =============================================================================
 
 -- Test rate functions with non-existent OID
-SELECT is(
-    pgfr_control.dead_tuple_growth_rate(0::oid, '1 hour'::interval),
-    NULL::numeric,
-    'dead_tuple_growth_rate should return NULL for non-existent OID'
-);
-
 SELECT is(
     pgfr_analyze.modification_rate(0::oid, '1 hour'::interval),
     NULL::numeric,
@@ -300,12 +246,6 @@ SELECT is(
     pgfr_analyze.hot_update_ratio(0::oid),
     NULL::numeric,
     'hot_update_ratio should return NULL for non-existent OID'
-);
-
-SELECT is(
-    pgfr_control.time_to_budget_exhaustion(0::oid, 10000::bigint),
-    NULL::interval,
-    'time_to_budget_exhaustion should return NULL for non-existent OID'
 );
 
 SELECT * FROM finish();

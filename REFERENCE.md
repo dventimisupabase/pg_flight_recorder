@@ -4,7 +4,7 @@
 [![Test Suite](https://github.com/dventimisupabase/pg-flight-recorder/actions/workflows/test.yml/badge.svg)](https://github.com/dventimisupabase/pg-flight-recorder/actions/workflows/test.yml)
 [![Lint](https://github.com/dventimisupabase/pg-flight-recorder/actions/workflows/lint.yml/badge.svg)](https://github.com/dventimisupabase/pg-flight-recorder/actions/workflows/lint.yml)
 
-Complete reference for [pg-flight-recorder](README.md). For installation and getting started, see the [README](README.md). For per-extension overviews, see [pgfr_record](pgfr_record/README.md), [pgfr_analyze](pgfr_analyze/README.md), and [pgfr_control](pgfr_control/README.md).
+Complete reference for [pg-flight-recorder](README.md). For installation and getting started, see the [README](README.md). For per-extension overviews, see [pgfr_record](pgfr_record/README.md) and [pgfr_analyze](pgfr_analyze/README.md).
 
 ## Functions: pgfr_record (core)
 
@@ -133,40 +133,6 @@ Complete reference for [pg-flight-recorder](README.md). For installation and get
 |----------|---------|-------------|
 | `pgfr_analyze.preflight_check()` | `record` | Pre-installation validation checks |
 | `pgfr_analyze.preflight_check_with_summary()` | `record` | Validation with text summary |
-
-## Functions: pgfr_control
-
-### Vacuum control
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `pgfr_control.vacuum_control_mode(relid oid)` | `record` | Determine operating mode: `normal`, `catch_up`, `safety` based on XID age and dead tuple trends |
-| `pgfr_control.compute_recommended_scale_factor(relid oid)` | `record` | Compute recommended `autovacuum_vacuum_scale_factor` from actual dead tuple accumulation |
-| `pgfr_control.vacuum_diagnostic(relid oid)` | `record` | Classify vacuum health: `NOT_SCHEDULED`, `RUNNING_BUT_LOSING`, `BLOCKED`, `HEALTHY` with guidance |
-| `pgfr_control.vacuum_control_report(start timestamptz, end timestamptz)` | `record` | Recommendations for all monitored tables with hysteresis and rate limiting |
-
-### Dead tuple analysis
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `pgfr_control.dead_tuple_growth_rate(relid oid, window interval)` | `numeric` | Dead tuple accumulation rate (tuples/second) |
-| `pgfr_control.dead_tuple_trend(relid oid, window interval)` | `numeric` | Dead tuple trend via linear regression (tuples/second) |
-| `pgfr_control.time_to_budget_exhaustion(relid oid, budget bigint)` | `interval` | Estimated time until dead tuple budget is reached |
-
-### Bloat estimation
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `pgfr_control.estimate_table_bloat(relid oid)` | `record` | Estimate table bloat without pgstattuple. Pass NULL for all tables |
-| `pgfr_control.bloat_report(window interval)` | `record` | Bloat report with size trends and recommendations |
-| `pgfr_control.table_size_growth_rate(relid oid, window interval)` | `numeric` | Table size growth rate (bytes/second) |
-
-### OID monitoring
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `pgfr_control.oid_consumption_rate(window interval)` | `numeric` | OID consumption rate (OIDs/second) |
-| `pgfr_control.time_to_oid_exhaustion()` | `interval` | Estimated time until OID exhaustion (based on last hour) |
 
 ## Views
 
@@ -531,20 +497,6 @@ Aggregates summarize ring buffer data into 5-minute windows.
 | `oid` | oid | Relation OID (PK) |
 | `nspname` | text | Schema name |
 | `relname` | text | Relation name |
-
-### pgfr_control
-
-**`pgfr_control.vacuum_control_state`** -- Vacuum operating mode per table
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `relid` | oid | Table OID (PK) |
-| `operating_mode` | text | Current mode: `normal`, `catch_up`, `safety` |
-| `mode_entered_at` | timestamptz | When current mode was entered |
-| `last_recommendation_at` | timestamptz | Last scale factor recommendation time |
-| `last_recommended_scale_factor` | numeric | Last recommended scale factor |
-| `consecutive_budget_exceeded` | int | Consecutive budget exceeded count |
-| `updated_at` | timestamptz | Last update time |
 
 ### Deprecated columns
 
