@@ -23,13 +23,12 @@ Data flows through UNLOGGED ring buffers (hot, low-overhead) into durable archiv
 
 ## Extensions
 
-Three extensions, each published as a separate [dbdev](https://database.dev) package:
+Two extensions, each published as a separate [dbdev](https://database.dev) package:
 
 | Extension                                                  | Schema         | Purpose                                                  | README                                   |
 |------------------------------------------------------------|----------------|----------------------------------------------------------|------------------------------------------|
 | [pgfr_record](https://database.dev/dventimi/pgfr_record)   | `pgfr_record`  | Core: tables, collection, scheduling, ring buffers       | [pgfr_record/README.md](pgfr_record/README.md)   |
 | [pgfr_analyze](https://database.dev/dventimi/pgfr_analyze) | `pgfr_analyze` | Optional: reporting, anomaly detection, time travel      | [pgfr_analyze/README.md](pgfr_analyze/README.md) |
-| [pgfr_control](https://database.dev/dventimi/pgfr_control) | `pgfr_control` | Optional: vacuum diagnostics, scale factor tuning, bloat | [pgfr_control/README.md](pgfr_control/README.md) |
 
 ## Requirements
 
@@ -43,9 +42,8 @@ Three extensions, each published as a separate [dbdev](https://database.dev) pac
 Download from [GitHub Releases](https://github.com/dventimisupabase/pg-flight-recorder/releases/latest) or clone the repo, then:
 
 ```bash
-# Install core + optional extensions
+# Install core + optional analysis extension
 psql --single-transaction -f pgfr_record/install.sql
-psql --single-transaction -f pgfr_control/install.sql
 psql --single-transaction -f pgfr_analyze/install.sql
 ```
 
@@ -112,19 +110,6 @@ SELECT * FROM pgfr_analyze.quarterly_review();
 SELECT * FROM pgfr_analyze.capacity_dashboard;
 ```
 
-### Vacuum control
-
-```sql
--- Vacuum diagnostic for a table
-SELECT * FROM pgfr_control.vacuum_diagnostic('my_table'::regclass);
-
--- Full vacuum control report
-SELECT * FROM pgfr_control.vacuum_control_report(now() - '1 hour', now());
-
--- Bloat report
-SELECT * FROM pgfr_control.bloat_report('24 hours');
-```
-
 ## Configuration profiles
 
 Profiles are pre-configured settings for different environments:
@@ -185,7 +170,6 @@ Re-running install scripts is safe -- they use `CREATE OR REPLACE` and `IF NOT E
 
 ```bash
 psql --single-transaction -f pgfr_record/install.sql
-psql --single-transaction -f pgfr_control/install.sql
 psql --single-transaction -f pgfr_analyze/install.sql
 ```
 
@@ -194,9 +178,6 @@ psql --single-transaction -f pgfr_analyze/install.sql
 ```bash
 # Remove everything (stops jobs, drops all schemas and data)
 psql --single-transaction -f pgfr_record/uninstall.sql
-
-# Remove only control functions (keeps core + data)
-psql --single-transaction -f pgfr_control/uninstall.sql
 
 # Remove only reporting functions (keeps core + data)
 psql --single-transaction -f pgfr_analyze/uninstall.sql

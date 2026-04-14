@@ -2,13 +2,12 @@
 
 ## Project Structure
 
-Three extensions, each in its own subdirectory:
+Two extensions, each in its own subdirectory:
 
 | Directory   | Extension      | Schema         | Purpose                                                  |
 |-------------|----------------|----------------|----------------------------------------------------------|
 | `pgfr_record/`  | `pgfr_record`  | `pgfr_record`  | Core: tables, collection, scheduling, ring buffers       |
 | `pgfr_analyze/` | `pgfr_analyze` | `pgfr_analyze` | Optional: reporting, anomaly detection, time travel      |
-| `pgfr_control/` | `pgfr_control` | `pgfr_control` | Optional: vacuum diagnostics, scale factor tuning, bloat |
 
 Each subdirectory contains:
 
@@ -24,7 +23,7 @@ Other key files:
 - `test.sh` — runs all tests on PG 15/16/17 via Docker
 - `docker-compose.yml` — base test infrastructure (services, build, env, healthcheck, data volumes)
 
-Docker Compose files are merged at invocation time: `test.sh` passes `-f docker-compose.yml -f pgfr_record/docker-compose.yml -f pgfr_control/docker-compose.yml -f pgfr_analyze/docker-compose.yml`. Volume paths in extension compose files are relative to the project root (Docker Compose resolves all `-f` file paths relative to the first file's directory).
+Docker Compose files are merged at invocation time: `test.sh` passes `-f docker-compose.yml -f pgfr_record/docker-compose.yml -f pgfr_analyze/docker-compose.yml`. Volume paths in extension compose files are relative to the project root (Docker Compose resolves all `-f` file paths relative to the first file's directory).
 
 ## Markdown Formatting
 
@@ -79,13 +78,12 @@ Run tests with:
 Tests are distributed across extension subdirectories:
 
 - `pgfr_record/tests/` — 14 test files (core)
-- `pgfr_control/tests/` — 1 test file (vacuum control)
 - `pgfr_analyze/tests/` — 4 test files (reporting/analysis)
 
 ## Code Style
 
 - Follow existing patterns in the relevant `install.sql`
-- Use the correct schema prefix: `pgfr_record.` for core, `pgfr_analyze.` for analyze, `pgfr_control.` for control
+- Use the correct schema prefix: `pgfr_record.` for core, `pgfr_analyze.` for analyze
 - Include COMMENT ON statements for new functions and tables
 - Extensions read core tables cross-schema (e.g., `pgfr_record.snapshots`) but never write to another extension's schema
 

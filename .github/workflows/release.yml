@@ -140,11 +140,11 @@ jobs:
 
           # Create tarball
           tar -czf release-assets/pgfr_record-${{ steps.version.outputs.version }}.tar.gz \
-            pgfr_record/install.sql pgfr_analyze/install.sql pgfr_control/install.sql pgfr_record/uninstall.sql pgfr_analyze/uninstall.sql pgfr_control/uninstall.sql README.md REFERENCE.md $([ -f CHANGELOG.md ] && echo CHANGELOG.md)
+            pgfr_record/install.sql pgfr_analyze/install.sql pgfr_record/uninstall.sql pgfr_analyze/uninstall.sql README.md REFERENCE.md $([ -f CHANGELOG.md ] && echo CHANGELOG.md)
 
           # Create zip
           zip -q release-assets/pgfr_record-${{ steps.version.outputs.version }}.zip \
-            pgfr_record/install.sql pgfr_analyze/install.sql pgfr_control/install.sql pgfr_record/uninstall.sql pgfr_analyze/uninstall.sql pgfr_control/uninstall.sql README.md REFERENCE.md $([ -f CHANGELOG.md ] && echo CHANGELOG.md)
+            pgfr_record/install.sql pgfr_analyze/install.sql pgfr_record/uninstall.sql pgfr_analyze/uninstall.sql README.md REFERENCE.md $([ -f CHANGELOG.md ] && echo CHANGELOG.md)
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

@@ -140,6 +140,5 @@ SELECT * FROM pgfr_analyze.capacity_summary('7 days');
 ## Related extensions
 
 - [pgfr_record](https://database.dev/dventimi/pgfr_record) -- core snapshot collection (required)
-- [pgfr_control](https://database.dev/dventimi/pgfr_control) -- vacuum diagnostics, scale factor tuning, bloat analysis
 
 See the [top-level README](https://github.com/dventimisupabase/pg-flight-recorder/blob/main/README.md) and [REFERENCE.md](https://github.com/dventimisupabase/pg-flight-recorder/blob/main/REFERENCE.md) for full documentation.

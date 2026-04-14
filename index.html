@@ -1326,13 +1326,8 @@
 <span class="t-cm">-- Quarterly review</span>
 <span class="t-kw">SELECT</span> * <span class="t-kw">FROM</span> <span class="t-fn">pgfr_analyze.quarterly_review</span>();
 
-<span class="t-cm">-- Vacuum diagnostic for a table</span>
-<span class="t-kw">SELECT</span> * <span class="t-kw">FROM</span> <span class="t-fn">pgfr_control.vacuum_diagnostic</span>(
-  <span class="t-str">'my_table'</span>::<span class="t-kw">regclass</span>
-);
-
-<span class="t-cm">-- Bloat report</span>
-<span class="t-kw">SELECT</span> * <span class="t-kw">FROM</span> <span class="t-fn">pgfr_control.bloat_report</span>(<span class="t-str">'24 hours'</span>);</pre></div>
+<span class="t-cm">-- Capacity dashboard view</span>
+<span class="t-kw">SELECT</span> * <span class="t-kw">FROM</span> <span class="t-fn">pgfr_analyze.capacity_dashboard</span>;</pre></div>
             </div>
           </div>
         </div>
@@ -1418,19 +1413,6 @@
           </ul>
           <div class="ext-install">psql -f pgfr_analyze/install.sql</div>
         </div>
-        <div class="ext-card reveal">
-          <span class="ext-badge optional">Optional</span>
-          <h3>pgfr_control</h3>
-          <p>Vacuum diagnostics, scale factor tuning, bloat estimation, and OID monitoring.</p>
-          <ul class="ext-features">
-            <li>15 functions for vacuum control</li>
-            <li>Dead tuple growth rate tracking</li>
-            <li>Adaptive scale factor recommendations</li>
-            <li>Bloat estimation &amp; reporting</li>
-            <li>OID consumption forecasting</li>
-          </ul>
-          <div class="ext-install">psql -f pgfr_control/install.sql</div>
-        </div>
       </div>
     </div>
   </section>
@@ -1452,8 +1434,7 @@
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M5 11H3.5A1.5 1.5 0 012 9.5v-7A1.5 1.5 0 013.5 1h7A1.5 1.5 0 0112 2.5V5"/></svg>
             </button>
             <pre>psql --single-transaction -f pgfr_record/install.sql
-psql --single-transaction -f pgfr_analyze/install.sql
-psql --single-transaction -f pgfr_control/install.sql</pre>
+psql --single-transaction -f pgfr_analyze/install.sql</pre>
           </div>
         </div>
         <div class="step reveal">

@@ -70,21 +70,6 @@ jobs:
             exit 1
           fi
 
-      - name: Prepare control extension files
-        run: |
-          VER="${{ steps.version.outputs.version }}"
-          cp pgfr_control/install.sql "pgfr_control/pgfr_control--${VER}.sql"
-          mv pgfr_control/extension.control pgfr_control/pgfr_control.control
-          sed -i "s/^default_version = .*/default_version = '${VER}'/" pgfr_control/pgfr_control.control
-
-          # Safety: verify dbdev size limit
-          SIZE=$(wc -c < "pgfr_control/pgfr_control--${VER}.sql")
-          echo "Control package size: ${SIZE} chars"
-          if [ "$SIZE" -gt 250000 ]; then
-            echo "ERROR: pgfr_control/install.sql is ${SIZE} chars, exceeds 250,000 char dbdev limit"
-            exit 1
-          fi
-
       - name: Install dbdev CLI
         run: |
           DEB_URL=$(curl -fsSL https://api.github.com/repos/supabase/dbdev/releases/latest \
@@ -105,5 +90,3 @@ jobs:
       - name: Publish reporting package
         run: cd pgfr_analyze && dbdev publish
 
-      - name: Publish control package
-        run: cd pgfr_control && dbdev publish

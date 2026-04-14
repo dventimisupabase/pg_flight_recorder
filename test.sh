@@ -11,7 +11,7 @@ set -e
 #   ./test.sh 16        # Test on PostgreSQL 16 only
 
 # Compose files: base + per-extension volumes
-COMPOSE_FILES="-f docker-compose.yml -f pgfr_record/docker-compose.yml -f pgfr_control/docker-compose.yml -f pgfr_analyze/docker-compose.yml"
+COMPOSE_FILES="-f docker-compose.yml -f pgfr_record/docker-compose.yml -f pgfr_analyze/docker-compose.yml"
 
 # Detect docker compose command (standalone vs plugin)
 if command -v docker-compose &> /dev/null; then
@@ -59,9 +59,6 @@ run_single_version() {
     echo "Installing pgfr_record..."
     $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres --single-transaction -f /install.sql > /dev/null
 
-    echo "Installing autovacuum control functions..."
-    $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres --single-transaction -f /control.sql > /dev/null
-
     echo "Installing reporting functions..."
     $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres --single-transaction -f /analyze.sql > /dev/null
 
@@ -72,7 +69,7 @@ run_single_version() {
     $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres -c "SELECT pgfr_record.disable();" > /dev/null
 
     echo "Running tests with per-file timing..."
-    $DOCKER_COMPOSE --profile $profile exec -T $service sh -c 'pg_prove --timer -U postgres -d postgres /tests/record/*.sql /tests/control/*.sql /tests/analyze/*.sql'
+    $DOCKER_COMPOSE --profile $profile exec -T $service sh -c 'pg_prove --timer -U postgres -d postgres /tests/record/*.sql /tests/analyze/*.sql'
 
     echo "PostgreSQL $pg_version: PASS"
 
@@ -114,7 +111,6 @@ run_all_parallel() {
         (
             $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_cron; CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" > /dev/null
             $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres --single-transaction -f /install.sql > /dev/null
-            $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres --single-transaction -f /control.sql > /dev/null
             $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres --single-transaction -f /analyze.sql > /dev/null
             $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pgtap;" > /dev/null
             $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -c "SELECT pgfr_record.disable();" > /dev/null
@@ -135,7 +131,7 @@ run_all_parallel() {
             echo "=========================================" > "$RESULTS_DIR/$version.log"
             echo "PostgreSQL $version" >> "$RESULTS_DIR/$version.log"
             echo "=========================================" >> "$RESULTS_DIR/$version.log"
-            if $DOCKER_COMPOSE --profile all exec -T $service sh -c 'pg_prove --timer -U postgres -d postgres /tests/record/*.sql /tests/control/*.sql /tests/analyze/*.sql' >> "$RESULTS_DIR/$version.log" 2>&1; then
+            if $DOCKER_COMPOSE --profile all exec -T $service sh -c 'pg_prove --timer -U postgres -d postgres /tests/record/*.sql /tests/analyze/*.sql' >> "$RESULTS_DIR/$version.log" 2>&1; then
                 echo "PASS" > "$RESULTS_DIR/$version.status"
             else
                 echo "FAIL" > "$RESULTS_DIR/$version.status"
