@@ -1,4 +1,4 @@
--- MEMORY CONTEXT SAMPLING (PG 14-17 self-sampling)
+-- MEMORY CONTEXT SAMPLING (self-sampling only)
 -- Augments ring buffer v2 with per-backend memory context data from
 -- pg_backend_memory_contexts (PG 14+).
 --
@@ -6,11 +6,15 @@
 -- (flat, many rows per tick, LIST-partitioned by slot, TRUNCATE on rotation).
 --
 -- Sampling is DEFAULT-OFF. Enabling captures the pgfr_record cron worker's
--- own memory contexts, which bounds pgfr's own footprint over time. The view
--- pg_backend_memory_contexts is caller-scoped on PG 14-17, so cross-backend
--- sampling is not available in this module; that requires
--- pg_get_process_memory_contexts (PG 18+) and will be added together with
--- a PG 18 test matrix in a separate change.
+-- own memory contexts, which bounds pgfr's own footprint over time.
+--
+-- Scope limit: pg_backend_memory_contexts is caller-scoped — it only exposes
+-- the calling backend's contexts. Cross-backend capture has no SQL-returning
+-- API in any released Postgres: pg_log_backend_memory_contexts(pid) (PG 14+)
+-- writes to the server log rather than returning rows, and
+-- pg_get_process_memory_contexts was added during PG 18 development but
+-- reverted before release. Adding cross-backend capture would require log
+-- ingestion or a future PG API.
 --------------------------------------------------------------------------------
 
 -- 1. Config entries (all default-off)
@@ -233,8 +237,7 @@ $$;
 comment on function pgfr_record.sample_memory_contexts() is
 'Sample memory contexts into the ring. Default-off via memory_context_sampling_enabled. '
 'PG 14+ captures the caller backend only (pg_backend_memory_contexts is caller-scoped). '
-'Cross-backend sampling via pg_get_process_memory_contexts is PG 18+ and will be '
-'added alongside a PG 18 test matrix. Returns row count.';
+'Cross-backend sampling has no SQL-returning API in any released Postgres. Returns row count.';
 
 -- 8. Redefine rotate_ring() to also TRUNCATE memory_context_samples_N
 -- Superset of the 08_ring_buffer_v2.sql definition. Kept lock-step with it.
