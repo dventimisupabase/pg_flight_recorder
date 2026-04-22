@@ -14,6 +14,7 @@
 --   07_sparse_collectors.sql sparse PGSS/table/index collectors (v2 INSERT pattern)
 --   08_ring_buffer_v2.sql    ring buffer v2 tables, sample_ring, rotate_ring, flush, archive
 --   09_phase3_snapshots_v2.sql snapshots_v2 partitioned tables + dual-write trigger
+--   10_memory_contexts.sql   memory context sampling (PG 14+, default-off)
 
 \i /record_sql/01_schema.sql
 \i /record_sql/02_tables_legacy.sql
@@ -25,6 +26,7 @@
 \i /record_sql/07_sparse_collectors.sql
 \i /record_sql/08_ring_buffer_v2.sql
 \i /record_sql/09_phase3_snapshots_v2.sql
+\i /record_sql/10_memory_contexts.sql
 
 -- Post-install: migrate deprecated config key aliases to canonical names.
 -- Idempotent; safe on fresh install (keys won't exist yet) and upgrades.
