@@ -25,6 +25,14 @@ fi
 
 VERSION="${1:-all}"
 
+# Build progress mode: quiet locally (clean UX), plain on CI (full stdout/stderr
+# visible so failures can be diagnosed without reruns). See issue #44.
+if [ -n "${CI:-}" ]; then
+    BUILD_PROGRESS="--progress=plain"
+else
+    BUILD_PROGRESS="--quiet"
+fi
+
 run_single_version() {
     local pg_version=$1
     local service="postgres${pg_version}"
@@ -40,7 +48,7 @@ run_single_version() {
 
     # Build and start
     echo "Building PostgreSQL $pg_version image with pg_cron..."
-    $DOCKER_COMPOSE --profile $profile build --quiet
+    $DOCKER_COMPOSE --profile $profile build $BUILD_PROGRESS
 
     echo "Starting PostgreSQL $pg_version..."
     $DOCKER_COMPOSE --profile $profile up -d
@@ -97,7 +105,7 @@ run_all_parallel() {
 
     # Build all images in parallel
     echo "Building PostgreSQL images with pg_cron..."
-    $DOCKER_COMPOSE --profile all build --quiet --parallel
+    $DOCKER_COMPOSE --profile all build $BUILD_PROGRESS --parallel
 
     # Start all PostgreSQL instances
     echo "Starting all PostgreSQL instances..."
