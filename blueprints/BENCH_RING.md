@@ -12,20 +12,20 @@
 
 ### Table sizes after 300 s of sustained load
 
-| Table | Before load | After load | Dead tuples |
-|---|---|---|---|
-| **Old ring (UPDATE-based)** | | | |
-| `samples_ring` | 64 KiB | 64 KiB | 1 |
-| `wait_samples_ring` | 896 KiB | 912 KiB | 145 |
-| `activity_samples_ring` | 280 KiB | 320 KiB | 171 |
-| `lock_samples_ring` | 976 KiB | 1,008 KiB | 226 |
-| **Old ring total** | **2,216 KiB** | **2,304 KiB** | **543** |
-| | | | |
-| **New ring v2 (INSERT+TRUNCATE)** | | | |
-| `wait_samples_0` (current slot) | 0 | 64 KiB | 0 |
-| `wait_samples_1/2` (older slots) | 0 | 16 KiB each | 0 |
-| `lock_samples_0/1/2` | 0 | 8 KiB each | 0 |
-| **New ring total (excl. activity_samples)** | **0** | **~120 KiB** | **0** |
+| Table                                       | Before load   | After load    | Dead tuples |
+|---------------------------------------------|---------------|---------------|-------------|
+| **Old ring (UPDATE-based)**                 |               |               |             |
+| `samples_ring`                              | 64 KiB        | 64 KiB        | 1           |
+| `wait_samples_ring`                         | 896 KiB       | 912 KiB       | 145         |
+| `activity_samples_ring`                     | 280 KiB       | 320 KiB       | 171         |
+| `lock_samples_ring`                         | 976 KiB       | 1,008 KiB     | 226         |
+| **Old ring total**                          | **2,216 KiB** | **2,304 KiB** | **543**     |
+|                                             |               |               |             |
+| **New ring v2 (INSERT+TRUNCATE)**           |               |               |             |
+| `wait_samples_0` (current slot)             | 0             | 64 KiB        | 0           |
+| `wait_samples_1/2` (older slots)            | 0             | 16 KiB each   | 0           |
+| `lock_samples_0/1/2`                        | 0             | 8 KiB each    | 0           |
+| **New ring total (excl. activity_samples)** | **0**         | **~120 KiB**  | **0**       |
 
 **Bloat reduction: ~95% smaller hot footprint, zero dead tuples.**
 
@@ -35,12 +35,12 @@ which predates section 11. Expected size: ~30-50 KiB for top-25 sessions over
 
 ### Storage efficiency (v2 wait_samples)
 
-| Metric | Value |
-|---|---|
-| Rows inserted (60 ticks × ~1 database) | 64 |
-| Data size (pg_column_size) | 11 KiB |
-| Bytes per row (data only) | 175 bytes |
-| Dead tuples | 0 |
+| Metric                                 | Value     |
+|----------------------------------------|-----------|
+| Rows inserted (60 ticks × ~1 database) | 64        |
+| Data size (pg_column_size)             | 11 KiB    |
+| Bytes per row (data only)              | 175 bytes |
+| Dead tuples                            | 0         |
 
 175 bytes/row for integer[]-encoded wait samples vs ~2 KiB/slot in the old
 pre-populated wait_samples_ring. The encoding compresses 14 distinct wait events
@@ -48,22 +48,22 @@ across 16 clients into a single row per database per tick.
 
 ### Wait event map after 300 s load (14 entries)
 
-| id | state | type | event |
-|---|---|---|---|
-| 1 | active | Lock | transactionid |
-| 2 | active | LWLock | WALWrite |
-| 3 | active | IO | WalSync |
-| 4 | idle in transaction | Client | ClientRead |
-| 5 | active | Lock | tuple |
-| 6 | active | Client | ClientRead |
-| 7 | active | CPU* | CPU* |
-| 8 | idle in transaction | IdleTx | IdleTx |
-| 9 | active | LWLock | LockManager |
-| 10 | idle in transaction | Lock | transactionid |
-| 11 | idle in transaction | LWLock | LockManager |
-| 12 | idle in transaction | LWLock | WALWrite |
-| 13 | active | IO | WalWrite |
-| 14 | active | LWLock | BufferContent |
+| id | state               | type   | event         |
+|----|---------------------|--------|---------------|
+| 1  | active              | Lock   | transactionid |
+| 2  | active              | LWLock | WALWrite      |
+| 3  | active              | IO     | WalSync       |
+| 4  | idle in transaction | Client | ClientRead    |
+| 5  | active              | Lock   | tuple         |
+| 6  | active              | Client | ClientRead    |
+| 7  | active              | CPU*   | CPU*          |
+| 8  | idle in transaction | IdleTx | IdleTx        |
+| 9  | active              | LWLock | LockManager   |
+| 10 | idle in transaction | Lock   | transactionid |
+| 11 | idle in transaction | LWLock | LockManager   |
+| 12 | idle in transaction | LWLock | WALWrite      |
+| 13 | active              | IO     | WalWrite      |
+| 14 | active              | LWLock | BufferContent |
 
 Dictionary bounded: 14 entries after 300 s of 6,030 TPS load. In production
 this converges quickly and then stops growing (wait event space is finite).
