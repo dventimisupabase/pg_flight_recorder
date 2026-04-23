@@ -657,7 +657,7 @@ Profiles configure groups of related settings for different environments. Key di
 | `enable_locks` | true | false | true | true | false |
 | `enable_progress` | true | false | true | true | false |
 | `retention_snapshots_days` | 30 | 30 | 7 | 7 | 7 |
-| `retention_samples_days` | 7 | 7 | 3 | 7 | 3 |
+| `retention_archive_days` | 7 | 7 | 3 | 3 | 3 |
 | `section_timeout_ms` | 250 | 200 | 250 | 500 | 100 |
 | `statement_timeout_ms` | 1000 | 800 | 1000 | 2000 | 500 |
 | `work_mem_kb` | 2048 | 1024 | 2048 | 4096 | 1024 |
