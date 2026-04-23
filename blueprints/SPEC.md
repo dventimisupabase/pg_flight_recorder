@@ -1,29 +1,29 @@
 # Storage Overhaul: Partition-Based Retention, Compact Storage, Zero Bloat
 
-| Version | Date | Author |
-|---------|------|--------|
-| 2.7 | 2026-02-26 | @NikolayS |
+| Version | Date       | Author    |
+|---------|------------|-----------|
+| 2.7     | 2026-02-26 | @NikolayS |
 
 ---
 
 ## Changelog
 
-| Version | Changes |
-|---------|---------|
-| 2.7 | §9.2 baseline measurement complete (Hetzner cx22, PG 17.4, pgbench scale=50, 6.7h of pg_cron collection): Section 3 table updated with observed bytes/row and 30-day projections; confirmed statement_snapshots dominates at 466 bytes/row (960 MiB/30d at top_n=50, ~94 GiB at pgss.max=5000); confirmed config_snapshots change-log model effective (~1 MiB/30d); baseline_measure.sql corrected for actual collection_stats schema |
-| 2.6 | Sixth-pass reviews: clean-restart desync trap fixed (check stats_reset not just emptiness); TRUNCATE lock_timeout 2s→50ms (FIFO queue stall); dealloc is cluster-wide not per-db; logical replication TRUNCATE poison pill + publication workaround; _partition_inventory() runtime assertions; JIT call-discipline for EXECUTE |
-| 2.5 | Fifth-pass reviews: Q5 BigInt column type + sequence both required; BRIN/B-tree non-overlapping paths + pages_per_range workload note; advisory xact_lock held for full snapshot run; JIT inheritance via EXECUTE clarified; `_partition_inventory()` bound parsing fragility + single-column RANGE assumption; GC cadence configurable; best-effort retention under lock contention; ring EXECUTE plan-cache trade-off documented; skip-tick observability counter |
-| 2.4 | Fourth-pass reviews: two-tier GC (nightly TRUNCATE + monthly drop_ancient_partitions); fix TRUNCATE lock framing; fix advisory lock race — skip tick if rebuild in flight; lock_timeout on TRUNCATE; `_partition_inventory()` defined; `_ensure_partition()` O(1) happy path; BRIN pages_per_range=8 + correlation check; WAL section updated for TRUNCATE vs DROP vs DELETE; benchmark headers fixed; pg_stat_reset_single_table_counters() note; ring buffer reader uses EXECUTE by partition name; Q8 guardrails updated for accumulation math |
-| 2.3 | Replace DROP/DETACH with TRUNCATE for retention — eliminates dblink dependency, transaction-context trap, orphan tracking, and two-phase state machine; partition definitions accumulate but empty partitions are pruned automatically; `drop_old_partitions()` → `truncate_old_partitions()` throughout |
-| 2.2 | Third-pass reviews: DETACH CONCURRENTLY transaction trap + dblink/externalize options; advisory lock on _rebuild_statement_last_state; ANALYZE after rebuild; INSERT...ON CONFLICT DO UPDATE mandated (HOT); HOT DDL comment + pgTAP guard; remove thundering-herd spread suggestion; ring buffer reader views exclude "next" partition; two-phase GC orphan detection; partition_gc_health view; partition_gc_state self-cleanup (7-day TTL); BRIN index on sample_ts for time-range queries; generic plan pruning test; Phase 2 BIGSERIAL sequence monotonicity; PGSS collection failure isolation |
-| 2.1 | Second-pass reviews: add `toplevel` to composite key (PG14+ correctness); HOT-friendly `statement_last_state` with fillfactor+autovacuum; explicit crash recovery protocol (_rebuild_statement_last_state); daily TRUNCATE+rebuild semantics; PG14 minimum version declared in §2; `drop_old_partitions()` runs hourly + loops all eligible + partition_gc_state table + statement_timeout; dual-write cutover checklist; BIGSERIAL+dual-write synergy; soften Q3 partition pruning; relcache safety envelope in Q8; §9.8 references last-state join not DISTINCT ON; §9.12 pass/fail criteria |
-| 2.0 | Incorporate three external reviewer findings: replace DISTINCT ON with last-state side table (§5.2); function-level JIT disable (§6.3); UTC enforcement + index definitions + int4 horizon (§7.1); runtime partition ensure + pg_catalog-based drop + lock_timeout + DETACH CONCURRENTLY (§7.2); drop FK cascade recommendation (Q1); dual-write rollback strategy (Q2); partition pruning with explicit bounds (Q3); pg_stat_statements.max tracking (Q7); partition count guardrails (Q8); WAL benchmark (§9.11); high-churn benchmark (§9.12); expanded pgTAP suite (§9.13) |
-| 1.5 | Distinguish `pg_stat_statements_reset()` (PGSS) from `pg_stat_reset()` (global stats) — both must be tested, §9.10 expanded |
-| 1.4 | Fix stale `captured_at` references throughout — queries, indexes, prose all use `sample_ts` consistently |
-| 1.3 | Adopt `int4 sample_ts` + `epoch()` from pg_ash (Q6); flag `snapshot_id` integer overflow risk (Q5); fix `DISTINCT ON (queryid, dbid, userid)` — queryid alone is not unique in PGSS; all MiB figures marked as estimates with single section-level note; fix cross-references §9.5, Q3 |
-| 1.2 | Add §9.2 baseline measurement (run first); correct storage estimates to use `pg_stat_statements.max = 5000`; `config_snapshots` flagged as not benchmarked, not closed; row size assumption (280 bytes/row) made explicit |
-| 1.1 | Add sparse storage design (§5); reader function patterns (§6); expand benchmarking with extreme scenarios, simulated long runs, bloat comparison (§9) |
-| 1.0 | Initial spec: partition-based retention, zero DELETE, TRUNCATE rotation for ring buffers |
+| Version | Changes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 2.7     | §9.2 baseline measurement complete (Hetzner cx22, PG 17.4, pgbench scale=50, 6.7h of pg_cron collection): Section 3 table updated with observed bytes/row and 30-day projections; confirmed statement_snapshots dominates at 466 bytes/row (960 MiB/30d at top_n=50, ~94 GiB at pgss.max=5000); confirmed config_snapshots change-log model effective (~1 MiB/30d); baseline_measure.sql corrected for actual collection_stats schema                                                                                                                                                                |
+| 2.6     | Sixth-pass reviews: clean-restart desync trap fixed (check stats_reset not just emptiness); TRUNCATE lock_timeout 2s→50ms (FIFO queue stall); dealloc is cluster-wide not per-db; logical replication TRUNCATE poison pill + publication workaround; _partition_inventory() runtime assertions; JIT call-discipline for EXECUTE                                                                                                                                                                                                                                                                      |
+| 2.5     | Fifth-pass reviews: Q5 BigInt column type + sequence both required; BRIN/B-tree non-overlapping paths + pages_per_range workload note; advisory xact_lock held for full snapshot run; JIT inheritance via EXECUTE clarified; `_partition_inventory()` bound parsing fragility + single-column RANGE assumption; GC cadence configurable; best-effort retention under lock contention; ring EXECUTE plan-cache trade-off documented; skip-tick observability counter                                                                                                                                  |
+| 2.4     | Fourth-pass reviews: two-tier GC (nightly TRUNCATE + monthly drop_ancient_partitions); fix TRUNCATE lock framing; fix advisory lock race — skip tick if rebuild in flight; lock_timeout on TRUNCATE; `_partition_inventory()` defined; `_ensure_partition()` O(1) happy path; BRIN pages_per_range=8 + correlation check; WAL section updated for TRUNCATE vs DROP vs DELETE; benchmark headers fixed; pg_stat_reset_single_table_counters() note; ring buffer reader uses EXECUTE by partition name; Q8 guardrails updated for accumulation math                                                    |
+| 2.3     | Replace DROP/DETACH with TRUNCATE for retention — eliminates dblink dependency, transaction-context trap, orphan tracking, and two-phase state machine; partition definitions accumulate but empty partitions are pruned automatically; `drop_old_partitions()` → `truncate_old_partitions()` throughout                                                                                                                                                                                                                                                                                             |
+| 2.2     | Third-pass reviews: DETACH CONCURRENTLY transaction trap + dblink/externalize options; advisory lock on _rebuild_statement_last_state; ANALYZE after rebuild; INSERT...ON CONFLICT DO UPDATE mandated (HOT); HOT DDL comment + pgTAP guard; remove thundering-herd spread suggestion; ring buffer reader views exclude "next" partition; two-phase GC orphan detection; partition_gc_health view; partition_gc_state self-cleanup (7-day TTL); BRIN index on sample_ts for time-range queries; generic plan pruning test; Phase 2 BIGSERIAL sequence monotonicity; PGSS collection failure isolation |
+| 2.1     | Second-pass reviews: add `toplevel` to composite key (PG14+ correctness); HOT-friendly `statement_last_state` with fillfactor+autovacuum; explicit crash recovery protocol (_rebuild_statement_last_state); daily TRUNCATE+rebuild semantics; PG14 minimum version declared in §2; `drop_old_partitions()` runs hourly + loops all eligible + partition_gc_state table + statement_timeout; dual-write cutover checklist; BIGSERIAL+dual-write synergy; soften Q3 partition pruning; relcache safety envelope in Q8; §9.8 references last-state join not DISTINCT ON; §9.12 pass/fail criteria       |
+| 2.0     | Incorporate three external reviewer findings: replace DISTINCT ON with last-state side table (§5.2); function-level JIT disable (§6.3); UTC enforcement + index definitions + int4 horizon (§7.1); runtime partition ensure + pg_catalog-based drop + lock_timeout + DETACH CONCURRENTLY (§7.2); drop FK cascade recommendation (Q1); dual-write rollback strategy (Q2); partition pruning with explicit bounds (Q3); pg_stat_statements.max tracking (Q7); partition count guardrails (Q8); WAL benchmark (§9.11); high-churn benchmark (§9.12); expanded pgTAP suite (§9.13)                       |
+| 1.5     | Distinguish `pg_stat_statements_reset()` (PGSS) from `pg_stat_reset()` (global stats) — both must be tested, §9.10 expanded                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| 1.4     | Fix stale `captured_at` references throughout — queries, indexes, prose all use `sample_ts` consistently                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| 1.3     | Adopt `int4 sample_ts` + `epoch()` from pg_ash (Q6); flag `snapshot_id` integer overflow risk (Q5); fix `DISTINCT ON (queryid, dbid, userid)` — queryid alone is not unique in PGSS; all MiB figures marked as estimates with single section-level note; fix cross-references §9.5, Q3                                                                                                                                                                                                                                                                                                               |
+| 1.2     | Add §9.2 baseline measurement (run first); correct storage estimates to use `pg_stat_statements.max = 5000`; `config_snapshots` flagged as not benchmarked, not closed; row size assumption (280 bytes/row) made explicit                                                                                                                                                                                                                                                                                                                                                                            |
+| 1.1     | Add sparse storage design (§5); reader function patterns (§6); expand benchmarking with extreme scenarios, simulated long runs, bloat comparison (§9)                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| 1.0     | Initial spec: partition-based retention, zero DELETE, TRUNCATE rotation for ring buffers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
 ---
 
@@ -187,19 +187,19 @@ Observed bytes/row used for 30-day projections. Full detail: [Issue #4](https://
 **Note: PG18 not yet supported** — measurements apply to PG 15–17 only.
 **Scope limitations**: single-database setup, no streaming replication, pgbench workload only. Real production numbers may vary.
 
-| Table | Rows at 30d (projected) | ~MiB (projected) | Actual insert behavior | bytes/row (observed) | Priority |
-|-------|-------------------------|------------------|------------------------|----------------------|----------|
-| `config_snapshots` | ~5,760 | ~1 | **Change-log only** — 52 rows in 6.7 h on idle cluster | 157 | P1 |
-| `db_role_config_snapshots` | ~0 | ~0 | **Change-log only** — 0 rows observed (no role config changes) | n/a | P1 |
-| `statement_snapshots` | 2,160,000 (top_n=50) / **216,000,000** (pgss.max=5000) | **960 MiB** (top_n=50) / **~94 GiB** (pgss.max=5000) | Full insert every minute, no dedup | **466** | **P0** |
-| `table_snapshots` | 2,160,000 | **468 MiB** | Full insert every minute, no dedup | **227** | **P0** |
-| `index_snapshots` | ~2,195,000 | **176 MiB** | Full insert every minute, no dedup | **84** | **P0** |
-| `snapshots` (parent) | 43,200 | ~19 MiB | Full insert every minute | 457 | **P1** |
-| `replication_snapshots` | 0 | ~0 | Full insert every minute (0 rows — no replication on bench) | n/a | **P1** |
-| `activity_samples_archive` | ~139,000 | ~28 MiB | Ring flush every 15 min | 212 | **P1** |
-| `wait_samples_archive` | ~345,000 | ~36 MiB | Ring flush every 15 min | 108 | **P1** |
-| Ring buffers (combined) | ~27,000 (fixed) | ~16 MiB | UPDATE overwrite | 61–136 | **P2** |
-| Aggregate tables (combined) | ~167,000 | ~25 MiB | Aggregated from ring flush | 141–455 | **P2** |
+| Table                       | Rows at 30d (projected)                                | ~MiB (projected)                                     | Actual insert behavior                                         | bytes/row (observed) | Priority |
+|-----------------------------|--------------------------------------------------------|------------------------------------------------------|----------------------------------------------------------------|----------------------|----------|
+| `config_snapshots`          | ~5,760                                                 | ~1                                                   | **Change-log only** — 52 rows in 6.7 h on idle cluster         | 157                  | P1       |
+| `db_role_config_snapshots`  | ~0                                                     | ~0                                                   | **Change-log only** — 0 rows observed (no role config changes) | n/a                  | P1       |
+| `statement_snapshots`       | 2,160,000 (top_n=50) / **216,000,000** (pgss.max=5000) | **960 MiB** (top_n=50) / **~94 GiB** (pgss.max=5000) | Full insert every minute, no dedup                             | **466**              | **P0**   |
+| `table_snapshots`           | 2,160,000                                              | **468 MiB**                                          | Full insert every minute, no dedup                             | **227**              | **P0**   |
+| `index_snapshots`           | ~2,195,000                                             | **176 MiB**                                          | Full insert every minute, no dedup                             | **84**               | **P0**   |
+| `snapshots` (parent)        | 43,200                                                 | ~19 MiB                                              | Full insert every minute                                       | 457                  | **P1**   |
+| `replication_snapshots`     | 0                                                      | ~0                                                   | Full insert every minute (0 rows — no replication on bench)    | n/a                  | **P1**   |
+| `activity_samples_archive`  | ~139,000                                               | ~28 MiB                                              | Ring flush every 15 min                                        | 212                  | **P1**   |
+| `wait_samples_archive`      | ~345,000                                               | ~36 MiB                                              | Ring flush every 15 min                                        | 108                  | **P1**   |
+| Ring buffers (combined)     | ~27,000 (fixed)                                        | ~16 MiB                                              | UPDATE overwrite                                               | 61–136               | **P2**   |
+| Aggregate tables (combined) | ~167,000                                               | ~25 MiB                                              | Aggregated from ring flush                                     | 141–455              | **P2**   |
 
 *Row projections for statement_snapshots, table_snapshots, and index_snapshots represent worst-case (top_n fully saturated). Observed rates were 40–55% lower (~32 rows/tick for statement_snapshots vs. 50 theoretical max).*
 
@@ -494,12 +494,12 @@ queries fire on any given minute tick. The sparse model inserts 50–200 rows
 instead of 5,000 — a 25–100× reduction per tick. Over 30 days (assuming ~280
 bytes/row based on schema analysis — to be confirmed by §9.2 baseline measurement):
 
-| Scenario | Rows/day | ~MiB/day | vs naive |
-|----------|----------|----------|---------|
-| Naive (full insert) | 7,200,000 | ~2,024 | baseline |
-| Sparse — heavy OLTP (200 active/tick) | ~290,000 | ~81 | ~25× better |
-| Sparse — typical OLTP (50 active/tick) | ~75,000 | ~21 | ~96× better |
-| Sparse — idle (0 active/tick) | 5,000 (baseline only) | ~1.4 | ~1,400× better |
+| Scenario                               | Rows/day              | ~MiB/day | vs naive       |
+|----------------------------------------|-----------------------|----------|----------------|
+| Naive (full insert)                    | 7,200,000             | ~2,024   | baseline       |
+| Sparse — heavy OLTP (200 active/tick)  | ~290,000              | ~81      | ~25× better    |
+| Sparse — typical OLTP (50 active/tick) | ~75,000               | ~21      | ~96× better    |
+| Sparse — idle (0 active/tick)          | 5,000 (baseline only) | ~1.4     | ~1,400× better |
 
 ### 5.3 Apply to `table_snapshots` and `index_snapshots`
 
@@ -539,12 +539,12 @@ baseline. Reduction: 3–10× vs naive model depending on table activity distrib
 
 ### 5.4 What NOT to apply sparse storage to
 
-| Table | Reason |
-|-------|--------|
-| `snapshots` (parent) | Low volume (1 row/min), serves as the master timeline anchor |
-| `replication_snapshots` | Low volume; replication state changes matter even when counters are stable |
-| `vacuum_progress_snapshots` | Only populated during active vacuum — already sparse by nature |
-| Archive and ring buffer tables | Written from ring flush or ring sampling — different collection path |
+| Table                          | Reason                                                                     |
+|--------------------------------|----------------------------------------------------------------------------|
+| `snapshots` (parent)           | Low volume (1 row/min), serves as the master timeline anchor               |
+| `replication_snapshots`        | Low volume; replication state changes matter even when counters are stable |
+| `vacuum_progress_snapshots`    | Only populated during active vacuum — already sparse by nature             |
+| Archive and ring buffer tables | Written from ring flush or ring sampling — different collection path       |
 
 ---
 
@@ -925,14 +925,14 @@ static query.
 
 All tables receive the same treatment. Phases determined by volume and impact:
 
-| Table | Fix | Phase |
-|-------|-----|-------|
-| `statement_snapshots` | Sparse insert + daily partitions | 1 |
-| `config_snapshots` | Daily partitions (sparse insert already done) | 1 |
-| `table_snapshots`, `index_snapshots` | Sparse insert + daily partitions | 2 |
-| `snapshots`, `replication_snapshots`, others | Daily partitions | 2 |
-| Archive tables | Daily partitions | 3 |
-| Hot ring buffers | TRUNCATE rotation | 3 |
+| Table                                        | Fix                                           | Phase |
+|----------------------------------------------|-----------------------------------------------|-------|
+| `statement_snapshots`                        | Sparse insert + daily partitions              | 1     |
+| `config_snapshots`                           | Daily partitions (sparse insert already done) | 1     |
+| `table_snapshots`, `index_snapshots`         | Sparse insert + daily partitions              | 2     |
+| `snapshots`, `replication_snapshots`, others | Daily partitions                              | 2     |
+| Archive tables                               | Daily partitions                              | 3     |
+| Hot ring buffers                             | TRUNCATE rotation                             | 3     |
 
 ---
 
@@ -941,11 +941,11 @@ All tables receive the same treatment. Phases determined by volume and impact:
 Each data tier has one canonical retention config key. N days retention = N daily
 partitions, oldest dropped nightly.
 
-| Config key | Default | Min | Max | Covers |
-|------------|---------|-----|-----|--------|
-| `retention_snapshots_days` | 30 | 1 | 365 | All snapshot-tier tables |
-| `retention_archive_days` | 7 | 1 | 90 | Archive and aggregate tables |
-| `retention_hot_hours` | 4 | 2 | 168 | Hot ring — rotation period, not partition drop |
+| Config key                 | Default | Min | Max | Covers                                         |
+|----------------------------|---------|-----|-----|------------------------------------------------|
+| `retention_snapshots_days` | 30      | 1   | 365 | All snapshot-tier tables                       |
+| `retention_archive_days`   | 7       | 1   | 90  | Archive and aggregate tables                   |
+| `retention_hot_hours`      | 4       | 2   | 168 | Hot ring — rotation period, not partition drop |
 
 Old config keys (`aggregate_retention_days`, `archive_retention_days`,
 `retention_samples_days`) remain as deprecated aliases until removed in a later
@@ -1075,12 +1075,12 @@ psql -c "select count(*) from pg_stat_statements;"
 
 Run under four workload profiles, each for 24 hours:
 
-| Profile | Active queries per tick | Expected rows/tick (sparse) | vs naive (5,000/tick) |
-|---------|------------------------|-----------------------------|-----------------------|
-| Idle | 0 | 5,000 (baseline only, once/day) | ~99.9% reduction |
-| Typical OLTP | ~50 | ~50 | ~99% reduction |
-| Heavy OLTP | ~200 | ~200 | ~96% reduction |
-| Adversarial (all active) | ~5,000 | ~5,000 | ~0% — proves graceful degradation |
+| Profile                  | Active queries per tick | Expected rows/tick (sparse)     | vs naive (5,000/tick)             |
+|--------------------------|-------------------------|---------------------------------|-----------------------------------|
+| Idle                     | 0                       | 5,000 (baseline only, once/day) | ~99.9% reduction                  |
+| Typical OLTP             | ~50                     | ~50                             | ~99% reduction                    |
+| Heavy OLTP               | ~200                    | ~200                            | ~96% reduction                    |
+| Adversarial (all active) | ~5,000                  | ~5,000                          | ~0% — proves graceful degradation |
 
 The adversarial profile confirms the sparse model never performs worse than naive.
 The `statement_last_state` hash join overhead must not add unacceptable latency —
@@ -1149,12 +1149,12 @@ order by schemaname, relname;
 
 Expected:
 
-| Metric | Old schema (DELETE) | New schema (partition TRUNCATE) |
-|--------|--------------------|-----------------------------|
-| `n_dead_tup` after cleanup | = rows deleted | 0 always |
-| Heap size trend | Growing | Flat |
-| Autovacuum runs per hour | Many | 0 from retention |
-| Cleanup duration trend | Growing with bloat | Constant |
+| Metric                     | Old schema (DELETE) | New schema (partition TRUNCATE) |
+|----------------------------|---------------------|---------------------------------|
+| `n_dead_tup` after cleanup | = rows deleted      | 0 always                        |
+| Heap size trend            | Growing             | Flat                            |
+| Autovacuum runs per hour   | Many                | 0 from retention                |
+| Cleanup duration trend     | Growing with bloat  | Constant                        |
 
 ### 9.5 Extreme bloat: autovacuum disabled
 
@@ -1177,11 +1177,11 @@ Measure at three data volumes: 1 day, 7 days, 30 days of accumulated data.
 
 Expected scaling:
 
-| Volume | Old schema DELETE | New schema TRUNCATE |
-|--------|------------------|-----------------|
-| 1 day | ~500 ms | < 50 ms |
-| 7 days | ~3 s | < 50 ms |
-| 30 days | ~15–30 s | < 50 ms |
+| Volume  | Old schema DELETE | New schema TRUNCATE |
+|---------|-------------------|---------------------|
+| 1 day   | ~500 ms           | < 50 ms             |
+| 7 days  | ~3 s              | < 50 ms             |
+| 30 days | ~15–30 s          | < 50 ms             |
 
 Partition DROP is O(1) with respect to row count. DELETE is O(n).
 
