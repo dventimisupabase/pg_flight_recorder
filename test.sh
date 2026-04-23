@@ -46,12 +46,21 @@ run_single_version() {
     $DOCKER_COMPOSE --profile $profile up -d
 
     echo "Waiting for PostgreSQL to be ready..."
+    ready=0
     for _ in {1..30}; do
         if $DOCKER_COMPOSE --profile $profile exec -T $service pg_isready -U postgres > /dev/null 2>&1; then
+            ready=1
             break
         fi
         sleep 1
     done
+    if [ "$ready" -ne 1 ]; then
+        echo "ERROR: PostgreSQL $pg_version did not become ready within 30s."
+        echo "----- Container logs (last 100 lines) -----"
+        $DOCKER_COMPOSE --profile $profile logs --tail=100 $service 2>&1 || true
+        echo "-------------------------------------------"
+        exit 1
+    fi
 
     echo "Installing pg_cron and pg_stat_statements extensions..."
     $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_cron; CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" > /dev/null
@@ -97,12 +106,21 @@ run_all_parallel() {
     # Wait for all instances to be ready
     echo "Waiting for all PostgreSQL instances to be ready..."
     for service in postgres15 postgres16 postgres17 postgres18; do
+        ready=0
         for _ in {1..30}; do
             if $DOCKER_COMPOSE --profile all exec -T $service pg_isready -U postgres > /dev/null 2>&1; then
+                ready=1
                 break
             fi
             sleep 1
         done
+        if [ "$ready" -ne 1 ]; then
+            echo "ERROR: $service did not become ready within 30s."
+            echo "----- Container logs (last 100 lines) -----"
+            $DOCKER_COMPOSE --profile all logs --tail=100 $service 2>&1 || true
+            echo "-------------------------------------------"
+            exit 1
+        fi
     done
 
     # Setup all instances in parallel
