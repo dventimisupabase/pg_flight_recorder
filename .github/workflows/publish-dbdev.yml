@@ -40,10 +40,16 @@ jobs:
           fi
           echo "version=$VER" >> $GITHUB_OUTPUT
 
+      # install.sql files source modular SQL via psql `\ir` meta-commands,
+      # which work for `psql -f install.sql` but are rejected by CREATE
+      # EXTENSION (server-side script processor). build_dbdev_package.sh
+      # inlines every `\ir` directive and minifies the result (strips
+      # blank lines, full-line `--` comments, and COMMENT ON statements)
+      # so the package fits under dbdev's 250,000-char limit.
       - name: Prepare core extension files
         run: |
           VER="${{ steps.version.outputs.version }}"
-          cp pgfr_record/install.sql "pgfr_record/pgfr_record--${VER}.sql"
+          ./scripts/build_dbdev_package.sh pgfr_record "pgfr_record/pgfr_record--${VER}.sql"
           mv pgfr_record/extension.control pgfr_record/pgfr_record.control
           sed -i "s/^default_version = .*/default_version = '${VER}'/" pgfr_record/pgfr_record.control
 
@@ -58,7 +64,7 @@ jobs:
       - name: Prepare reporting extension files
         run: |
           VER="${{ steps.version.outputs.version }}"
-          cp pgfr_analyze/install.sql "pgfr_analyze/pgfr_analyze--${VER}.sql"
+          ./scripts/build_dbdev_package.sh pgfr_analyze "pgfr_analyze/pgfr_analyze--${VER}.sql"
           mv pgfr_analyze/extension.control pgfr_analyze/pgfr_analyze.control
           sed -i "s/^default_version = .*/default_version = '${VER}'/" pgfr_analyze/pgfr_analyze.control
 

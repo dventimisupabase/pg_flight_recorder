@@ -57,10 +57,10 @@ run_single_version() {
     $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_cron; CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" > /dev/null
 
     echo "Installing pgfr_record..."
-    $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres --single-transaction -f /install.sql > /dev/null
+    $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres --single-transaction -f /pgfr_record/install.sql > /dev/null
 
     echo "Installing reporting functions..."
-    $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres --single-transaction -f /analyze.sql > /dev/null
+    $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres --single-transaction -f /pgfr_analyze/install.sql > /dev/null
 
     echo "Installing pgTAP extension..."
     $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pgtap;" > /dev/null
@@ -110,8 +110,8 @@ run_all_parallel() {
     for service in postgres15 postgres16 postgres17 postgres18; do
         (
             $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_cron; CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" > /dev/null
-            $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres --single-transaction -f /install.sql > /dev/null
-            $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres --single-transaction -f /analyze.sql > /dev/null
+            $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres --single-transaction -f /pgfr_record/install.sql > /dev/null
+            $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres --single-transaction -f /pgfr_analyze/install.sql > /dev/null
             $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pgtap;" > /dev/null
             $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -c "SELECT pgfr_record.disable();" > /dev/null
         ) &
