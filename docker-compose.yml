@@ -64,7 +64,10 @@ services:
     ports:
       - "5418:5432"
     volumes:
-      - postgres18_data:/var/lib/postgresql/data
+      # PG 18+ images refuse to start with data at /var/lib/postgresql/data
+      # (major-version-specific subdirs) — mount the parent instead.
+      # See: https://github.com/docker-library/postgres/pull/1259
+      - postgres18_data:/var/lib/postgresql
 
 volumes:
   postgres15_data:

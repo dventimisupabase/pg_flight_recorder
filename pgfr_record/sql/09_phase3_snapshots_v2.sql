@@ -204,6 +204,11 @@ declare
     v_io_bgw_writes     bigint;
     v_io_bgw_write_t    double precision;
     v_confl_logicalslot bigint := 0;
+    v_wal_records       bigint;
+    v_wal_fpi           bigint;
+    v_wal_bytes         numeric;
+    v_wal_write_time    double precision;  -- PG18+ dropped from pg_stat_wal; stays NULL
+    v_wal_sync_time     double precision;  -- PG18+ dropped from pg_stat_wal; stays NULL
 begin
     v_sample_ts  := extract(epoch from now() - pgfr_record.epoch())::int4;
     v_pg_version := pgfr_record._pg_version();
@@ -264,6 +269,21 @@ begin
         v_confl_logicalslot := coalesce(v_confl_logicalslot, 0);
     end if;
 
+    -- pg_stat_wal dropped wal_write_time / wal_sync_time in PG18. Capture via
+    -- version-guarded EXECUTE so the parser never sees the removed columns on
+    -- PG18+. CASE-WHEN guards don't work here: column refs are resolved at
+    -- parse time, not runtime.
+    if v_pg_version >= 18 then
+        execute $q$select wal_records, wal_fpi, wal_bytes from pg_stat_wal$q$
+            into v_wal_records, v_wal_fpi, v_wal_bytes;
+        -- v_wal_write_time, v_wal_sync_time remain NULL
+    else
+        execute $q$
+            select wal_records, wal_fpi, wal_bytes, wal_write_time, wal_sync_time
+            from pg_stat_wal
+        $q$ into v_wal_records, v_wal_fpi, v_wal_bytes, v_wal_write_time, v_wal_sync_time;
+    end if;
+
     -- ensure today's partition exists (O(1) on happy path)
     perform pgfr_record._ensure_partition('snapshots_v2', current_date,
         'snapshot_id, sample_ts desc');
@@ -299,9 +319,8 @@ begin
         v_sample_ts,
         now(),
         v_pg_version,
-        w.wal_records, w.wal_fpi, w.wal_bytes,
-        case when v_pg_version >= 18 then null else w.wal_write_time end,
-        case when v_pg_version >= 18 then null else w.wal_sync_time  end,
+        v_wal_records, v_wal_fpi, v_wal_bytes,
+        v_wal_write_time, v_wal_sync_time,
         -- checkpoint_lsn and checkpoint_time come from pg_control_checkpoint(),
         -- not pg_stat_checkpointer (which only has counters and timing)
         pgcc.checkpoint_lsn, pgcc.checkpoint_time,
@@ -332,8 +351,7 @@ begin
         v_confl_logicalslot,
         (select max(oid) from pg_class),
         (select count(*) from pg_largeobject_metadata)
-    from pg_stat_wal w
-    cross join pg_control_checkpoint() pgcc
+    from pg_control_checkpoint() pgcc
     cross join pg_stat_bgwriter bg
     cross join (select * from pg_stat_database where datname = current_database()) db
     cross join pg_stat_archiver ar
