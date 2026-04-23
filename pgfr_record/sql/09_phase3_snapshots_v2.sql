@@ -84,6 +84,9 @@ create table if not exists pgfr_record.snapshots_v2 (
     large_object_count  bigint
 ) partition by range (sample_ts);
 
+create table if not exists pgfr_record.snapshots_v2_default
+    partition of pgfr_record.snapshots_v2 default;
+
 comment on table pgfr_record.snapshots_v2 is
 'Cluster-level snapshot metrics, daily RANGE-partitioned by int4 sample_ts. '
 'No FK constraints: child tables use snapshot_id as logical (non-enforced) reference. '
@@ -112,6 +115,9 @@ create table if not exists pgfr_record.replication_snapshots_v2 (
     reply_time          timestamptz
 ) partition by range (sample_ts);
 
+create table if not exists pgfr_record.replication_snapshots_v2_default
+    partition of pgfr_record.replication_snapshots_v2 default;
+
 comment on table pgfr_record.replication_snapshots_v2 is
 'Per-replica replication state, daily RANGE-partitioned by int4 sample_ts. '
 'snapshot_id is a logical (non-FK) reference to snapshots_v2. '
@@ -134,6 +140,9 @@ create table if not exists pgfr_record.vacuum_progress_snapshots_v2 (
     max_dead_tuples     bigint,
     num_dead_tuples     bigint
 ) partition by range (sample_ts);
+
+create table if not exists pgfr_record.vacuum_progress_snapshots_v2_default
+    partition of pgfr_record.vacuum_progress_snapshots_v2 default;
 
 comment on table pgfr_record.vacuum_progress_snapshots_v2 is
 'In-progress VACUUM state per snapshot tick, daily RANGE-partitioned by int4 sample_ts. '
@@ -467,6 +476,9 @@ create table if not exists pgfr_record.activity_samples_archive_v2 (
     query_preview       text
 ) partition by range (sample_ts);
 
+create table if not exists pgfr_record.activity_samples_archive_v2_default
+    partition of pgfr_record.activity_samples_archive_v2 default;
+
 comment on table pgfr_record.activity_samples_archive_v2 is
 'Activity samples archive, daily RANGE-partitioned by int4 sample_ts. '
 'No BIGSERIAL PK, no FK. Retention via truncate_old_partitions() / drop_ancient_partitions(). '
@@ -491,6 +503,9 @@ create table if not exists pgfr_record.lock_samples_archive_v2 (
     locked_relation_oid     oid
 ) partition by range (sample_ts);
 
+create table if not exists pgfr_record.lock_samples_archive_v2_default
+    partition of pgfr_record.lock_samples_archive_v2 default;
+
 comment on table pgfr_record.lock_samples_archive_v2 is
 'Lock samples archive, daily RANGE-partitioned by int4 sample_ts. '
 'No BIGSERIAL PK, no FK. Retention via truncate_old_partitions() / drop_ancient_partitions().';
@@ -507,6 +522,9 @@ create table if not exists pgfr_record.wait_samples_archive_v2 (
     state               text,
     count               integer
 ) partition by range (sample_ts);
+
+create table if not exists pgfr_record.wait_samples_archive_v2_default
+    partition of pgfr_record.wait_samples_archive_v2 default;
 
 comment on table pgfr_record.wait_samples_archive_v2 is
 'Wait event samples archive, daily RANGE-partitioned by int4 sample_ts. '
