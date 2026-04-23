@@ -34,6 +34,9 @@ create table if not exists pgfr_record.statement_snapshots_v2 (
     pgss_dealloc_warning    boolean         not null default false  -- cluster-level PGSS eviction event
 ) partition by range (sample_ts);
 
+create table if not exists pgfr_record.statement_snapshots_v2_default
+    partition of pgfr_record.statement_snapshots_v2 default;
+
 comment on table pgfr_record.statement_snapshots_v2 is
 'Sparse PGSS history partitioned by int4 sample_ts (seconds since pgfr_record.epoch()). '
 'Dual-write: old statement_snapshots retained. Missing row = no change since last stored row. '
@@ -367,6 +370,9 @@ create table if not exists pgfr_record.table_snapshots_v2 (
     indexes_size_bytes  bigint
 ) partition by range (sample_ts);
 
+create table if not exists pgfr_record.table_snapshots_v2_default
+    partition of pgfr_record.table_snapshots_v2 default;
+
 comment on table pgfr_record.table_snapshots_v2 is
 'Sparse table-level stats history partitioned by int4 sample_ts (seconds since pgfr_record.epoch()). '
 'Missing row = no change since last stored row. '
@@ -639,6 +645,9 @@ create table if not exists pgfr_record.index_snapshots_v2 (
     idx_tup_fetch       bigint,
     index_size_bytes    bigint
 ) partition by range (sample_ts);
+
+create table if not exists pgfr_record.index_snapshots_v2_default
+    partition of pgfr_record.index_snapshots_v2 default;
 
 comment on table pgfr_record.index_snapshots_v2 is
 'Sparse index-level stats history partitioned by int4 sample_ts (seconds since pgfr_record.epoch()). '
