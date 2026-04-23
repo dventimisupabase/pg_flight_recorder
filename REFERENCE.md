@@ -15,7 +15,7 @@ Complete reference for [pg-flight-recorder](README.md). For installation and get
 | `pgfr_record.enable()` | `text` | Start collection jobs via pg_cron |
 | `pgfr_record.disable()` | `text` | Stop collection jobs |
 | `pgfr_record.health_check()` | `record` | System health status with diagnostics |
-| `pgfr_record.set_mode(mode text)` | `text` | Set collection mode: `normal`, `light`, `emergency`, `kill` |
+| `pgfr_record.set_mode(mode text)` | `text` | Set collection mode: `normal`, `light`, or `emergency` |
 | `pgfr_record.get_mode()` | `record` | Get current collection mode |
 | `pgfr_record.validate_config()` | `record` | Validate all configuration settings |
 | `pgfr_record.config_recommendations()` | `record` | Get configuration recommendations based on system state |
