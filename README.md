@@ -19,7 +19,7 @@ Flight Recorder collects two types of data:
 | **Sampled Activity** | Wait events, sessions, locks           | 1 min     | Ring buffer: 2h, Archives: 7d     |
 | **Snapshots**        | WAL, checkpoints, I/O, tables, indexes | 1 min     | 30 days                           |
 
-Data flows through UNLOGGED ring buffers (hot, low-overhead) into durable archives and aggregates (cold, long-retention). Safety mechanisms -- circuit breaker, load shedding, per-section timeouts, and pg_cron job timeouts -- prevent the recorder from impacting production workloads.
+Data flows through ring buffers (hot, low-overhead) into durable archives and aggregates (cold, long-retention). Safety mechanisms -- circuit breaker, load shedding, per-section timeouts, and pg_cron job timeouts -- prevent the recorder from impacting production workloads.
 
 ## Extensions
 
@@ -137,16 +137,19 @@ Flight Recorder includes automatic protections:
 | **Circuit Breaker**    | Skips collection if recent runs averaged > 1s         |
 | **Load Shedding**      | Skips collection when > 70% connections active        |
 | **Section Timeouts**   | Per-query timeout (250ms) prevents catalog lock hangs |
-| **Job Timeouts**       | Outer statement_timeout on all pg_cron jobs (5-60s)   |
+| **Job Timeouts**       | Outer `statement_timeout` on pg_cron collector jobs (500ms–60s) |
 
-Collection modes provide manual control: `normal`, `light`, `emergency`, `kill`.
+Collection modes provide manual control: `normal`, `light`, `emergency`.
 
 ```sql
--- Emergency stop
-SELECT pgfr_record.set_mode('kill');
+-- Reduce to minimum collection (300s sampling, locks/progress off)
+SELECT pgfr_record.set_mode('emergency');
+
+-- Full stop: unschedule all pg_cron jobs
+SELECT pgfr_record.disable();
 
 -- Resume
-SELECT pgfr_record.set_mode('normal');
+SELECT pgfr_record.enable();
 ```
 
 ## Export
@@ -186,9 +189,8 @@ psql --single-transaction -f pgfr_analyze/uninstall.sql
 ## Testing
 
 ```bash
-./test.sh           # Run tests (requires Docker)
-./test.sh 17        # Test specific PostgreSQL version
-./test.sh parallel  # Test all versions in parallel
+./test.sh           # Test all PostgreSQL versions in parallel (requires Docker)
+./test.sh 17        # Test a specific PostgreSQL version (15, 16, 17, or 18)
 ```
 
 ## Reference
