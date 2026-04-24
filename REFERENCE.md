@@ -82,7 +82,7 @@ Complete reference for [pg-flight-recorder](README.md). For installation and get
 | `pgfr_analyze.report(start timestamptz, end timestamptz)` | `text` | Diagnostic report for a specific time range |
 | `pgfr_analyze.summary_report(start timestamptz, end timestamptz)` | `record` | Summary statistics |
 | `pgfr_analyze.performance_report(start timestamptz, end timestamptz)` | `record` | Performance-focused report |
-| `pgfr_analyze.anomaly_report(start timestamptz, end timestamptz)` | `record` | Anomaly analysis: checkpoints, buffer pressure, temp spills, locks, XID risk |
+| `pgfr_analyze.anomaly_report(start timestamptz, end timestamptz)` | `record` | Anomaly analysis: checkpoints, buffer pressure, temp spills, locks, XID + MultiXID wraparound risk |
 | `pgfr_analyze.check_alerts()` | `record` | Check active alert conditions |
 
 ### Forensics
@@ -314,7 +314,8 @@ Aggregates summarize ring buffer data into 5-minute windows.
 | `connections_total` | int | Total connections |
 | `connections_max` | int | `max_connections` setting |
 | `db_size_bytes` | bigint | Database size |
-| `datfrozenxid_age` | int | Database frozen XID age |
+| `datfrozenxid_age` | int | Database frozen XID age (`age(datfrozenxid)`) |
+| `datminmxid_age` | int | Database MultiXact ID age (`mxid_age(datminmxid)`) |
 | `archived_count` | bigint | WAL files archived |
 | `last_archived_wal` | text | Last archived WAL file |
 | `last_archived_time` | timestamptz | Last archive time |
@@ -384,7 +385,8 @@ Aggregates summarize ring buffer data into 5-minute windows.
 | `last_autovacuum` | timestamptz | Last autovacuum |
 | `last_analyze` | timestamptz | Last manual analyze |
 | `last_autoanalyze` | timestamptz | Last autoanalyze |
-| `relfrozenxid_age` | int | Table frozen XID age |
+| `relfrozenxid_age` | int | Table frozen XID age (`age(c.relfrozenxid)`) |
+| `relminmxid_age` | int | Table MultiXact ID age (`mxid_age(c.relminmxid)`) |
 | `reltuples` | bigint | Estimated live rows (from `pg_class`) |
 | `vacuum_running` | bool | Whether vacuum is currently running |
 | `last_vacuum_duration_ms` | bigint | Duration of last vacuum (ms) |
@@ -621,6 +623,32 @@ UPDATE pgfr_record.config SET value = '300' WHERE key = 'sample_interval_seconds
 | `regression_severity_medium_max` | `500.0` | Max % for MEDIUM severity |
 | `regression_severity_high_max` | `1000.0` | Max % for HIGH severity |
 | `regression_detection_metric` | `buffers` | Metric for regression detection: `buffers` or `time` |
+
+### XID / MultiXID wraparound thresholds
+
+Warning/critical severity bands for `pgfr_analyze.anomaly_report()`, expressed as
+fractions of the corresponding `autovacuum_*_freeze_max_age` GUC. Defaults match
+the guidance in [postgres-howto #0044](https://postgres.ai/docs/postgres-howtos/performance-optimization/monitoring/how-to-monitor-transaction-id-wraparound-risks);
+tune `*_warning_ratio` down on busy clusters where 50% is too late to warn.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `xid_warning_ratio`   | `0.5` | Warn when `datfrozenxid_age` / `relfrozenxid_age` exceeds this fraction of `autovacuum_freeze_max_age` |
+| `xid_critical_ratio`  | `0.8` | Escalate to critical above this fraction |
+| `mxid_warning_ratio`  | `0.5` | Warn when `datminmxid_age` / `relminmxid_age` exceeds this fraction of `autovacuum_multixact_freeze_max_age` |
+| `mxid_critical_ratio` | `0.8` | Escalate to critical above this fraction |
+
+Tune via:
+
+```sql
+insert into pgfr_record.config (key, value) values ('mxid_warning_ratio', '0.25')
+    on conflict (key) do update set value = excluded.value;
+```
+
+Applies to both database-level (`XID_WRAPAROUND_RISK` / `MXID_WRAPAROUND_RISK`)
+and per-table (`TABLE_XID_WRAPAROUND_RISK` / `TABLE_MXID_WRAPAROUND_RISK`) anomalies.
+Per-table checks honor each relation's `autovacuum_freeze_max_age` /
+`autovacuum_multixact_freeze_max_age` reloption override.
 
 ### Vacuum control
 

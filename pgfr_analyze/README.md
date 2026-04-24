@@ -8,7 +8,7 @@ pgfr_analyze reads the snapshot and ring buffer data collected by pgfr_record an
 
 ## Key features
 
-- **Anomaly detection**: checkpoint anomalies, buffer pressure, temp file spills, lock contention, XID wraparound risk
+- **Anomaly detection**: checkpoint anomalies, buffer pressure, temp file spills, lock contention, XID **and MultiXID** wraparound risk (configurable warning/critical ratios; see `xid_*_ratio` / `mxid_*_ratio` config keys in [REFERENCE.md](../REFERENCE.md#xid--multixid-wraparound-thresholds))
 - **Query storm and regression detection**: find abnormal query patterns and performance regressions with severity classification
 - **Time-travel forensics**: `what_happened_at()` for point-in-time analysis, `incident_timeline()` for event reconstruction
 - **Blast radius analysis**: measure the impact of high-cost queries on system resources
