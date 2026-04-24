@@ -74,9 +74,17 @@ create trigger snapshot_v2_dual_write
     for each row
     execute function pgfr_record._snapshot_v2_trigger();
 
--- Restore pgfr_cleanup cron, remove partition GC jobs
+-- Restore pgfr_cleanup cron, remove partition GC jobs.
+-- Tries both new (#59 underscore) and old (hyphen) names defensively, in case
+-- rollback runs against an install on either side of the rename.
 do $$
 begin
+    perform cron.unschedule('pgfr_truncate_partitions')
+    where exists (select 1 from cron.job where jobname = 'pgfr_truncate_partitions');
+
+    perform cron.unschedule('pgfr_drop_ancient_partitions')
+    where exists (select 1 from cron.job where jobname = 'pgfr_drop_ancient_partitions');
+
     perform cron.unschedule('pgfr-truncate-partitions')
     where exists (select 1 from cron.job where jobname = 'pgfr-truncate-partitions');
 

@@ -435,7 +435,7 @@ create trigger snapshot_v2_dual_write
     execute function pgfr_record._snapshot_v2_trigger();
 
 -- ---------------------------------------------------------------------------
--- 7. pgfr-precreate-partitions cron scheduling is consolidated into
+-- 7. pgfr_precreate_partitions cron scheduling is consolidated into
 --    pgfr_record.enable() (see 05_functions_ops.sql). install.sql calls
 --    enable() as its final step.
 -- ---------------------------------------------------------------------------
@@ -550,7 +550,7 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------------
--- Archive v2 tables are covered by pgfr-precreate-partitions, which is
+-- Archive v2 tables are covered by pgfr_precreate_partitions, which is
 -- scheduled in pgfr_record.enable() (see 05_functions_ops.sql) with the full
 -- 9-table command string. No separate scheduling needed here.
 -- ---------------------------------------------------------------------------

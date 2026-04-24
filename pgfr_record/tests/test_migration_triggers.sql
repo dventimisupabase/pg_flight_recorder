@@ -127,12 +127,12 @@ rollback;
 
 do $$
 begin
-    if not exists (select 1 from cron.job where jobname = 'pgfr-truncate-partitions') then
-        perform cron.schedule('pgfr-truncate-partitions', '0 3 * * *',
+    if not exists (select 1 from cron.job where jobname = 'pgfr_truncate_partitions') then
+        perform cron.schedule('pgfr_truncate_partitions', '0 3 * * *',
             'select pgfr_record.truncate_old_partitions()');
     end if;
-    if not exists (select 1 from cron.job where jobname = 'pgfr-drop-ancient-partitions') then
-        perform cron.schedule('pgfr-drop-ancient-partitions', '0 4 1 * *',
+    if not exists (select 1 from cron.job where jobname = 'pgfr_drop_ancient_partitions') then
+        perform cron.schedule('pgfr_drop_ancient_partitions', '0 4 1 * *',
             'select pgfr_record.drop_ancient_partitions()');
     end if;
 end $$;

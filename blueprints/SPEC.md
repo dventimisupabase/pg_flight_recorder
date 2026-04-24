@@ -61,7 +61,7 @@
 - [x] `table_last_state`, `index_last_state` + sparse collectors (PR #12)
 - [x] `migrate_phase1.sql` — migration path for existing installations (PR #10, Q2 resolved)
 - [x] `pgfr_analyze` v2-native reader functions — `statement_activity_v2`, `table_activity_v2`, `index_activity_v2` (PR #11, Q2b resolved)
-- [x] pg_cron jobs: `pgfr-truncate-old-partitions`, `pgfr-drop-ancient-partitions` (PR #7)
+- [x] pg_cron jobs: `pgfr_truncate_partitions`, `pgfr_drop_ancient_partitions` (PR #7; renamed from hyphenated form per #59)
 - [x] pgTAP suite — 688 assertions across 20 test files
 - [x] PG18 compatibility — `pg_stat_wal` column removals, PGSS column renames, `_ensure_partition()` index fix (commit `c5b7f52`)
 
@@ -79,7 +79,7 @@
 - [x] `_register_query()` — dynamic dispatch insert into current slot's `query_map`
 - [x] `sample_ring()` — INSERT-based, reads `pg_stat_activity`, integer[] encoding
 - [x] `recent_waits_v2` reader view — decodes integer[] to human-readable wait events
-- [x] pg_cron jobs: `pgfr-sample-ring` (every minute), `pgfr-rotate-ring` (every 2h)
+- [x] pg_cron jobs: `pgfr_sample_ring` (every minute), `pgfr_rotate_ring` (every 2h) — renamed from hyphenated form per #59
 - [x] pgTAP suite: `test_ring_buffer.sql` — 26 assertions, all pass on PG18
 - [x] PG18 compat applied to Phase 2 code (commit `d1d2b24`)
 - [x] `activity_samples_0/1/2` — LOGGED, LIST-partitioned, top 25 sessions per tick (commit `4b0fc32`)
