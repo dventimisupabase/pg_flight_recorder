@@ -4,11 +4,11 @@
 -- Tests: XID and MultiXID age columns exist and are populated with reasonable values
 -- MultiXID monitoring per
 --   https://postgres.ai/docs/postgres-howtos/performance-optimization/monitoring/how-to-monitor-transaction-id-wraparound-risks
--- Test count: 26
+-- Test count: 30
 -- =============================================================================
 
 BEGIN;
-SELECT plan(26);
+SELECT plan(30);
 
 -- =============================================================================
 -- 1. COLUMN EXISTENCE (4 tests)
@@ -283,6 +283,72 @@ SELECT ok(
         WHERE anomaly_type = 'TABLE_MXID_WRAPAROUND_RISK'
     ),
     'TABLE_MXID_WRAPAROUND_RISK should fire when relminmxid_age exceeds per-table threshold'
+);
+
+-- =============================================================================
+-- 9. CONFIGURABLE-THRESHOLD INTEGRATION TESTS (4 tests)
+-- =============================================================================
+-- Instead of simulating actual wraparound via pg_resetwal (which the howto #0040
+-- recipe uses destructively on a cluster), we tune the configurable ratios
+-- down to near-zero so the REAL datfrozenxid_age / relfrozenxid_age from this
+-- cluster crosses warning/critical. Exercises collector → anomaly_report end
+-- to end with real data, verifying the threshold math without advancing XIDs.
+--
+-- Ref: https://gitlab.com/postgres-ai/postgresql-consulting/postgres-howtos/-/blob/main/0040_how_to_break_a_database_part_2_simulate_xid_wraparound.md
+--
+-- Clear the window first so we work with one clean snapshot; inject a row with
+-- a small but non-zero real-looking XID age (fresh clusters report ~3k XIDs).
+DELETE FROM pgfr_record.table_snapshots
+WHERE snapshot_id IN (
+    SELECT id FROM pgfr_record.snapshots
+    WHERE captured_at BETWEEN now() - interval '5 minutes' AND now()
+);
+DELETE FROM pgfr_record.snapshots
+WHERE captured_at BETWEEN now() - interval '5 minutes' AND now();
+SELECT pgfr_record.snapshot();
+
+-- T27: XID_WRAPAROUND_RISK fires with REAL datfrozenxid_age when warning ratio
+-- is tuned so low that (autovacuum_freeze_max_age * ratio) < real_age.
+-- Ratio 0.0000001 * 200M = 20 XIDs, well under a fresh cluster's real age.
+-- Keep critical at default 0.8 so severity stays 'high', not 'critical'.
+UPDATE pgfr_record.config SET value = '0.0000001' WHERE key = 'xid_warning_ratio';
+UPDATE pgfr_record.config SET value = '0.8'       WHERE key = 'xid_critical_ratio';
+SELECT ok(
+    EXISTS (
+        SELECT 1 FROM pgfr_analyze.anomaly_report(now() - interval '5 minutes', now())
+        WHERE anomaly_type = 'XID_WRAPAROUND_RISK' AND severity = 'high'
+    ),
+    'XID_WRAPAROUND_RISK fires at severity=high for real datfrozenxid_age when xid_warning_ratio tuned low'
+);
+
+-- T28: severity escalates to 'critical' when critical ratio is also lowered
+UPDATE pgfr_record.config SET value = '0.0000001' WHERE key = 'xid_critical_ratio';
+SELECT is(
+    (SELECT severity FROM pgfr_analyze.anomaly_report(now() - interval '5 minutes', now())
+     WHERE anomaly_type = 'XID_WRAPAROUND_RISK' LIMIT 1),
+    'critical',
+    'XID_WRAPAROUND_RISK severity becomes critical when xid_critical_ratio also tuned low'
+);
+
+-- T29: table-level anomaly uses the same ratio — fires for real per-table age
+-- (seed activity was already done by snapshot() above; table_snapshots has rows)
+SELECT ok(
+    EXISTS (
+        SELECT 1 FROM pgfr_analyze.anomaly_report(now() - interval '5 minutes', now())
+        WHERE anomaly_type = 'TABLE_XID_WRAPAROUND_RISK'
+    ),
+    'TABLE_XID_WRAPAROUND_RISK fires for real relfrozenxid_age when ratios tuned low'
+);
+
+-- T30: restoring defaults makes the anomaly NOT fire — proves config drives detection
+UPDATE pgfr_record.config SET value = '0.5' WHERE key = 'xid_warning_ratio';
+UPDATE pgfr_record.config SET value = '0.8' WHERE key = 'xid_critical_ratio';
+SELECT ok(
+    NOT EXISTS (
+        SELECT 1 FROM pgfr_analyze.anomaly_report(now() - interval '5 minutes', now())
+        WHERE anomaly_type IN ('XID_WRAPAROUND_RISK', 'TABLE_XID_WRAPAROUND_RISK')
+    ),
+    'No XID anomaly fires once xid_*_ratio restored to defaults (0.5/0.8)'
 );
 
 SELECT * FROM finish();
