@@ -446,6 +446,7 @@ begin
         perform cron.schedule(
             'pgfr-precreate-partitions',
             '55 23 * * *',
+            'set statement_timeout = ''5s''; '
             'do $x$ begin '
             'perform pgfr_record._ensure_partition(''snapshots_v2'', current_date + 1, ''snapshot_id, sample_ts desc''); '
             'perform pgfr_record._ensure_partition(''replication_snapshots_v2'', current_date + 1, ''snapshot_id, sample_ts desc''); '
@@ -580,6 +581,7 @@ begin
     perform cron.schedule(
         'pgfr-precreate-partitions',
         '55 23 * * *',
+        'set statement_timeout = ''5s''; '
         'do $x$ begin '
         'perform pgfr_record._ensure_partition(''snapshots_v2'', current_date + 1, ''snapshot_id, sample_ts desc''); '
         'perform pgfr_record._ensure_partition(''replication_snapshots_v2'', current_date + 1, ''snapshot_id, sample_ts desc''); '

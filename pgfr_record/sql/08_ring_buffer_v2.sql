@@ -524,9 +524,10 @@ begin
             'set statement_timeout = ''500ms''; select pgfr_record.sample_ring()')
         where not exists (select 1 from cron.job where jobname = 'pgfr-sample-ring');
 
-        -- ring rotation (every 2 hours)
+        -- ring rotation (every 2 hours). statement_timeout as a defense-in-depth
+        -- outer envelope; rotate_ring() also has an internal lock_timeout = 2s.
         perform cron.schedule('pgfr-rotate-ring', '0 */2 * * *',
-            'select pgfr_record.rotate_ring()')
+            'set statement_timeout = ''10s''; select pgfr_record.rotate_ring()')
         where not exists (select 1 from cron.job where jobname = 'pgfr-rotate-ring');
 
         -- clear nodename so pg_cron uses unix socket (not TCP)
