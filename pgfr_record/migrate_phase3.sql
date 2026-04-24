@@ -466,18 +466,21 @@ begin
     perform cron.unschedule('pgfr_cleanup')
     where exists (select 1 from cron.job where jobname = 'pgfr_cleanup');
 
-    -- Add partition GC jobs (nightly truncate + monthly drop)
-    if not exists (select 1 from cron.job where jobname = 'pgfr-truncate-partitions') then
+    -- Add partition GC jobs (nightly truncate + monthly drop).
+    -- Job names use underscores per #59. enable() handles the rename migration
+    -- from any prior hyphenated names; this script just ensures the new names
+    -- exist if migrate_phase3 is run before enable().
+    if not exists (select 1 from cron.job where jobname = 'pgfr_truncate_partitions') then
         perform cron.schedule(
-            'pgfr-truncate-partitions',
+            'pgfr_truncate_partitions',
             '0 3 * * *',
             'select pgfr_record.truncate_old_partitions()'
         );
     end if;
 
-    if not exists (select 1 from cron.job where jobname = 'pgfr-drop-ancient-partitions') then
+    if not exists (select 1 from cron.job where jobname = 'pgfr_drop_ancient_partitions') then
         perform cron.schedule(
-            'pgfr-drop-ancient-partitions',
+            'pgfr_drop_ancient_partitions',
             '0 4 1 * *',
             'select pgfr_record.drop_ancient_partitions()'
         );

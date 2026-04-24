@@ -26,7 +26,7 @@ SELECT lives_ok(
 );
 
 -- Verify collection jobs are unscheduled after disable()
--- (partition GC jobs pgfr-truncate-partitions and pgfr-drop-ancient-partitions may remain)
+-- (partition GC jobs pgfr_truncate_partitions and pgfr_drop_ancient_partitions may remain)
 SELECT CASE
     WHEN EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron')
     THEN ok(

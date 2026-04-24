@@ -152,7 +152,25 @@ BEGIN
         PERFORM cron.unschedule('pgfr_archive')
         WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr_archive');
         IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
-        -- v2 ring buffer + partition maintenance jobs (added with scheduling consolidation)
+        -- v2 ring buffer + partition maintenance jobs (current underscore names)
+        PERFORM cron.unschedule('pgfr_sample_ring')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr_sample_ring');
+        IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
+        PERFORM cron.unschedule('pgfr_rotate_ring')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr_rotate_ring');
+        IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
+        PERFORM cron.unschedule('pgfr_truncate_partitions')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr_truncate_partitions');
+        IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
+        PERFORM cron.unschedule('pgfr_drop_ancient_partitions')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr_drop_ancient_partitions');
+        IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
+        PERFORM cron.unschedule('pgfr_precreate_partitions')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr_precreate_partitions');
+        IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
+        -- Defensive: also unschedule old hyphenated names (#59 rename migration)
+        -- in case disable() is called on an install that hasn't yet run enable()
+        -- after the rename PR.
         PERFORM cron.unschedule('pgfr-sample-ring')
         WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr-sample-ring');
         IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
@@ -357,24 +375,36 @@ BEGIN
         PERFORM cron.schedule('pgfr_cleanup', '0 3 * * *',
             'SET statement_timeout = ''60s''; SELECT pgfr_record.cleanup_aggregates(); SELECT * FROM pgfr_record.cleanup(''30 days''::interval);');
         v_scheduled := v_scheduled + 1;
+        -- One-time rename migration (#59): unschedule old hyphenated job names
+        -- if a prior install left them. Self-healing on next enable().
+        PERFORM cron.unschedule('pgfr-sample-ring')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr-sample-ring');
+        PERFORM cron.unschedule('pgfr-rotate-ring')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr-rotate-ring');
+        PERFORM cron.unschedule('pgfr-truncate-partitions')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr-truncate-partitions');
+        PERFORM cron.unschedule('pgfr-drop-ancient-partitions')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr-drop-ancient-partitions');
+        PERFORM cron.unschedule('pgfr-precreate-partitions')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr-precreate-partitions');
         -- Ring buffer v2 sampler (every minute); tight 500ms timeout matches low-overhead goal
-        PERFORM cron.schedule('pgfr-sample-ring', '* * * * *',
+        PERFORM cron.schedule('pgfr_sample_ring', '* * * * *',
             'SET statement_timeout = ''500ms''; SELECT pgfr_record.sample_ring()');
         v_scheduled := v_scheduled + 1;
         -- Ring buffer v2 rotation (every 2 hours). Internal lock_timeout = 2s; outer 10s envelope.
-        PERFORM cron.schedule('pgfr-rotate-ring', '0 */2 * * *',
+        PERFORM cron.schedule('pgfr_rotate_ring', '0 */2 * * *',
             'SET statement_timeout = ''10s''; SELECT pgfr_record.rotate_ring()');
         v_scheduled := v_scheduled + 1;
         -- Nightly retention GC (03:00 UTC): truncate expired v2 partitions
-        PERFORM cron.schedule('pgfr-truncate-partitions', '0 3 * * *',
+        PERFORM cron.schedule('pgfr_truncate_partitions', '0 3 * * *',
             'SET statement_timeout = ''30s''; SELECT pgfr_record.truncate_old_partitions()');
         v_scheduled := v_scheduled + 1;
         -- Monthly catalog cleanup (1st of month, 04:00 UTC): drop ancient empty partitions
-        PERFORM cron.schedule('pgfr-drop-ancient-partitions', '0 4 1 * *',
+        PERFORM cron.schedule('pgfr_drop_ancient_partitions', '0 4 1 * *',
             'SET statement_timeout = ''30s''; SELECT pgfr_record.drop_ancient_partitions()');
         v_scheduled := v_scheduled + 1;
         -- Daily precreate of tomorrow's partitions (23:55 UTC), covers all v2 parents
-        PERFORM cron.schedule('pgfr-precreate-partitions', '55 23 * * *',
+        PERFORM cron.schedule('pgfr_precreate_partitions', '55 23 * * *',
             'SET statement_timeout = ''5s''; '
             'DO $x$ BEGIN '
             'PERFORM pgfr_record._ensure_partition(''snapshots_v2'', current_date + 1, ''snapshot_id, sample_ts desc''); '
