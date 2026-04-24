@@ -129,7 +129,8 @@ BEGIN
     v_warning_threshold := (v_freeze_max_age * 0.5)::bigint;   -- 50% of freeze_max_age
     v_critical_threshold := (v_freeze_max_age * 0.8)::bigint;  -- 80% of freeze_max_age
     -- Get autovacuum_multixact_freeze_max_age for MultiXID wraparound thresholds
-    -- (default 400M per postgres-howto #0044)
+    -- (default 400M). See:
+    --   https://postgres.ai/docs/postgres-howtos/performance-optimization/monitoring/how-to-monitor-transaction-id-wraparound-risks
     SELECT setting::bigint INTO v_mxid_freeze_max_age
     FROM pg_settings WHERE name = 'autovacuum_multixact_freeze_max_age';
     v_mxid_freeze_max_age := COALESCE(v_mxid_freeze_max_age, 400000000);
@@ -253,7 +254,8 @@ BEGIN
         recommendation := 'Run VACUUM FREEZE on large tables or enable more aggressive autovacuum';
         RETURN NEXT;
     END IF;
-    -- Database-level MultiXID wraparound check (postgres-howto #0044)
+    -- Database-level MultiXID wraparound check. See:
+    --   https://postgres.ai/docs/postgres-howtos/performance-optimization/monitoring/how-to-monitor-transaction-id-wraparound-risks
     SELECT datminmxid_age INTO v_datminmxid_age
     FROM pgfr_record.snapshots
     WHERE captured_at BETWEEN p_start_time AND p_end_time
@@ -330,8 +332,9 @@ BEGIN
         END IF;
     END LOOP;
 
-    -- Table-level MultiXID wraparound check (postgres-howto #0044)
-    -- Each table may have its own autovacuum_multixact_freeze_max_age override
+    -- Table-level MultiXID wraparound check. Each table may have its own
+    -- autovacuum_multixact_freeze_max_age reloption override. See:
+    --   https://postgres.ai/docs/postgres-howtos/performance-optimization/monitoring/how-to-monitor-transaction-id-wraparound-risks
     FOR v_table_mxid_rec IN
         SELECT
             COALESCE(ts.schemaname, split_part(ts.relid::regclass::text, '.', 1)) AS schemaname,

@@ -132,7 +132,7 @@ LANGUAGE sql STABLE AS $$
 $$;
 COMMENT ON FUNCTION pgfr_record.ring_buffer_health() IS
 
-'Monitor ring buffer XID/MultiXID age, dead tuple bloat, and HOT update effectiveness. samples_ring uses UPSERT (1,440x/day) and should achieve >90% HOT update ratio with fillfactor=70. Child tables use DELETE/INSERT so HOT updates are N/A. MultiXID thresholds match XID (200M critical, 100M warning) per postgres-howto #0044.';
+'Monitor ring buffer XID/MultiXID age, dead tuple bloat, and HOT update effectiveness. samples_ring uses UPSERT (1,440x/day) and should achieve >90% HOT update ratio with fillfactor=70. Child tables use DELETE/INSERT so HOT updates are N/A. MultiXID thresholds match XID (200M critical, 100M warning); see https://postgres.ai/docs/postgres-howtos/performance-optimization/monitoring/how-to-monitor-transaction-id-wraparound-risks';
 -- Disable Flight Recorder by unscheduling all cron jobs and updating the enabled configuration flag to false
 CREATE OR REPLACE FUNCTION pgfr_record.disable()
 RETURNS TEXT

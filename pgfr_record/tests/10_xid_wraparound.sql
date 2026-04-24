@@ -2,12 +2,13 @@
 -- pgfr_record pgTAP Tests - XID and MultiXID Wraparound Metrics
 -- =============================================================================
 -- Tests: XID and MultiXID age columns exist and are populated with reasonable values
--- MultiXID monitoring per postgres-howto #0044
--- Test count: 17
+-- MultiXID monitoring per
+--   https://postgres.ai/docs/postgres-howtos/performance-optimization/monitoring/how-to-monitor-transaction-id-wraparound-risks
+-- Test count: 26
 -- =============================================================================
 
 BEGIN;
-SELECT plan(17);
+SELECT plan(26);
 
 -- =============================================================================
 -- 1. COLUMN EXISTENCE (4 tests)
@@ -156,6 +157,132 @@ SELECT ok(
         )
     ),
     'Fresh database should not trigger XID or MXID wraparound anomalies'
+);
+
+-- =============================================================================
+-- 6. V2 PARTITIONED TABLES (4 tests)
+-- =============================================================================
+
+-- Column existence on v2 tables (dual-write path populated via trigger)
+SELECT has_column(
+    'pgfr_record', 'snapshots_v2', 'datminmxid_age',
+    'snapshots_v2 should have datminmxid_age column'
+);
+
+SELECT has_column(
+    'pgfr_record', 'table_snapshots_v2', 'relminmxid_age',
+    'table_snapshots_v2 should have relminmxid_age column'
+);
+
+-- Verify _snapshot_v2() dual-write populated datminmxid_age
+SELECT ok(
+    (SELECT datminmxid_age FROM pgfr_record.snapshots_v2 ORDER BY sample_ts DESC LIMIT 1) IS NOT NULL,
+    'snapshots_v2.datminmxid_age should be populated by dual-write'
+);
+
+-- Verify sparse collector populates relminmxid_age. The collector only INSERTs
+-- when metrics differ from last_state, so we must (a) seed last_state via an
+-- initial snapshot() — which triggers the auto-rebuild path — and then
+-- (b) poison every tracked metric to -1 (same trick the day-boundary branch
+-- uses) so the "changed" predicate matches every top-N row on the next tick.
+SELECT pgfr_record.snapshot();  -- seeds table_last_state via _rebuild path
+UPDATE pgfr_record.table_last_state
+SET seq_scan = -1, idx_scan = -1,
+    n_tup_ins = -1, n_tup_upd = -1, n_tup_del = -1,
+    n_live_tup = -1, n_dead_tup = -1, n_mod_since_analyze = -1;
+SELECT pgfr_record.snapshot();  -- forces sparse insert with real values
+SELECT ok(
+    EXISTS(
+        SELECT 1 FROM pgfr_record.table_snapshots_v2
+        WHERE relminmxid_age IS NOT NULL
+    ),
+    'table_snapshots_v2.relminmxid_age should be populated by sparse collector'
+);
+
+-- =============================================================================
+-- 7. RING BUFFER HEALTH EXPOSES MXID (2 tests)
+-- =============================================================================
+
+-- ring_buffer_health() returns an mxid_age column — lives_ok fails if the
+-- column doesn't exist in the function signature
+SELECT lives_ok(
+    $$SELECT mxid_age FROM pgfr_record.ring_buffer_health() LIMIT 1$$,
+    'ring_buffer_health() should expose an mxid_age output column'
+);
+
+-- Functional check: mxid_age is non-null for all ring buffer tables
+SELECT ok(
+    NOT EXISTS (
+        SELECT 1 FROM pgfr_record.ring_buffer_health()
+        WHERE mxid_age IS NULL
+    ),
+    'ring_buffer_health() should populate mxid_age for all 4 ring buffer tables'
+);
+
+-- =============================================================================
+-- 8. POSITIVE ANOMALY TESTS (3 tests)
+-- =============================================================================
+-- Inject a synthetic snapshot with a high datminmxid_age to prove the
+-- MXID_WRAPAROUND_RISK anomaly actually fires. Uses a savepoint so the
+-- injection doesn't leak into other tests in this file.
+
+-- Inside a single transaction now() is frozen, so all existing snapshots share
+-- captured_at. anomaly_report picks "latest" via ORDER BY captured_at DESC LIMIT 1
+-- which is non-deterministic on ties. Clear the 5-minute window and inject one
+-- synthetic row so it's unambiguously the latest. The outer BEGIN/ROLLBACK
+-- wrapping the whole test file discards all of this.
+-- (Don't use SAVEPOINT+ROLLBACK TO here — pgTAP's internal test counter lives
+-- in a table that savepoint rollback reverts, breaking finish()'s plan count.)
+DELETE FROM pgfr_record.table_snapshots
+WHERE snapshot_id IN (
+    SELECT id FROM pgfr_record.snapshots
+    WHERE captured_at BETWEEN now() - interval '5 minutes' AND now()
+);
+DELETE FROM pgfr_record.snapshots
+WHERE captured_at BETWEEN now() - interval '5 minutes' AND now();
+
+-- Insert a synthetic snapshot with mxid age well above the 80% threshold of
+-- autovacuum_multixact_freeze_max_age (default 400M → critical at 320M). 350M
+-- crosses the critical line unambiguously.
+WITH ins AS (
+    INSERT INTO pgfr_record.snapshots (captured_at, pg_version, datfrozenxid_age, datminmxid_age)
+    VALUES (now(), current_setting('server_version_num')::integer / 10000, 100, 350000000)
+    RETURNING id
+)
+SELECT id AS synth_snapshot_id FROM ins \gset
+
+-- T24: MXID_WRAPAROUND_RISK fires when datminmxid_age exceeds warning threshold
+SELECT ok(
+    EXISTS (
+        SELECT 1 FROM pgfr_analyze.anomaly_report(now() - interval '5 minutes', now())
+        WHERE anomaly_type = 'MXID_WRAPAROUND_RISK'
+    ),
+    'MXID_WRAPAROUND_RISK should fire when datminmxid_age > 50% of autovacuum_multixact_freeze_max_age'
+);
+
+-- T25: severity is 'critical' when datminmxid_age exceeds 80% threshold
+SELECT is(
+    (SELECT severity FROM pgfr_analyze.anomaly_report(now() - interval '5 minutes', now())
+     WHERE anomaly_type = 'MXID_WRAPAROUND_RISK' LIMIT 1),
+    'critical',
+    'MXID_WRAPAROUND_RISK severity should be critical at 350M (>80% of 400M default)'
+);
+
+-- T26: table-level anomaly fires when we inject high relminmxid_age for a real table
+INSERT INTO pgfr_record.table_snapshots (snapshot_id, relid, relminmxid_age, relfrozenxid_age)
+VALUES (
+    :synth_snapshot_id,
+    'pgfr_record.snapshots'::regclass::oid,
+    350000000,
+    100
+);
+
+SELECT ok(
+    EXISTS (
+        SELECT 1 FROM pgfr_analyze.anomaly_report(now() - interval '5 minutes', now())
+        WHERE anomaly_type = 'TABLE_MXID_WRAPAROUND_RISK'
+    ),
+    'TABLE_MXID_WRAPAROUND_RISK should fire when relminmxid_age exceeds per-table threshold'
 );
 
 SELECT * FROM finish();
