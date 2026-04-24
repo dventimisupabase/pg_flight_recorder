@@ -54,9 +54,15 @@ run_single_version() {
     $DOCKER_COMPOSE --profile $profile up -d
 
     echo "Waiting for PostgreSQL to be ready..."
+    # Use `psql -c 'SELECT 1'` rather than `pg_isready`: the latter returns 0
+    # for the official postgres image's temporary init-phase postmaster, but
+    # that server is torn down (socket disappears) before the real one is
+    # started, and subsequent psql calls fail with "socket does not exist".
+    # A successful SELECT is a stronger readiness signal.
     ready=0
     for _ in {1..30}; do
-        if $DOCKER_COMPOSE --profile $profile exec -T $service pg_isready -U postgres > /dev/null 2>&1; then
+        if $DOCKER_COMPOSE --profile $profile exec -T $service \
+             psql -U postgres -tAc 'SELECT 1' > /dev/null 2>&1; then
             ready=1
             break
         fi
@@ -113,10 +119,13 @@ run_all_parallel() {
 
     # Wait for all instances to be ready
     echo "Waiting for all PostgreSQL instances to be ready..."
+    # See note in run_single_version: SELECT 1 is a stronger readiness
+    # signal than pg_isready during the postgres image's init-phase restart.
     for service in postgres15 postgres16 postgres17 postgres18; do
         ready=0
         for _ in {1..30}; do
-            if $DOCKER_COMPOSE --profile all exec -T $service pg_isready -U postgres > /dev/null 2>&1; then
+            if $DOCKER_COMPOSE --profile all exec -T $service \
+                 psql -U postgres -tAc 'SELECT 1' > /dev/null 2>&1; then
                 ready=1
                 break
             fi
