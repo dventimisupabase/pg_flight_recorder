@@ -351,7 +351,14 @@ INSERT INTO pgfr_record.config (key, value) VALUES
     ('regression_severity_medium_max', '500.0'),
     ('regression_severity_high_max', '1000.0'),
     ('statements_ranking_metric', 'buffers'),
-    ('regression_detection_metric', 'buffers')
+    ('regression_detection_metric', 'buffers'),
+    -- Wraparound anomaly thresholds as fractions of autovacuum_*_freeze_max_age.
+    -- Defaults match the postgres-howto guidance (0.5 warn, 0.8 crit) but can
+    -- be tuned downward for busy clusters where 50% is too late to warn.
+    ('xid_warning_ratio',   '0.5'),
+    ('xid_critical_ratio',  '0.8'),
+    ('mxid_warning_ratio',  '0.5'),
+    ('mxid_critical_ratio', '0.8')
 ON CONFLICT (key) DO NOTHING;
 
 -- Profile-managed defaults (from 'default' profile)

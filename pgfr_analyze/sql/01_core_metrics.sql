@@ -120,22 +120,29 @@ DECLARE
     v_mxid_freeze_max_age BIGINT;
     v_mxid_warning_threshold BIGINT;
     v_mxid_critical_threshold BIGINT;
+    v_xid_warning_ratio NUMERIC;
+    v_xid_critical_ratio NUMERIC;
+    v_mxid_warning_ratio NUMERIC;
+    v_mxid_critical_ratio NUMERIC;
     v_row RECORD;
 BEGIN
-    -- Get autovacuum_freeze_max_age for XID wraparound thresholds
-    SELECT setting::bigint INTO v_freeze_max_age
-    FROM pg_settings WHERE name = 'autovacuum_freeze_max_age';
-    v_freeze_max_age := COALESCE(v_freeze_max_age, 200000000);
-    v_warning_threshold := (v_freeze_max_age * 0.5)::bigint;   -- 50% of freeze_max_age
-    v_critical_threshold := (v_freeze_max_age * 0.8)::bigint;  -- 80% of freeze_max_age
-    -- Get autovacuum_multixact_freeze_max_age for MultiXID wraparound thresholds
-    -- (default 400M). See:
+    -- XID / MultiXID wraparound thresholds are a configurable fraction of the
+    -- corresponding autovacuum_*_freeze_max_age GUC. Ratios are read from
+    -- pgfr_record.config so operators can tune without patching analyze code —
+    -- defaults are conservative (0.5 warning, 0.8 critical) but 0.5 may be too
+    -- high for warning on busy clusters; see config keys xid_warning_ratio etc.
+    -- Both GUCs are always defined, so current_setting() never misses. See:
     --   https://postgres.ai/docs/postgres-howtos/performance-optimization/monitoring/how-to-monitor-transaction-id-wraparound-risks
-    SELECT setting::bigint INTO v_mxid_freeze_max_age
-    FROM pg_settings WHERE name = 'autovacuum_multixact_freeze_max_age';
-    v_mxid_freeze_max_age := COALESCE(v_mxid_freeze_max_age, 400000000);
-    v_mxid_warning_threshold := (v_mxid_freeze_max_age * 0.5)::bigint;
-    v_mxid_critical_threshold := (v_mxid_freeze_max_age * 0.8)::bigint;
+    v_xid_warning_ratio  := coalesce(pgfr_record._get_config('xid_warning_ratio',  '0.5')::numeric, 0.5);
+    v_xid_critical_ratio := coalesce(pgfr_record._get_config('xid_critical_ratio', '0.8')::numeric, 0.8);
+    v_mxid_warning_ratio  := coalesce(pgfr_record._get_config('mxid_warning_ratio',  '0.5')::numeric, 0.5);
+    v_mxid_critical_ratio := coalesce(pgfr_record._get_config('mxid_critical_ratio', '0.8')::numeric, 0.8);
+    v_freeze_max_age      := current_setting('autovacuum_freeze_max_age')::int8;
+    v_warning_threshold   := (v_freeze_max_age  * v_xid_warning_ratio )::bigint;
+    v_critical_threshold  := (v_freeze_max_age  * v_xid_critical_ratio)::bigint;
+    v_mxid_freeze_max_age       := current_setting('autovacuum_multixact_freeze_max_age')::int8;
+    v_mxid_warning_threshold    := (v_mxid_freeze_max_age * v_mxid_warning_ratio )::bigint;
+    v_mxid_critical_threshold   := (v_mxid_freeze_max_age * v_mxid_critical_ratio)::bigint;
 
     SELECT * INTO v_cmp FROM pgfr_analyze.compare(p_start_time, p_end_time);
     IF v_cmp.checkpoint_occurred THEN
@@ -311,10 +318,10 @@ BEGIN
         ) DESC
         LIMIT 5  -- Check top 5 tables by relative XID age
     LOOP
-        IF v_table_xid_rec.relfrozenxid_age > (v_table_xid_rec.table_freeze_max_age * 0.5)::bigint THEN
+        IF v_table_xid_rec.relfrozenxid_age > (v_table_xid_rec.table_freeze_max_age * v_xid_warning_ratio)::bigint THEN
             anomaly_type := 'TABLE_XID_WRAPAROUND_RISK';
             severity := CASE
-                WHEN v_table_xid_rec.relfrozenxid_age > (v_table_xid_rec.table_freeze_max_age * 0.8)::bigint THEN 'critical'
+                WHEN v_table_xid_rec.relfrozenxid_age > (v_table_xid_rec.table_freeze_max_age * v_xid_critical_ratio)::bigint THEN 'critical'
                 ELSE 'high'
             END;
             description := format('Table %s.%s approaching XID wraparound',
@@ -323,8 +330,9 @@ BEGIN
                                   to_char(v_table_xid_rec.relfrozenxid_age, 'FM999,999,999'),
                                   round(v_table_xid_rec.relfrozenxid_age::numeric / v_table_xid_rec.table_freeze_max_age * 100, 1),
                                   to_char(v_table_xid_rec.table_freeze_max_age, 'FM999,999,999'));
-            threshold := format('relfrozenxid_age > %s (50%% of %s)',
-                               to_char((v_table_xid_rec.table_freeze_max_age * 0.5)::bigint, 'FM999,999,999'),
+            threshold := format('relfrozenxid_age > %s (%s%% of %s)',
+                               to_char((v_table_xid_rec.table_freeze_max_age * v_xid_warning_ratio)::bigint, 'FM999,999,999'),
+                               round(v_xid_warning_ratio * 100),
                                to_char(v_table_xid_rec.table_freeze_max_age, 'FM999,999,999'));
             recommendation := format('Run VACUUM FREEZE on %s.%s',
                                     v_table_xid_rec.schemaname, v_table_xid_rec.relname);
@@ -366,10 +374,10 @@ BEGIN
         ) DESC
         LIMIT 5
     LOOP
-        IF v_table_mxid_rec.relminmxid_age > (v_table_mxid_rec.table_mxid_freeze_max_age * 0.5)::bigint THEN
+        IF v_table_mxid_rec.relminmxid_age > (v_table_mxid_rec.table_mxid_freeze_max_age * v_mxid_warning_ratio)::bigint THEN
             anomaly_type := 'TABLE_MXID_WRAPAROUND_RISK';
             severity := CASE
-                WHEN v_table_mxid_rec.relminmxid_age > (v_table_mxid_rec.table_mxid_freeze_max_age * 0.8)::bigint THEN 'critical'
+                WHEN v_table_mxid_rec.relminmxid_age > (v_table_mxid_rec.table_mxid_freeze_max_age * v_mxid_critical_ratio)::bigint THEN 'critical'
                 ELSE 'high'
             END;
             description := format('Table %s.%s approaching MultiXact ID wraparound',
@@ -378,8 +386,9 @@ BEGIN
                                   to_char(v_table_mxid_rec.relminmxid_age, 'FM999,999,999'),
                                   round(v_table_mxid_rec.relminmxid_age::numeric / v_table_mxid_rec.table_mxid_freeze_max_age * 100, 1),
                                   to_char(v_table_mxid_rec.table_mxid_freeze_max_age, 'FM999,999,999'));
-            threshold := format('relminmxid_age > %s (50%% of %s)',
-                               to_char((v_table_mxid_rec.table_mxid_freeze_max_age * 0.5)::bigint, 'FM999,999,999'),
+            threshold := format('relminmxid_age > %s (%s%% of %s)',
+                               to_char((v_table_mxid_rec.table_mxid_freeze_max_age * v_mxid_warning_ratio)::bigint, 'FM999,999,999'),
+                               round(v_mxid_warning_ratio * 100),
                                to_char(v_table_mxid_rec.table_mxid_freeze_max_age, 'FM999,999,999'));
             recommendation := format('Run VACUUM FREEZE on %s.%s; check for row-level lock / FK contention generating unfrozen MultiXacts',
                                     v_table_mxid_rec.schemaname, v_table_mxid_rec.relname);
