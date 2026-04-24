@@ -103,7 +103,7 @@ run_single_version() {
     # would unschedule the jobs entirely and break those assertions.
 
     echo "Running tests with per-file timing..."
-    $DOCKER_COMPOSE --profile $profile exec -T $service sh -c 'pg_prove --timer -U postgres -d postgres /tests/record/*.sql /tests/analyze/*.sql'
+    $DOCKER_COMPOSE --profile $profile exec -T $service sh -c 'pg_prove --timer -j 1 -U postgres -d postgres /tests/record/*.sql /tests/analyze/*.sql'
 
     echo "PostgreSQL $pg_version: PASS"
 
@@ -180,7 +180,7 @@ run_all_parallel() {
             echo "=========================================" > "$RESULTS_DIR/$version.log"
             echo "PostgreSQL $version" >> "$RESULTS_DIR/$version.log"
             echo "=========================================" >> "$RESULTS_DIR/$version.log"
-            if $DOCKER_COMPOSE --profile all exec -T $service sh -c 'pg_prove --timer -U postgres -d postgres /tests/record/*.sql /tests/analyze/*.sql' >> "$RESULTS_DIR/$version.log" 2>&1; then
+            if $DOCKER_COMPOSE --profile all exec -T $service sh -c 'pg_prove --timer -j 1 -U postgres -d postgres /tests/record/*.sql /tests/analyze/*.sql' >> "$RESULTS_DIR/$version.log" 2>&1; then
                 echo "PASS" > "$RESULTS_DIR/$version.status"
             else
                 echo "FAIL" > "$RESULTS_DIR/$version.status"
