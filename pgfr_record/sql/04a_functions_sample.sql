@@ -689,7 +689,7 @@ BEGIN
             n_live_tup, n_dead_tup, n_mod_since_analyze,
             vacuum_count, autovacuum_count, analyze_count, autoanalyze_count,
             last_vacuum, last_autovacuum, last_analyze, last_autoanalyze,
-            relfrozenxid_age, reltuples, vacuum_running,
+            relfrozenxid_age, relminmxid_age, reltuples, vacuum_running,
             table_size_bytes, total_size_bytes, indexes_size_bytes
         )
         SELECT
@@ -717,6 +717,7 @@ BEGIN
             st.last_analyze,
             st.last_autoanalyze,
             nullif(age(c.relfrozenxid)::integer, 2147483647) AS relfrozenxid_age,
+            nullif(mxid_age(c.relminmxid)::integer, 2147483647) AS relminmxid_age,
             c.reltuples::bigint AS reltuples,
             EXISTS(SELECT 1 FROM pg_stat_progress_vacuum pv WHERE pv.relid = st.relid) AS vacuum_running,
             pg_relation_size(st.relid),
@@ -735,7 +736,7 @@ BEGIN
             n_live_tup, n_dead_tup, n_mod_since_analyze,
             vacuum_count, autovacuum_count, analyze_count, autoanalyze_count,
             last_vacuum, last_autovacuum, last_analyze, last_autoanalyze,
-            relfrozenxid_age, reltuples, vacuum_running,
+            relfrozenxid_age, relminmxid_age, reltuples, vacuum_running,
             table_size_bytes, total_size_bytes, indexes_size_bytes
         )
         SELECT
@@ -763,6 +764,7 @@ BEGIN
             st.last_analyze,
             st.last_autoanalyze,
             nullif(age(c.relfrozenxid)::integer, 2147483647) AS relfrozenxid_age,
+            nullif(mxid_age(c.relminmxid)::integer, 2147483647) AS relminmxid_age,
             c.reltuples::bigint AS reltuples,
             EXISTS(SELECT 1 FROM pg_stat_progress_vacuum pv WHERE pv.relid = st.relid) AS vacuum_running,
             pg_relation_size(st.relid),
@@ -783,7 +785,7 @@ BEGIN
             n_live_tup, n_dead_tup, n_mod_since_analyze,
             vacuum_count, autovacuum_count, analyze_count, autoanalyze_count,
             last_vacuum, last_autovacuum, last_analyze, last_autoanalyze,
-            relfrozenxid_age, reltuples, vacuum_running,
+            relfrozenxid_age, relminmxid_age, reltuples, vacuum_running,
             table_size_bytes, total_size_bytes, indexes_size_bytes
         )
         SELECT
@@ -811,6 +813,7 @@ BEGIN
             st.last_analyze,
             st.last_autoanalyze,
             nullif(age(c.relfrozenxid)::integer, 2147483647) AS relfrozenxid_age,
+            nullif(mxid_age(c.relminmxid)::integer, 2147483647) AS relminmxid_age,
             c.reltuples::bigint AS reltuples,
             EXISTS(SELECT 1 FROM pg_stat_progress_vacuum pv WHERE pv.relid = st.relid) AS vacuum_running,
             pg_relation_size(st.relid),

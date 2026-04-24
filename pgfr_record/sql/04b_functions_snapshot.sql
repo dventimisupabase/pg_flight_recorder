@@ -41,6 +41,7 @@ DECLARE
     v_db_size_bytes BIGINT;
     v_capacity_enabled BOOLEAN;
     v_datfrozenxid_age INTEGER;
+    v_datminmxid_age INTEGER;
     v_archived_count BIGINT;
     v_last_archived_wal TEXT;
     v_last_archived_time TIMESTAMPTZ;
@@ -192,8 +193,10 @@ BEGIN
             WHERE relkind IN ('r', 't', 'i', 'm')
               AND relpages > 0;
         END IF;
-        SELECT age(datfrozenxid)::integer
-        INTO v_datfrozenxid_age
+        SELECT
+            age(datfrozenxid)::integer,
+            mxid_age(datminmxid)::integer
+        INTO v_datfrozenxid_age, v_datminmxid_age
         FROM pg_database
         WHERE datname = current_database();
         -- Collect OID exhaustion metrics
@@ -211,6 +214,7 @@ BEGIN
         v_connections_max := NULL;
         v_db_size_bytes := NULL;
         v_datfrozenxid_age := NULL;
+        v_datminmxid_age := NULL;
         v_max_catalog_oid := NULL;
         v_large_object_count := NULL;
     END;
@@ -305,7 +309,7 @@ BEGIN
             temp_files, temp_bytes,
             xact_commit, xact_rollback, blks_read, blks_hit,
             connections_active, connections_total, connections_max,
-            db_size_bytes, datfrozenxid_age,
+            db_size_bytes, datfrozenxid_age, datminmxid_age,
             archived_count, last_archived_wal, last_archived_time,
             failed_count, last_failed_wal, last_failed_time, archiver_stats_reset,
             confl_tablespace, confl_lock, confl_snapshot, confl_bufferpin, confl_deadlock, confl_active_logicalslot,
@@ -332,7 +336,7 @@ BEGIN
             v_temp_files, v_temp_bytes,
             v_xact_commit, v_xact_rollback, v_blks_read, v_blks_hit,
             v_connections_active, v_connections_total, v_connections_max,
-            v_db_size_bytes, v_datfrozenxid_age,
+            v_db_size_bytes, v_datfrozenxid_age, v_datminmxid_age,
             v_archived_count, v_last_archived_wal, v_last_archived_time,
             v_failed_count, v_last_failed_wal, v_last_failed_time, v_archiver_stats_reset,
             v_confl_tablespace, v_confl_lock, v_confl_snapshot, v_confl_bufferpin, v_confl_deadlock, v_confl_active_logicalslot,
@@ -361,7 +365,7 @@ BEGIN
             temp_files, temp_bytes,
             xact_commit, xact_rollback, blks_read, blks_hit,
             connections_active, connections_total, connections_max,
-            db_size_bytes, datfrozenxid_age,
+            db_size_bytes, datfrozenxid_age, datminmxid_age,
             archived_count, last_archived_wal, last_archived_time,
             failed_count, last_failed_wal, last_failed_time, archiver_stats_reset,
             confl_tablespace, confl_lock, confl_snapshot, confl_bufferpin, confl_deadlock, confl_active_logicalslot,
@@ -387,7 +391,7 @@ BEGIN
             v_temp_files, v_temp_bytes,
             v_xact_commit, v_xact_rollback, v_blks_read, v_blks_hit,
             v_connections_active, v_connections_total, v_connections_max,
-            v_db_size_bytes, v_datfrozenxid_age,
+            v_db_size_bytes, v_datfrozenxid_age, v_datminmxid_age,
             v_archived_count, v_last_archived_wal, v_last_archived_time,
             v_failed_count, v_last_failed_wal, v_last_failed_time, v_archiver_stats_reset,
             v_confl_tablespace, v_confl_lock, v_confl_snapshot, v_confl_bufferpin, v_confl_deadlock, v_confl_active_logicalslot,
@@ -416,7 +420,7 @@ BEGIN
             temp_files, temp_bytes,
             xact_commit, xact_rollback, blks_read, blks_hit,
             connections_active, connections_total, connections_max,
-            db_size_bytes, datfrozenxid_age,
+            db_size_bytes, datfrozenxid_age, datminmxid_age,
             archived_count, last_archived_wal, last_archived_time,
             failed_count, last_failed_wal, last_failed_time, archiver_stats_reset,
             confl_tablespace, confl_lock, confl_snapshot, confl_bufferpin, confl_deadlock, confl_active_logicalslot,
@@ -442,7 +446,7 @@ BEGIN
             v_temp_files, v_temp_bytes,
             v_xact_commit, v_xact_rollback, v_blks_read, v_blks_hit,
             v_connections_active, v_connections_total, v_connections_max,
-            v_db_size_bytes, v_datfrozenxid_age,
+            v_db_size_bytes, v_datfrozenxid_age, v_datminmxid_age,
             v_archived_count, v_last_archived_wal, v_last_archived_time,
             v_failed_count, v_last_failed_wal, v_last_failed_time, v_archiver_stats_reset,
             v_confl_tablespace, v_confl_lock, v_confl_snapshot, v_confl_bufferpin, v_confl_deadlock, v_confl_active_logicalslot,
@@ -462,7 +466,7 @@ BEGIN
             temp_files, temp_bytes,
             xact_commit, xact_rollback, blks_read, blks_hit,
             connections_active, connections_total, connections_max,
-            db_size_bytes, datfrozenxid_age,
+            db_size_bytes, datfrozenxid_age, datminmxid_age,
             archived_count, last_archived_wal, last_archived_time,
             failed_count, last_failed_wal, last_failed_time, archiver_stats_reset,
             confl_tablespace, confl_lock, confl_snapshot, confl_bufferpin, confl_deadlock,
@@ -480,7 +484,7 @@ BEGIN
             v_temp_files, v_temp_bytes,
             v_xact_commit, v_xact_rollback, v_blks_read, v_blks_hit,
             v_connections_active, v_connections_total, v_connections_max,
-            v_db_size_bytes, v_datfrozenxid_age,
+            v_db_size_bytes, v_datfrozenxid_age, v_datminmxid_age,
             v_archived_count, v_last_archived_wal, v_last_archived_time,
             v_failed_count, v_last_failed_wal, v_last_failed_time, v_archiver_stats_reset,
             v_confl_tablespace, v_confl_lock, v_confl_snapshot, v_confl_bufferpin, v_confl_deadlock,

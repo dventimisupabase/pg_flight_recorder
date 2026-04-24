@@ -363,6 +363,7 @@ create table if not exists pgfr_record.table_snapshots_v2 (
     last_analyze        timestamptz,
     last_autoanalyze    timestamptz,
     relfrozenxid_age    integer,
+    relminmxid_age      integer,
     reltuples           bigint,
     vacuum_running      boolean,
     table_size_bytes    bigint,
@@ -372,6 +373,9 @@ create table if not exists pgfr_record.table_snapshots_v2 (
 
 create table if not exists pgfr_record.table_snapshots_v2_default
     partition of pgfr_record.table_snapshots_v2 default;
+
+-- Additive upgrade path: ensure per-relation MultiXID age column exists on pre-existing installs
+alter table pgfr_record.table_snapshots_v2 add column if not exists relminmxid_age integer;
 
 comment on table pgfr_record.table_snapshots_v2 is
 'Sparse table-level stats history partitioned by int4 sample_ts (seconds since pgfr_record.epoch()). '
@@ -537,6 +541,7 @@ begin
                 st.last_analyze,
                 st.last_autoanalyze,
                 nullif(age(c.relfrozenxid)::integer, 2147483647)            as relfrozenxid_age,
+                nullif(mxid_age(c.relminmxid)::integer, 2147483647)         as relminmxid_age,
                 c.reltuples::bigint                                         as reltuples,
                 exists(
                     select 1 from pg_stat_progress_vacuum pv
@@ -575,7 +580,7 @@ begin
                 n_live_tup, n_dead_tup, n_mod_since_analyze,
                 vacuum_count, autovacuum_count, analyze_count, autoanalyze_count,
                 last_vacuum, last_autovacuum, last_analyze, last_autoanalyze,
-                relfrozenxid_age, reltuples, vacuum_running,
+                relfrozenxid_age, relminmxid_age, reltuples, vacuum_running,
                 table_size_bytes, total_size_bytes, indexes_size_bytes
             )
             select
@@ -586,7 +591,7 @@ begin
                 ch.n_live_tup, ch.n_dead_tup, ch.n_mod_since_analyze,
                 ch.vacuum_count, ch.autovacuum_count, ch.analyze_count, ch.autoanalyze_count,
                 ch.last_vacuum, ch.last_autovacuum, ch.last_analyze, ch.last_autoanalyze,
-                ch.relfrozenxid_age, ch.reltuples, ch.vacuum_running,
+                ch.relfrozenxid_age, ch.relminmxid_age, ch.reltuples, ch.vacuum_running,
                 ch.table_size_bytes, ch.total_size_bytes, ch.indexes_size_bytes
             from changed ch
             returning relid, dbid

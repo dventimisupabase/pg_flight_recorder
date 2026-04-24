@@ -82,6 +82,7 @@ RETURNS TABLE(
     dead_tuples             BIGINT,
     dead_tuple_pct          NUMERIC,
     xid_age                 INTEGER,
+    mxid_age                INTEGER,
     total_updates           BIGINT,
     hot_updates             BIGINT,
     hot_update_pct          NUMERIC,
@@ -101,6 +102,7 @@ LANGUAGE sql STABLE AS $$
             ELSE 0
         END,
         age(c.relfrozenxid)::integer,
+        mxid_age(c.relminmxid)::integer,
         s.n_tup_upd,
         s.n_tup_hot_upd,
         CASE
@@ -113,7 +115,9 @@ LANGUAGE sql STABLE AS $$
         s.n_dead_tup > (50 + (0.2 * s.n_live_tup)::bigint),
         CASE
             WHEN age(c.relfrozenxid) > 200000000 THEN 'CRITICAL: XID wraparound risk'
+            WHEN mxid_age(c.relminmxid) > 200000000 THEN 'CRITICAL: MultiXID wraparound risk'
             WHEN age(c.relfrozenxid) > 100000000 THEN 'WARNING: High XID age'
+            WHEN mxid_age(c.relminmxid) > 100000000 THEN 'WARNING: High MultiXID age'
             WHEN c.relname = 'samples_ring' AND s.n_tup_upd > 100 AND (100.0 * s.n_tup_hot_upd / NULLIF(s.n_tup_upd, 0)) < 50 THEN 'WARNING: Low HOT update ratio'
             WHEN s.n_dead_tup > (50 + (0.2 * s.n_live_tup)::bigint) THEN 'INFO: Autovacuum pending'
             ELSE 'OK'
@@ -128,7 +132,7 @@ LANGUAGE sql STABLE AS $$
 $$;
 COMMENT ON FUNCTION pgfr_record.ring_buffer_health() IS
 
-'Monitor ring buffer XID age, dead tuple bloat, and HOT update effectiveness. samples_ring uses UPSERT (1,440x/day) and should achieve >90% HOT update ratio with fillfactor=70. Child tables use DELETE/INSERT so HOT updates are N/A.';
+'Monitor ring buffer XID/MultiXID age, dead tuple bloat, and HOT update effectiveness. samples_ring uses UPSERT (1,440x/day) and should achieve >90% HOT update ratio with fillfactor=70. Child tables use DELETE/INSERT so HOT updates are N/A. MultiXID thresholds match XID (200M critical, 100M warning) per postgres-howto #0044.';
 -- Disable Flight Recorder by unscheduling all cron jobs and updating the enabled configuration flag to false
 CREATE OR REPLACE FUNCTION pgfr_record.disable()
 RETURNS TEXT
