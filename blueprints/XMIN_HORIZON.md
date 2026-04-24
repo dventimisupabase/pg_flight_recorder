@@ -111,27 +111,35 @@ Previous versions conflated catalog and data semantics by mixing data sources in
 
 Add to `pgfr_record/sql/02_tables_legacy.sql` (via `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` in a `DO $$ BEGIN ... END $$` block, matching the existing delta-column pattern):
 
-| Column                            | Type     | Source                                              |
-|-----------------------------------|----------|-----------------------------------------------------|
-| `activity_xmin`                   | `xid`    | `pg_stat_activity.backend_xmin` (oldest, self-excluded) |
-| `activity_xmin_age`               | `bigint` | `age()` of above                                    |
-| `slot_xmin`                       | `xid`    | `pg_replication_slots.xmin` (oldest)                |
-| `slot_xmin_age`                   | `bigint` | `age()` of above                                    |
-| `slot_catalog_xmin`               | `xid`    | `pg_replication_slots.catalog_xmin` (oldest)        |
-| `slot_catalog_xmin_age`           | `bigint` | `age()` of above                                    |
-| `replication_xmin`                | `xid`    | `pg_stat_replication.backend_xmin` (oldest, physical walsenders only) |
-| `replication_xmin_age`            | `bigint` | `age()` of above                                    |
-| `prepared_xid`                    | `xid`    | `pg_prepared_xacts.transaction` (oldest)            |
-| `prepared_xid_age`                | `bigint` | `age()` of above                                    |
-| `xmin_data_horizon_age`           | `bigint` | `greatest` of the four data-source ages             |
-| `xmin_catalog_slot_age`           | `bigint` | alias for `slot_catalog_xmin_age` (kept for anomaly clarity) |
-| `xmin_any_horizon_age`            | `bigint` | `greatest(xmin_data_horizon_age, xmin_catalog_slot_age)` |
-| `xmin_holders_collection_status`  | `text`   | `collected` / `below_floor` / `collector_failed` / `not_available` |
-| `xmin_holders_truncated_count`    | `integer`| sum across sources of `(actual_holders - top_n)` when positive, else 0; NULL when status ≠ `collected` |
+| Column                             | Type                        | Source                                                                                        |
+|------------------------------------|-----------------------------|-----------------------------------------------------------------------------------------------|
+| `activity_xmin`                    | `xid`                       | `pg_stat_activity.backend_xmin` (oldest, self- and worker-excluded; see §4.3.1); NULL = none  |
+| `activity_xmin_age`                | `bigint`                    | `age()` of above; NULL when no holder                                                         |
+| `slot_xmin`                        | `xid`                       | `pg_replication_slots.xmin` (oldest); NULL = none                                             |
+| `slot_xmin_age`                    | `bigint`                    | `age()` of above; NULL when no holder                                                         |
+| `slot_catalog_xmin`                | `xid`                       | `pg_replication_slots.catalog_xmin` (oldest); NULL = none                                     |
+| `slot_catalog_xmin_age`            | `bigint`                    | `age()` of above; NULL when no holder. (`CATALOG_XMIN_HORIZON_STALL` reads this.)             |
+| `replication_xmin`                 | `xid`                       | `pg_stat_replication.backend_xmin` (oldest, physical walsenders only); NULL = none            |
+| `replication_xmin_age`             | `bigint`                    | `age()` of above; NULL when no holder                                                         |
+| `prepared_xmin`                    | `xid`                       | `pg_prepared_xacts.transaction` (oldest); NULL = none                                         |
+| `prepared_xmin_age`                | `bigint`                    | `age()` of above; NULL when no holder                                                         |
+| `xmin_data_horizon_age`            | `bigint`                    | `greatest()` of the four data-source ages; NULL-safe (`greatest` ignores NULL); NULL iff all four sources absent |
+| `xmin_any_horizon_age`             | `bigint GENERATED STORED`   | `GENERATED ALWAYS AS (greatest(xmin_data_horizon_age, slot_catalog_xmin_age)) STORED`         |
+| `xmin_activity_collection_status`  | `text`                      | per-source: `collected` / `below_floor` / `collector_failed` / `not_available`                |
+| `xmin_slot_collection_status`      | `text`                      | per-source status for slot holder collection                                                  |
+| `xmin_prepared_collection_status`  | `text`                      | per-source status for prepared holder collection                                              |
+| `xmin_replication_collection_status`| `text`                     | per-source status for replication_snapshots write                                             |
+| `xmin_activity_truncated_count`    | `integer`                   | `max(0, actual_activity_holders - xmin_holders_top_n)`; NULL when status ≠ `collected`        |
+| `xmin_slot_truncated_count`        | `integer`                   | same for slot                                                                                 |
+| `xmin_prepared_truncated_count`    | `integer`                   | same for prepared (no cap on replication — `pg_stat_replication` is bounded by `max_wal_senders`) |
+
+**NULL semantics.** Source ages are NULL when no holder exists for that source — not 0. An absent holder is qualitatively different from an age-zero holder; `NULL` preserves that distinction. Downstream analyzer code uses `COALESCE(age, 0) > threshold` only for threshold checks. `GREATEST()` is already NULL-safe in Postgres.
+
+**Per-source status and truncated counts.** Previous versions used one global `xmin_holders_collection_status`, but a single snapshot can have mixed per-source states (e.g. activity `below_floor`, slot `collected`, prepared `collector_failed`). Per-source columns disambiguate without the JSONB overhead for a fixed, bounded set of sources.
+
+**`xmin_any_horizon_age` is GENERATED STORED** so it cannot drift from its inputs (a future collector bug cannot make the three aggregate columns inconsistent). Supported on PG 15 / 16 / 17 / 18.
 
 Storing raw `xid` *and* `bigint` age keeps fidelity (xid is 32-bit circular) while making ORDER BY / threshold comparisons trivial. **Never order raw `xid` values directly to determine oldest/newest — use `age(xid)` captured at snapshot time.**
-
-`xmin_holders_collection_status` lets downstream readers distinguish "horizon healthy, nothing to record" from "horizon stalled but collector failed" from "below configured floor". Without it, an empty holder sidecar is ambiguous. `xmin_holders_truncated_count` flags pile-ups that exceeded `xmin_holders_top_n` so the operator knows the sidecar view is a sample, not a census.
 
 ### 4.2 `pgfr_record.replication_snapshots` — new columns
 
@@ -139,10 +147,12 @@ Storing raw `xid` *and* `bigint` age keeps fidelity (xid is 32-bit circular) whi
 |------------------------|-----------|------------------------------------------------------------------------|
 | `backend_xmin`         | `xid`     | `pg_stat_replication.backend_xmin`                                     |
 | `backend_xmin_age`     | `bigint`  | `age(backend_xmin)`                                                    |
-| `slot_name`            | `text`    | `pg_replication_slots.slot_name` joined via `active_pid = pid`         |
-| `is_logical_walsender` | `boolean` | true when the joined slot has `slot_type = 'logical'`                  |
+| `slot_name`            | `text`    | `pg_replication_slots.slot_name` joined via `active_pid = pid`; NULL when walsender has no slot |
+| `is_logical_walsender` | `boolean` | `COALESCE(s.slot_type = 'logical', false)` — genuinely binary, never three-valued               |
 
 `slot_name` / `is_logical_walsender` matter for anomaly attribution: a logical walsender appears in `pg_stat_replication` too, but the actionable remediation is against its slot (look at subscriber lag / drop-or-advance the slot), not against `hot_standby_feedback` on a standby. The anomaly filter excludes rows with `is_logical_walsender = true` when attributing the `replication` source — those holders are already covered by `xmin_slot_holders`.
+
+The `LEFT JOIN pg_replication_slots ON active_pid = pid` produces NULL `slot_type` for bare physical replication with no slot, which would make a naive `s.slot_type = 'logical'` evaluate to NULL. Wrapping the comparison in `COALESCE(..., false)` at write time yields a genuine boolean so downstream filters are simple `WHERE NOT is_logical_walsender` instead of NULL-safe `IS NOT TRUE`.
 
 ### 4.3 Per-source holder sidecar tables
 
@@ -150,12 +160,17 @@ The oldest-xmin per source (§4.1) answers "how bad is it"; the operator still n
 
 All three tables are capped at `xmin_holders_top_n` rows per snapshot per source (configurable via `pgfr_record._get_config('xmin_holders_top_n', '5')`, default **5**). Five is enough to identify a pile-up without hoarding rows: the oldest holder is the actionable one, and four more provide attribution context when multiple sessions / slots lag together. Rows with NULL xmin are not emitted.
 
-**Collection floor** (storage mitigation), per-sidecar:
+**Collection architecture.** Each source is read into a materialized CTE *once* per snapshot; aggregate-age columns on `snapshots` are derived from that CTE *unconditionally*; sidecar rows are inserted from the *same* CTE only when the floor condition passes. This resolves the chicken-and-egg of previous versions (where deriving aggregate from a floor-gated sidecar made aggregate NULL whenever sidecar was empty, contradicting the §8a "aggregate always populated" storage claim). Single read, two outputs, one row of truth.
 
-- `xmin_slot_holders` writes when `greatest(xmin_data_horizon_age, xmin_catalog_slot_age) > xmin_holders_min_age` — logical slots can pin `catalog_xmin` alone (data horizon untouched) and that's precisely what `CATALOG_XMIN_HORIZON_STALL` needs to attribute. Previous versions gated all three sidecars on data-horizon-only, which emptied the slot sidecar exactly when it was most needed.
-- `xmin_activity_holders`, `xmin_prepared_holders`, and the `replication_snapshots` xmin columns write when `xmin_data_horizon_age > xmin_holders_min_age`. Catalog-only stalls don't come from these sources.
+**Floor gate** (storage mitigation), per-sidecar:
 
-`xmin_holders_min_age` is configurable, default `1,000,000` xids (~2 min at modest TPS). Below the floor, no holders are written; the aggregate-age columns on `snapshots` are still captured (they're cheap and always useful for trend plots) and `xmin_holders_collection_status` is set to `below_floor` so downstream readers don't confuse "floor gate" with "collector failed" or "nothing to record". Collector failures are already captured by the existing `collection_stats` / `_record_collection_end` infrastructure in `pgfr_record/sql/03_functions_util.sql`; the status column sets `collector_failed` when the error path fires.
+- `xmin_slot_holders` writes when `GREATEST(xmin_data_horizon_age, slot_catalog_xmin_age) > xmin_holders_min_age` — logical slots can pin `catalog_xmin` alone (data horizon untouched) and that's precisely what `CATALOG_XMIN_HORIZON_STALL` needs to attribute.
+- `xmin_activity_holders` and the `replication_snapshots` xmin columns write when `xmin_data_horizon_age > xmin_holders_min_age`. Catalog-only stalls don't come from these sources.
+- `xmin_prepared_holders` always writes (floor default `0`; see §4.3.3).
+
+`xmin_holders_min_age` is configurable, default `1,000,000` xids (~2 min at modest TPS). Below the floor, no sidecar rows are written for that source; the corresponding per-source status is set to `below_floor`. Aggregate-age columns on `snapshots` remain populated regardless of the floor (they come from the source CTE, not the sidecar). Collector failures flow through the existing `collection_stats` / `_record_collection_end` infrastructure in `pgfr_record/sql/03_functions_util.sql`; the per-source status column sets `collector_failed` when the error path fires for that specific source.
+
+**Config-interaction guard**: `xmin_holders_min_age` must be `<=` any of the `*_stall_warning_age` thresholds (§6.1) — otherwise warnings fire but sidecars stay empty, routing every warning through the attribution-fallback path. `install.sql` `RAISE NOTICE`s when it detects the inverted relationship.
 
 **Partitioning** (see §4.3.5 for details): all three tables are daily `RANGE`-partitioned by `sample_ts int4` using the existing Phase 3 infrastructure. Retention is governed by `retention_snapshots_days` (default 30). No new GC code.
 
@@ -198,16 +213,18 @@ CREATE INDEX IF NOT EXISTS xmin_activity_holders_age_idx
 COMMENT ON TABLE pgfr_record.xmin_activity_holders IS
   'Backends holding the xmin horizon via pg_stat_activity.backend_xmin. '
   'Top xmin_holders_top_n per snapshot, ordered by age(backend_xmin) DESC. '
-  'Self-pin excluded via pid <> pg_backend_pid(); autovacuum workers excluded.';
+  'Self-pin excluded via pid <> pg_backend_pid(). Parallel workers excluded '
+  '(leader_pid IS NULL filter); leader appears once with its own backend_xmin.';
 ```
 
 Column notes:
 
-- `leader_pid`: when populated, the holder is a parallel worker. Terminating the worker accomplishes nothing — the leader respawns it. Anomaly recommendations name the leader when this is non-null.
+- `leader_pid`: NULL in every sidecar row because parallel workers are filtered out at write time (`WHERE leader_pid IS NULL`). Rationale: a parallel leader with N workers produces N+1 rows sharing the same `backend_xmin`, which wastes `top_n` slots on symptoms — the leader carries all the attribution value, workers are derivable via `pg_stat_activity` live lookup. Column kept for forward-compatibility and for the out-of-band `current_xmin_horizon_holder()` view (§6.3) that may surface workers on demand.
+- `backend_type`: captured without filtering. Autovacuum workers *are* included — a vacuum of a multi-TB heap can hold `backend_xmin` for hours and is a real failure mode. The anomaly recommendation (§6.1) special-cases `backend_type = 'autovacuum worker'` to point at `pg_stat_progress_vacuum` instead of suggesting `pg_terminate_backend`.
 - `datid` / `datname`: `pg_stat_activity` is cluster-wide; knowing the database focuses remediation and joins cleanly to `pg_stat_database` exports.
 - `backend_xid` / `backend_xid_age`: context-only. `backend_xmin` is the true horizon holder signal; `backend_xid` tells you whether the xact has written anything yet.
 - `xact_age_seconds` / `query_age_seconds`: surfaces long idle-in-transaction and long-running queries that are suspicious even when `backend_xmin` status varies. Documented caveat: a long `xact_start` without `backend_xmin` means the backend currently holds no snapshot, so it is not pinning the horizon *right now* — but it is a strong signal the backend is misbehaving.
-- `query_preview` cap: `left(query, current_setting('track_activity_query_size')::int)` (default 1024), with CR/LF/tabs stripped for grep-ability. Can be fully suppressed via `xmin_capture_query_preview = false` for privacy-sensitive deployments.
+- `query_preview` cap: `left(query, least(current_setting('track_activity_query_size')::int, xmin_query_preview_max_len))` (default 1024), with CR/LF/tabs stripped for grep-ability. Can be fully suppressed via `xmin_capture_query_preview = false` for privacy-sensitive deployments.
 
 #### 4.3.2 `pgfr_record.xmin_slot_holders`
 
@@ -249,19 +266,30 @@ From `pg_prepared_xacts`. This is the `ROLLBACK PREPARED` target set.
 
 ```sql
 CREATE TABLE IF NOT EXISTS pgfr_record.xmin_prepared_holders (
-    sample_ts        INTEGER NOT NULL,              -- partition key; see §4.3.5
-    snapshot_id      INTEGER NOT NULL,
-    gid              TEXT NOT NULL,                 -- ROLLBACK PREPARED target
-    prepared_xid     XID,
-    prepared_xid_age BIGINT,
-    prepared_at      TIMESTAMPTZ,
-    owner            TEXT,
-    database         TEXT,
+    sample_ts         INTEGER NOT NULL,              -- partition key; see §4.3.5
+    snapshot_id       INTEGER NOT NULL,
+    gid               TEXT NOT NULL,                 -- ROLLBACK PREPARED target
+    prepared_xmin     XID,
+    prepared_xmin_age BIGINT,
+    prepared_at       TIMESTAMPTZ,
+    owner             TEXT,
+    database          TEXT,
     PRIMARY KEY (sample_ts, snapshot_id, gid)
 );
 COMMENT ON TABLE pgfr_record.xmin_prepared_holders IS
-  'Prepared transactions holding the xmin horizon. ROLLBACK PREPARED target set.';
+  'Prepared transactions holding the xmin horizon. ROLLBACK PREPARED target set. '
+  'Always-collected: floor and cap configured independently (xmin_prepared_min_age, '
+  'xmin_prepared_holders_top_n) because prepared xacts are rare, tiny, and high-signal.';
 ```
+
+Naming note: the column is `prepared_xmin` for grep-friendly uniformity with the other `*_xmin` source columns, even though the underlying `pg_prepared_xacts.transaction` value is technically the xact's own xid (which serves as its implicit xmin for horizon purposes).
+
+**Separate config knobs.** Unlike activity / slot sidecars, prepared-xact collection uses its own floor and cap:
+
+- `xmin_prepared_min_age` — default `0`. Prepared xacts are rare enough that always recording them is cheap and forensically valuable; if one exists it's almost always interesting.
+- `xmin_prepared_holders_top_n` — default `50`. A cluster with dozens of prepared xacts is itself a noteworthy event; the cap is only a safety valve for pathological dead-2PC-coordinator scenarios.
+
+Both fall back to `xmin_holders_min_age` / `xmin_holders_top_n` if not set explicitly.
 
 #### 4.3.4 Source `replication` — no new table
 
@@ -289,26 +317,52 @@ Daily partition creation and GC piggyback on the existing Phase 3 cron jobs (`pg
 
 ## 5. Collection (`pgfr_record.snapshot()`)
 
-A new section is inserted in `pgfr_record/sql/04b_functions_snapshot.sql` after the existing replication stats block and before the table-stats block. Single-pass per source: **write top-N into the sidecar first, then derive the aggregate for `snapshots` from the sidecar** (`max(age)` / `min(xmin)`). This eliminates the race between two successive reads of the same catalog and makes aggregate and sidecar always internally consistent.
+A new section is inserted in `pgfr_record/sql/04b_functions_snapshot.sql` after the existing replication stats block and before the table-stats block. Each source follows the same shape:
 
-1. Extended `pg_stat_replication` read — captures `backend_xmin`, `backend_xmin_age`, `slot_name` (via `LEFT JOIN pg_replication_slots s ON s.active_pid = r.pid`), and `is_logical_walsender = (s.slot_type = 'logical')` into `replication_snapshots`. Aggregate `replication_xmin` / `replication_xmin_age` on `snapshots` is derived from rows with `is_logical_walsender IS NOT TRUE` (logical walsenders are attributed via the slot sidecar; see §6.1).
-2. `xmin_activity_holders` — top-N INSERT from `pg_stat_activity` filtered by:
+1. Read source into a **materialized CTE** once (bounded by `_set_section_timeout()`).
+2. Derive aggregate-age column(s) on `snapshots` from that CTE unconditionally (NULL when CTE is empty — no holder for this source).
+3. Conditionally `INSERT` top-N into the sidecar from the same CTE when the floor condition passes. Set per-source `xmin_*_collection_status` to `collected` / `below_floor`. Record `xmin_*_truncated_count` as `max(0, count(*) - top_n)`.
 
-   ```sql
-   WHERE backend_xmin IS NOT NULL
-     AND pid <> pg_backend_pid()
-     AND backend_type NOT IN ('autovacuum launcher','autovacuum worker')
-   ORDER BY age(backend_xmin) DESC
-   LIMIT xmin_holders_top_n
-   ```
+On exception in any per-source block: `RAISE WARNING`, status = `collector_failed`, `SQLERRM` logged to `collection_stats` via existing `_record_collection_end()` path. Failure of one source does not abort others.
 
-   `pid <> pg_backend_pid()` is essential: `snapshot()` itself runs in a transaction and would otherwise self-pin every snapshot. Autovacuum worker xmins are filtered because they're transient (held briefly during vacuum work) and not actionable by an operator. A second query counts the excess (`actual_holders - top_n`) for `xmin_holders_truncated_count`. `activity_xmin` / `activity_xmin_age` on `snapshots` are derived from the sidecar's `max(backend_xmin_age)`.
-3. `xmin_slot_holders` — INSERT from `pg_replication_slots` where `xmin IS NOT NULL OR catalog_xmin IS NOT NULL`. `conflicting` and `invalidation_reason` populated conditionally on `_pg_version() >= 16` / `>= 17`. Aggregates `slot_xmin_age` and `slot_catalog_xmin_age` derived from the sidecar.
-4. `xmin_prepared_holders` — INSERT from `pg_prepared_xacts`. `prepared_xid_age` aggregate derived from the sidecar.
+### Source reads (sketches)
 
-Each step lives under its own `BEGIN / EXCEPTION WHEN OTHERS` with `RAISE WARNING` — failure of one source does not abort others, matching the existing sparse-collector isolation pattern. On failure of any step, `xmin_holders_collection_status` is set to `collector_failed` and the existing `_record_collection_end()` path logs `SQLERRM` to `collection_stats.error_message`.
+**Activity** — `pg_stat_activity`:
 
-`_set_section_timeout()` (250 ms default) guards each step as with every other section. Cost is small: four catalog reads with `AccessShareLock` only.
+```sql
+WITH activity AS MATERIALIZED (
+    SELECT pid, leader_pid, datid, datname, usesysid, usename,
+           application_name, client_addr, backend_type, state,
+           backend_start, xact_start, query_start, state_change,
+           wait_event_type, wait_event,
+           backend_xid, age(backend_xid) AS backend_xid_age,
+           backend_xmin, age(backend_xmin) AS backend_xmin_age,
+           EXTRACT(epoch FROM now() - xact_start)::bigint  AS xact_age_seconds,
+           EXTRACT(epoch FROM now() - query_start)::bigint AS query_age_seconds,
+           left(regexp_replace(coalesce(query,''), '[\r\n\t]+', ' ', 'g'),
+                least(current_setting('track_activity_query_size')::int,
+                      pgfr_record._get_config('xmin_query_preview_max_len','1024')::int)) AS query_preview
+    FROM pg_stat_activity
+    WHERE backend_xmin IS NOT NULL
+      AND pid <> pg_backend_pid()
+      AND leader_pid IS NULL                  -- exclude parallel workers (leader carries attribution)
+)
+-- aggregate (unconditional):
+SELECT max(backend_xmin_age) AS activity_xmin_age, ... FROM activity;
+-- sidecar (conditional on xmin_data_horizon_age > xmin_holders_min_age):
+INSERT INTO xmin_activity_holders (...) SELECT ... FROM activity
+  ORDER BY backend_xmin_age DESC LIMIT xmin_holders_top_n;
+```
+
+`pid <> pg_backend_pid()` prevents `snapshot()` from self-pinning every snapshot. `leader_pid IS NULL` keeps parallel workers out of the sidecar; the leader appears once with its own `backend_xmin`. Autovacuum workers are **not** excluded — a long vacuum on a multi-TB heap is a real horizon-holding failure mode and the recorder should capture it; the anomaly (§6.1) special-cases `backend_type = 'autovacuum worker'` in the recommendation text.
+
+**Replication** — `pg_stat_replication LEFT JOIN pg_replication_slots ON active_pid = pid`. Writes `slot_name` and `is_logical_walsender := COALESCE(s.slot_type = 'logical', false)`. Aggregate `replication_xmin_age` is derived from rows with `is_logical_walsender = false` — logical walsenders are attributed via `xmin_slot_holders` because their `backend_xmin` is a mirror of the slot's xmin and the actionable remediation is against the slot (subscriber lag), not `hot_standby_feedback`.
+
+**Slot** — `pg_replication_slots WHERE xmin IS NOT NULL OR catalog_xmin IS NOT NULL`. `conflicting` and `invalidation_reason` populated conditionally on `_pg_version() >= 16` / `>= 17`. Gate: `GREATEST(xmin_data_horizon_age, slot_catalog_xmin_age) > xmin_holders_min_age` — logical-only catalog stalls still write.
+
+**Prepared** — `pg_prepared_xacts`. Own floor `xmin_prepared_min_age` (default 0) and cap `xmin_prepared_holders_top_n` (default 50); see §4.3.3.
+
+Cost is small: four catalog reads with `AccessShareLock` only. Materialized CTEs guarantee each source is read exactly once per snapshot — no race between aggregate and sidecar, no dependency on the order of reads.
 
 **Behavior on standbys.** Previous versions summarised this as "source (3) is always NULL on standbys." That oversimplifies:
 
@@ -329,16 +383,40 @@ Added to `pgfr_analyze/sql/01_core_metrics.sql` **before** the existing `XID_WRA
 
 **Semantics.** `anomaly_report()` is point-in-time at the latest snapshot in the window; callers dedupe adjacent firings if desired (the project's convention — see existing `XID_WRAPAROUND_RISK`). `CATALOG_XMIN_HORIZON_STALL` is **not** XOR with `XMIN_HORIZON_STALL` — both can fire simultaneously when a logical slot holds both `xmin` and `catalog_xmin` above threshold. Each anomaly skips when its source columns are NULL (historical snapshots from before this change).
 
-Severity ladder separates **onset** (warning) from **wraparound-risk territory** (high/critical):
+Severity ladder separates **onset** (warning) from **wraparound-risk territory** (high/critical). Data and catalog horizons both get a warning tier for symmetry — a logical slot slowly leaking `catalog_xmin` over days is exactly the case warning severity is meant to catch.
 
-- `XMIN_HORIZON_STALL_WARNING` — severity `warning`. Fires when `xmin_data_horizon_age > xmin_stall_warning_age` (new config, default `50,000,000` xids). This is an **early signal**: the horizon has been stalled long enough that bloat is compounding on hot tables, but wraparound is not imminent. The previous design bolted attribution onto the existing 50%/80%-of-`autovacuum_freeze_max_age` thresholds, so on a cluster with `autovacuum_freeze_max_age=2B` the anomaly wouldn't fire until 1B xids of stall — far too late. The warning threshold is absolute, not relative, so it's useful regardless of `autovacuum_freeze_max_age`.
-- `XMIN_HORIZON_STALL` — severity `high` at `xmin_data_horizon_age > 0.5 * autovacuum_freeze_max_age`; `critical` at `> 0.8 * autovacuum_freeze_max_age`. Source attribution selects the oldest holder across the sidecars:
-  - **activity** (from `xmin_activity_holders`): `"terminate PID %s (user=%s, app=%s, db=%s, state=%s, xact_start=%s, query: %s)"` — uses `pid`, `usename`, `application_name`, `datname`, `state`, `xact_start`, `query_preview`. When `leader_pid IS NOT NULL` the holder is a parallel worker; the recommendation names the leader instead: `"terminate leader PID %s (parallel worker %s is a symptom)"`.
-  - **slot** (from `xmin_slot_holders`): when `invalidation_reason IS NOT NULL` → `"slot '%s' is already invalidated (%s); DROP REPLICATION SLOT"`. When `wal_status = 'lost'` → `"slot '%s' has lost required WAL; DROP REPLICATION SLOT"`. Otherwise → `"DROP REPLICATION SLOT '%s' (type=%s, active=%s, restart_lsn=%s) — or fix the consumer if this slot is still needed"`.
-  - **replication** (from `replication_snapshots` where `is_logical_walsender IS NOT TRUE`): `"review hot_standby_feedback on standby '%s' (addr=%s, pid=%s, sync_state=%s)"`. Logical walsenders are attributed via the slot sidecar instead — hot_standby_feedback advice is nonsense for them.
-  - **prepared** (from `xmin_prepared_holders`): `"ROLLBACK PREPARED '%s' (owner=%s, database=%s, prepared_at=%s)"`.
-  - **attribution fallback**: if the dominant source's sidecar is empty (e.g. `xmin_holders_collection_status = 'below_floor'` for the snapshot that crossed the threshold, or the sidecar row was pruned by partition GC), the anomaly still fires but `recommendation` is suffixed `" — holder detail not collected: <status>"`. Never silently misattribute.
-- `CATALOG_XMIN_HORIZON_STALL` — severity `high` at `xmin_catalog_slot_age > 0.5 * autovacuum_freeze_max_age`, `critical` at `> 0.8`. Fires **independently** of the data anomalies: a logical slot can pin `catalog_xmin` while leaving `xmin` NULL, which elevates catalog-slot age but not data horizon. Recommendation always points at `xmin_slot_holders` rows with `slot_type = 'logical'` and non-null `catalog_xmin`, using the same invalidation/lost/active logic as the slot branch above.
+- `XMIN_HORIZON_STALL_WARNING` — severity `warning`. Fires when `xmin_data_horizon_age > xmin_stall_warning_age` (new config, default `50,000,000` xids, absolute not relative). Early signal: bloat compounding on hot tables, wraparound not imminent.
+- `XMIN_HORIZON_STALL` — severity `high` at `xmin_data_horizon_age > 0.5 * autovacuum_freeze_max_age`; `critical` at `> 0.8 *`.
+- `CATALOG_XMIN_HORIZON_STALL_WARNING` — severity `warning`. Fires when `slot_catalog_xmin_age > xmin_catalog_stall_warning_age` (new config, default `50,000,000` xids).
+- `CATALOG_XMIN_HORIZON_STALL` — severity `high` at `slot_catalog_xmin_age > 0.5 * autovacuum_freeze_max_age`; `critical` at `> 0.8 *`.
+
+Data and catalog anomalies fire **independently** — both can fire at the same severity level when a logical slot pins both `xmin` and `catalog_xmin` above threshold.
+
+**Attribution tie-breaking.** When two sources have the same oldest age (common — a long activity txn and its walsender feedback mirror each other exactly), the dominant source is picked by priority, not by floating-point luck:
+
+```text
+slot > prepared > activity > replication
+```
+
+Rationale: persistent holders (slots, prepared xacts) are almost always the real cause when present at similar ages; walsender feedback is a mirror of primary-side holders and picking it first would leak remediation to the wrong side. Priority is a fixed tiebreaker only — a strictly-older source of any type always wins.
+
+**Source-specific recommendation text** (soft-first, terminate-last):
+
+- **activity** (from `xmin_activity_holders`):
+  - `backend_type = 'autovacuum worker'`: `"long autovacuum on %s.%s (pid=%s) holding xmin %s old — check pg_stat_progress_vacuum; do NOT terminate unless vacuum is stuck"`.
+  - `state = 'active'`: `"investigate PID %s (user=%s, app=%s, db=%s, query: %s) — try pg_cancel_backend(%s) first; escalate to pg_terminate_backend if cancellation does not release xmin"`.
+  - `state LIKE 'idle in transaction%'`: `"PID %s has been idle in transaction for %s (user=%s, app=%s, db=%s) — pg_terminate_backend(%s) is usually appropriate"`.
+- **slot** (from `xmin_slot_holders`):
+  - `invalidation_reason IS NOT NULL`: `"slot '%s' is already invalidated (%s); DROP REPLICATION SLOT"`.
+  - `wal_status = 'lost'`: `"slot '%s' has lost required WAL; DROP REPLICATION SLOT"`.
+  - else: `"investigate slot '%s' (type=%s, active=%s, restart_lsn=%s); advance or drop the slot once subscriber state is confirmed"`.
+- **replication** (from `replication_snapshots` where `NOT is_logical_walsender`):
+  - `"review hot_standby_feedback on standby '%s' (addr=%s, pid=%s, sync_state=%s)"` — and when `slot_name` matches a row in `xmin_slot_holders` for the same snapshot, append: `"; related physical slot '%s' also present — the walsender feedback and the slot xmin describe the same standby, not two separate problems"`.
+- **prepared** (from `xmin_prepared_holders`): `"ROLLBACK PREPARED '%s' (owner=%s, database=%s, prepared_at=%s)"`.
+
+**Attribution fallback**: when the dominant source's sidecar is empty (per-source status ≠ `collected` for that source), the anomaly fires with `recommendation` suffixed `" — holder detail not collected: <per-source-status>"`. Never silently misattribute.
+
+**Autovacuum worker caveat**: because the collector no longer filters autovacuum workers from the sidecar (see §5), they *can* appear as the dominant holder. The recommendation special-case above routes them to `pg_stat_progress_vacuum` instead of suggesting termination — an operator trying to terminate a 6-hour vacuum on a 2 TB table would just set progress back to zero.
 
 ### 6.2 New reader: `pgfr_analyze.xmin_horizon_history(p_start, p_end)`
 
