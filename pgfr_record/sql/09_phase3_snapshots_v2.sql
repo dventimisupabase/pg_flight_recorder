@@ -435,29 +435,10 @@ create trigger snapshot_v2_dual_write
     execute function pgfr_record._snapshot_v2_trigger();
 
 -- ---------------------------------------------------------------------------
--- 7. Add nightly pre-creation of next-day partitions to the existing
---    pgfr-nightly pg_cron job (or create a new job if absent)
+-- 7. pgfr-precreate-partitions cron scheduling is consolidated into
+--    pgfr_record.enable() (see 05_functions_ops.sql). install.sql calls
+--    enable() as its final step.
 -- ---------------------------------------------------------------------------
-do $$
-begin
-    if not exists (
-        select 1 from cron.job where jobname = 'pgfr-precreate-partitions'
-    ) then
-        perform cron.schedule(
-            'pgfr-precreate-partitions',
-            '55 23 * * *',
-            'set statement_timeout = ''5s''; '
-            'do $x$ begin '
-            'perform pgfr_record._ensure_partition(''snapshots_v2'', current_date + 1, ''snapshot_id, sample_ts desc''); '
-            'perform pgfr_record._ensure_partition(''replication_snapshots_v2'', current_date + 1, ''snapshot_id, sample_ts desc''); '
-            'perform pgfr_record._ensure_partition(''vacuum_progress_snapshots_v2'', current_date + 1, ''snapshot_id, sample_ts desc''); '
-            'perform pgfr_record._ensure_partition(''statement_snapshots_v2'', current_date + 1); '
-            'perform pgfr_record._ensure_partition(''table_snapshots_v2'', current_date + 1, ''relid, dbid, sample_ts desc''); '
-            'perform pgfr_record._ensure_partition(''index_snapshots_v2'', current_date + 1, ''indexrelid, dbid, sample_ts desc''); '
-            'end; $x$'
-        );
-    end if;
-end $$;
 
 --------------------------------------------------------------------------------
 -- End of Phase 3
@@ -569,32 +550,10 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------------
--- Wire archive v2 tables into the precreate-partitions cron job
--- (replaces the job created in the snapshots_v2 section above)
+-- Archive v2 tables are covered by pgfr-precreate-partitions, which is
+-- scheduled in pgfr_record.enable() (see 05_functions_ops.sql) with the full
+-- 9-table command string. No separate scheduling needed here.
 -- ---------------------------------------------------------------------------
-do $$
-begin
-    -- remove the old job and recreate with expanded scope
-    perform cron.unschedule('pgfr-precreate-partitions')
-    where exists (select 1 from cron.job where jobname = 'pgfr-precreate-partitions');
-
-    perform cron.schedule(
-        'pgfr-precreate-partitions',
-        '55 23 * * *',
-        'set statement_timeout = ''5s''; '
-        'do $x$ begin '
-        'perform pgfr_record._ensure_partition(''snapshots_v2'', current_date + 1, ''snapshot_id, sample_ts desc''); '
-        'perform pgfr_record._ensure_partition(''replication_snapshots_v2'', current_date + 1, ''snapshot_id, sample_ts desc''); '
-        'perform pgfr_record._ensure_partition(''vacuum_progress_snapshots_v2'', current_date + 1, ''snapshot_id, sample_ts desc''); '
-        'perform pgfr_record._ensure_partition(''statement_snapshots_v2'', current_date + 1); '
-        'perform pgfr_record._ensure_partition(''table_snapshots_v2'', current_date + 1, ''relid, dbid, sample_ts desc''); '
-        'perform pgfr_record._ensure_partition(''index_snapshots_v2'', current_date + 1, ''indexrelid, dbid, sample_ts desc''); '
-        'perform pgfr_record._ensure_partition(''activity_samples_archive_v2'', current_date + 1, ''sample_ts desc, pid''); '
-        'perform pgfr_record._ensure_partition(''lock_samples_archive_v2'', current_date + 1, ''sample_ts desc, blocked_pid''); '
-        'perform pgfr_record._ensure_partition(''wait_samples_archive_v2'', current_date + 1, ''sample_ts desc, wait_event_type, wait_event''); '
-        'end; $x$'
-    );
-end $$;
 
 -- ---------------------------------------------------------------------------
 -- retention_archive_days: wire GC for archive v2 tables
