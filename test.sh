@@ -54,9 +54,15 @@ run_single_version() {
     $DOCKER_COMPOSE --profile $profile up -d
 
     echo "Waiting for PostgreSQL to be ready..."
+    # Use `psql -c 'SELECT 1'` rather than `pg_isready`: the latter returns 0
+    # for the official postgres image's temporary init-phase postmaster, but
+    # that server is torn down (socket disappears) before the real one is
+    # started, and subsequent psql calls fail with "socket does not exist".
+    # A successful SELECT is a stronger readiness signal.
     ready=0
     for _ in {1..30}; do
-        if $DOCKER_COMPOSE --profile $profile exec -T $service pg_isready -U postgres > /dev/null 2>&1; then
+        if $DOCKER_COMPOSE --profile $profile exec -T $service \
+             psql -U postgres -tAc 'SELECT 1' > /dev/null 2>&1; then
             ready=1
             break
         fi
@@ -75,6 +81,14 @@ run_single_version() {
 
     echo "Installing pgfr_record..."
     $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres --single-transaction -f /pgfr_record/install.sql > /dev/null
+
+    # Deactivate every pgfr_ cron job immediately after install, before
+    # pg_cron's scheduler has a chance to fire one. Closes the race
+    # documented in #46: pgfr-sample-ring populating query_map_all before
+    # pgfr_record.disable() runs, making test_ring_buffer.sql's "empty
+    # initially" assertion flake. Covers legacy AND v2 jobs by prefix,
+    # bypassing disable() (which only knows about legacy job names).
+    $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres -c "UPDATE cron.job SET active = false WHERE jobname LIKE 'pgfr%'" > /dev/null
 
     echo "Installing reporting functions..."
     $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres --single-transaction -f /pgfr_analyze/install.sql > /dev/null
@@ -113,10 +127,13 @@ run_all_parallel() {
 
     # Wait for all instances to be ready
     echo "Waiting for all PostgreSQL instances to be ready..."
+    # See note in run_single_version: SELECT 1 is a stronger readiness
+    # signal than pg_isready during the postgres image's init-phase restart.
     for service in postgres15 postgres16 postgres17 postgres18; do
         ready=0
         for _ in {1..30}; do
-            if $DOCKER_COMPOSE --profile all exec -T $service pg_isready -U postgres > /dev/null 2>&1; then
+            if $DOCKER_COMPOSE --profile all exec -T $service \
+                 psql -U postgres -tAc 'SELECT 1' > /dev/null 2>&1; then
                 ready=1
                 break
             fi
@@ -137,6 +154,8 @@ run_all_parallel() {
         (
             $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_cron; CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" > /dev/null
             $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres --single-transaction -f /pgfr_record/install.sql > /dev/null
+            # Deactivate pgfr_ jobs before pg_cron can fire them (see single-version note)
+            $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -c "UPDATE cron.job SET active = false WHERE jobname LIKE 'pgfr%'" > /dev/null
             $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres --single-transaction -f /pgfr_analyze/install.sql > /dev/null
             $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pgtap;" > /dev/null
             $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -c "SELECT pgfr_record.disable();" > /dev/null
