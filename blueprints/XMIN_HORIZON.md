@@ -120,7 +120,7 @@ Add `backend_xmin xid` (and companion `backend_xmin_age bigint`). The table alre
 
 The oldest-xmin per source (§4.1) answers "how bad is it"; the operator still needs to know *which* backend / slot / prepared xact / standby to act on. Per `CLAUDE.md`'s schema philosophy ("Strong typing catches errors early ... Schema-as-documentation"), each source gets its own typed sidecar, mirroring the existing pattern (`replication_snapshots`, `vacuum_progress_snapshots`).
 
-All three tables are capped at `xmin_holders_top_n` rows per snapshot per source (configurable via `pgfr_record._get_config('xmin_holders_top_n', '20')`, default 20, matching `statements_top_n`). Rows with NULL xmin are not emitted.
+All three tables are capped at `xmin_holders_top_n` rows per snapshot per source (configurable via `pgfr_record._get_config('xmin_holders_top_n', '5')`, default **5**). Five is enough to identify a pile-up without hoarding rows: the oldest holder is the actionable one, and four more provide attribution context when multiple sessions / slots lag together. Rows with NULL xmin are not emitted.
 
 **Collection floor** (storage mitigation): holders are only written when `data_horizon_age > xmin_holders_min_age` (configurable, default `1,000,000` xids, ~2 min at modest TPS). Below the floor nothing is holding the horizon long enough to matter, so the sidecars stay empty and healthy systems pay only the 12-bigint cost on `snapshots`. The aggregate-age columns on `snapshots` are always captured regardless of the floor — they're cheap and always useful for trend plots.
 
@@ -223,7 +223,6 @@ A new section is inserted in `pgfr_record/sql/04b_functions_snapshot.sql` after 
 
 Each step lives under its own `BEGIN / EXCEPTION WHEN OTHERS` with `RAISE WARNING` — failure of one source does not abort others, matching the existing sparse-collector isolation pattern. Inner guards:
 
-- `pg_prepared_xacts` is always-present but defensively wrapped `WHEN undefined_table THEN NULL`.
 - `pg_stat_replication.backend_xmin` has existed since 9.4; no version branch.
 - Section uses `_set_section_timeout()` (250 ms default) like every other section.
 
@@ -301,6 +300,8 @@ The `holder_detail` string is formatted per source (e.g. activity: `"app=%s user
 
 ## 8a. Storage budget
 
+Holder rows are **raw, per-snapshot, no rollup** — same retention model as `statement_snapshots` / `table_snapshots` / `replication_snapshots`. Daily RANGE-partitioned via the existing Phase 3 infrastructure; GC'd by `retention_snapshots_days` (default 30). There is no aggregated / summarised variant (the existing `wait_event_aggregates` / `lock_aggregates` / `activity_aggregates` rollups don't apply — for horizon holders the identity of *which* backend / slot / xact held the xmin is the whole point, and cannot be summarised).
+
 Row widths (typical, Postgres overhead included):
 
 | Table                               | Bytes/row             |
@@ -313,23 +314,23 @@ Row widths (typical, Postgres overhead included):
 
 Rows per snapshot at 60-second cadence:
 
-| Scenario                     | activity | slot | prepared |
-|------------------------------|----------|------|----------|
-| Healthy (no held xmins)      | 0–3      | 0–5  | 0        |
-| Sustained single holder      | 1        | 0–5  | 0        |
-| Pathological storm (N-capped)| 20       | 20   | 1        |
+| Scenario                          | activity | slot | prepared | Notes |
+|-----------------------------------|----------|------|----------|-------|
+| Healthy (no held xmins)           | 0–3      | 0–5  | 0        | Most backends are `idle` with `backend_xmin = NULL`; slot count = number of configured replication slots; typical app does not use 2PC. |
+| Sustained single holder           | 1        | 0–5  | 0        | One long-running txn / idle-in-txn session — the common failure mode. |
+| Top-N cap saturated (upper bound) | 5        | 5    | 1        | 5 concurrent backends each with a distinct `backend_xmin` (e.g. a reporting fleet); 5 logical slots lagging (fan-out publisher); plus a stuck prepared xact. Used here as a conservative sizing ceiling — real systems almost never hit this. |
 
-30-day projections (before the collection floor; worst-case):
+30-day **raw storage** projections (no rollup; all rows retained at snapshot cadence):
 
-| Scenario                | Per day | 30 days |
-|-------------------------|---------|---------|
-| Healthy                 | ~4 MB   | ~120 MB |
-| Sustained single holder | ~8 MB   | ~240 MB |
-| Pathological storm      | ~43 MB  | ~1.3 GB |
+| Scenario                    | Per day | 30 days raw |
+|-----------------------------|---------|-------------|
+| Healthy                     | ~4 MB   | ~120 MB     |
+| Sustained single holder     | ~8 MB   | ~240 MB     |
+| Top-N cap saturated (ceiling)| ~11 MB | ~325 MB     |
 
-**With the collection floor** (`xmin_holders_min_age = 1,000,000`): healthy systems write zero holder rows — storage is bounded by the twelve tiny bigints on `snapshots` (`~60 B × 1440 × 30 = 2.6 MB/month`). Cost scales with how long and how badly the horizon stalls, which is exactly when forensics matters.
+**With the collection floor** (`xmin_holders_min_age = 1,000,000`): healthy systems write zero holder rows — raw storage is bounded by the twelve tiny bigints on `snapshots` (`~60 B × 1440 × 30 ≈ 2.6 MB/month`). Cost scales with how long and how badly the horizon stalls, which is exactly when forensics matters.
 
-Comparable reference point: `statement_snapshots` baseline is ~960 MiB/30d at `top_n=50` (SPEC.md §9.2). Worst-case here is comparable; typical is negligible.
+Reference point: `statement_snapshots` baseline is ~960 MiB/30d raw at `top_n=50` (SPEC.md §9.2). Worst-case holders are ~1/3 of that; typical is far below.
 
 ---
 
@@ -348,12 +349,11 @@ No migration script, no dual-write period, no config changes required. Historica
 
 ## 10. Tradeoffs
 
-- **Top-N per source vs. oldest-only.** The postgres.ai query picks one row per source. For forensics a flight recorder wants the full pile-up — a single long-running transaction is easy, but a fleet of idle-in-transaction sessions all pinning similar xmins is the more common failure mode and requires seeing all of them. Cost is bounded by `xmin_holders_top_n` (default 20).
+- **Top-N per source vs. oldest-only.** The postgres.ai query picks one row per source. For forensics a flight recorder wants the pile-up, not just the winner — a fleet of idle-in-transaction sessions all pinning similar xmins is a common failure mode and the single oldest tells you nothing about the pattern. Cost is bounded by `xmin_holders_top_n` (default 5): enough to reveal pile-ups, small enough that worst-case 30-day raw storage stays at ~325 MB.
 - **Three typed tables vs. one `JSONB` holders table.** Per-source tables carry only the columns that apply, `\d pgfr_record.xmin_activity_holders` documents itself, and queries filter/sort on typed columns (`xact_start`, `restart_lsn`, `prepared_at`) without JSON extraction. Follows the project's existing sidecar pattern (`replication_snapshots`, `vacuum_progress_snapshots`). Cost: three tables to create and GC, not one.
-- **Collection floor vs. always-collect.** The floor trades worst-case storage (~1.3 GB/30d) for a small blind spot: bursts where xmin is briefly held below the threshold are not recorded. The aggregate ages on `snapshots` still capture the *shape* of those bursts, only the per-holder attribution is missing. The floor is a config knob; operators who want everything-always set `xmin_holders_min_age = 0`.
+- **Collection floor vs. always-collect.** The floor trades worst-case storage (~325 MB/30d raw) for a small blind spot: bursts where xmin is briefly held below the threshold are not recorded. The aggregate ages on `snapshots` still capture the *shape* of those bursts, only the per-holder attribution is missing. The floor is a config knob; operators who want everything-always set `xmin_holders_min_age = 0`.
 - **`xid` vs. `bigint` storage.** Storing both is mildly redundant but matches the source fidelity (`xid`) and the natural threshold/sort key (`bigint age`). Query analysis defaults to the age column.
 - **Precomputed `*_horizon_age` columns.** The two `greatest(...)` columns could be a view, but precomputing at write time (a) keeps analysis queries simple, (b) survives export via `pg_dump`, and (c) costs negligible bytes.
-- **`pg_prepared_xacts` defensiveness.** The view is in core; wrapping with `WHEN undefined_table` is belt-and-suspenders for forks that disable it. Cost is one `EXCEPTION` block.
 - **Standby collection.** The standby writes rows where `data_xmin_replication` is always NULL (because `pg_stat_replication` is empty there). Accepted — the recorder should still record the three other sources on standbys.
 
 ---
