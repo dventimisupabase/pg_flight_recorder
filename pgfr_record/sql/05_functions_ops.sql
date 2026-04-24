@@ -152,6 +152,22 @@ BEGIN
         PERFORM cron.unschedule('pgfr_archive')
         WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr_archive');
         IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
+        -- v2 ring buffer + partition maintenance jobs (added with scheduling consolidation)
+        PERFORM cron.unschedule('pgfr-sample-ring')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr-sample-ring');
+        IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
+        PERFORM cron.unschedule('pgfr-rotate-ring')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr-rotate-ring');
+        IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
+        PERFORM cron.unschedule('pgfr-truncate-partitions')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr-truncate-partitions');
+        IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
+        PERFORM cron.unschedule('pgfr-drop-ancient-partitions')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr-drop-ancient-partitions');
+        IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
+        PERFORM cron.unschedule('pgfr-precreate-partitions')
+        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr-precreate-partitions');
+        IF FOUND THEN v_unscheduled := v_unscheduled + 1; END IF;
         INSERT INTO pgfr_record.config (key, value, updated_at)
         VALUES ('enabled', 'false', now())
         ON CONFLICT (key) DO UPDATE SET value = 'false', updated_at = now();
@@ -341,20 +357,39 @@ BEGIN
         PERFORM cron.schedule('pgfr_cleanup', '0 3 * * *',
             'SET statement_timeout = ''60s''; SELECT pgfr_record.cleanup_aggregates(); SELECT * FROM pgfr_record.cleanup(''30 days''::interval);');
         v_scheduled := v_scheduled + 1;
+        -- Ring buffer v2 sampler (every minute); tight 500ms timeout matches low-overhead goal
+        PERFORM cron.schedule('pgfr-sample-ring', '* * * * *',
+            'SET statement_timeout = ''500ms''; SELECT pgfr_record.sample_ring()');
+        v_scheduled := v_scheduled + 1;
+        -- Ring buffer v2 rotation (every 2 hours). Internal lock_timeout = 2s; outer 10s envelope.
+        PERFORM cron.schedule('pgfr-rotate-ring', '0 */2 * * *',
+            'SET statement_timeout = ''10s''; SELECT pgfr_record.rotate_ring()');
+        v_scheduled := v_scheduled + 1;
         -- Nightly retention GC (03:00 UTC): truncate expired v2 partitions
-        perform cron.schedule('pgfr-truncate-partitions', '0 3 * * *',
-            'set statement_timeout = ''30s''; select pgfr_record.truncate_old_partitions()')
-        where not exists (
-            select 1 from cron.job where jobname = 'pgfr-truncate-partitions'
-        );
+        PERFORM cron.schedule('pgfr-truncate-partitions', '0 3 * * *',
+            'SET statement_timeout = ''30s''; SELECT pgfr_record.truncate_old_partitions()');
         v_scheduled := v_scheduled + 1;
         -- Monthly catalog cleanup (1st of month, 04:00 UTC): drop ancient empty partitions
-        perform cron.schedule('pgfr-drop-ancient-partitions', '0 4 1 * *',
-            'set statement_timeout = ''30s''; select pgfr_record.drop_ancient_partitions()')
-        where not exists (
-            select 1 from cron.job where jobname = 'pgfr-drop-ancient-partitions'
-        );
+        PERFORM cron.schedule('pgfr-drop-ancient-partitions', '0 4 1 * *',
+            'SET statement_timeout = ''30s''; SELECT pgfr_record.drop_ancient_partitions()');
         v_scheduled := v_scheduled + 1;
+        -- Daily precreate of tomorrow's partitions (23:55 UTC), covers all v2 parents
+        PERFORM cron.schedule('pgfr-precreate-partitions', '55 23 * * *',
+            'SET statement_timeout = ''5s''; '
+            'DO $x$ BEGIN '
+            'PERFORM pgfr_record._ensure_partition(''snapshots_v2'', current_date + 1, ''snapshot_id, sample_ts desc''); '
+            'PERFORM pgfr_record._ensure_partition(''replication_snapshots_v2'', current_date + 1, ''snapshot_id, sample_ts desc''); '
+            'PERFORM pgfr_record._ensure_partition(''vacuum_progress_snapshots_v2'', current_date + 1, ''snapshot_id, sample_ts desc''); '
+            'PERFORM pgfr_record._ensure_partition(''statement_snapshots_v2'', current_date + 1); '
+            'PERFORM pgfr_record._ensure_partition(''table_snapshots_v2'', current_date + 1, ''relid, dbid, sample_ts desc''); '
+            'PERFORM pgfr_record._ensure_partition(''index_snapshots_v2'', current_date + 1, ''indexrelid, dbid, sample_ts desc''); '
+            'PERFORM pgfr_record._ensure_partition(''activity_samples_archive_v2'', current_date + 1, ''sample_ts desc, pid''); '
+            'PERFORM pgfr_record._ensure_partition(''lock_samples_archive_v2'', current_date + 1, ''sample_ts desc, blocked_pid''); '
+            'PERFORM pgfr_record._ensure_partition(''wait_samples_archive_v2'', current_date + 1, ''sample_ts desc, wait_event_type, wait_event''); '
+            'END $x$');
+        v_scheduled := v_scheduled + 1;
+        -- Ensure pg_cron uses the unix socket for all pgfr jobs (not TCP).
+        UPDATE cron.job SET nodename = '' WHERE jobname LIKE 'pgfr%' AND nodename <> '';
         INSERT INTO pgfr_record.config (key, value, updated_at)
         VALUES ('enabled', 'true', now())
         ON CONFLICT (key) DO UPDATE SET value = 'true', updated_at = now();
@@ -383,94 +418,11 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION pgfr_record.enable() IS
-'Start Flight Recorder by scheduling pg_cron jobs for sample collection, snapshots, flush, archival, and cleanup. Requires pg_cron extension. Configures schedules based on current mode and sample interval.';
+'Start Flight Recorder by scheduling all pg_cron jobs (legacy collectors + v2 ring buffer + partition maintenance). Requires pg_cron extension. Configures schedules based on current mode and sample interval.';
 
-DO $$
-DECLARE
-    v_pgcron_version TEXT;
-    v_major INT;
-    v_minor INT;
-    v_patch INT;
-    v_supports_subsecond BOOLEAN := FALSE;
-    v_sample_schedule TEXT;
-    v_sample_interval_seconds INTEGER;
-    v_sample_interval_minutes INTEGER;
-    v_cron_expression TEXT;
-BEGIN
-    BEGIN
-        PERFORM cron.unschedule('pgfr_snapshot')
-        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr_snapshot');
-        PERFORM cron.unschedule('pgfr_sample')
-        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr_sample');
-        PERFORM cron.unschedule('pgfr_flush')
-        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr_flush');
-        PERFORM cron.unschedule('pgfr_cleanup')
-        WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr_cleanup');
-    EXCEPTION
-        WHEN undefined_table THEN NULL;
-        WHEN undefined_function THEN NULL;
-    END;
-    SELECT value::integer INTO v_sample_interval_seconds
-    FROM pgfr_record.config
-    WHERE key = 'sample_interval_seconds';
-    v_sample_interval_seconds := COALESCE(v_sample_interval_seconds, 60);
-    SELECT extversion INTO v_pgcron_version
-    FROM pg_extension WHERE extname = 'pg_cron';
-    IF v_pgcron_version IS NOT NULL THEN
-        v_pgcron_version := split_part(v_pgcron_version, '-', 1);
-        v_major := COALESCE(split_part(v_pgcron_version, '.', 1)::int, 0);
-        v_minor := COALESCE(NULLIF(split_part(v_pgcron_version, '.', 2), '')::int, 0);
-        v_patch := COALESCE(NULLIF(split_part(v_pgcron_version, '.', 3), '')::int, 0);
-        v_supports_subsecond := (v_major > 1)
-            OR (v_major = 1 AND v_minor > 4)
-            OR (v_major = 1 AND v_minor = 4 AND v_patch >= 1);
-    END IF;
-    PERFORM cron.schedule(
-        'pgfr_snapshot',
-        '* * * * *',
-        'SET statement_timeout = ''10s''; SELECT pgfr_record.snapshot()'
-    );
-    PERFORM cron.schedule(
-        'pgfr_sample',
-        '* * * * *',
-        'SET statement_timeout = ''5s''; SELECT pgfr_record.sample()'
-    );
-    v_sample_schedule := 'every 60 seconds (ring buffer)';
-    RAISE NOTICE 'Flight Recorder installed. Sampling %', v_sample_schedule;
-    PERFORM cron.schedule(
-        'pgfr_flush',
-        '*/5 * * * *',
-        'SET statement_timeout = ''10s''; SELECT pgfr_record.flush_ring_to_aggregates()'
-    );
-    PERFORM cron.schedule(
-        'pgfr_archive',
-        '*/15 * * * *',
-        'SET statement_timeout = ''10s''; SELECT pgfr_record.archive_ring_samples()'
-    );
-    PERFORM cron.schedule(
-        'pgfr_cleanup',
-        '0 3 * * *',
-        'SET statement_timeout = ''60s''; SELECT pgfr_record.cleanup_aggregates(); SELECT * FROM pgfr_record.cleanup(''30 days''::interval);'
-    );
-    -- Nightly retention GC (03:00 UTC): truncate expired partitions
-    perform cron.schedule('pgfr-truncate-partitions', '0 3 * * *',
-        'set statement_timeout = ''30s''; select pgfr_record.truncate_old_partitions()')
-    where not exists (
-        select 1 from cron.job where jobname = 'pgfr-truncate-partitions'
-    );
-    -- Monthly catalog cleanup (1st of month, 04:00 UTC): drop ancient empty partitions
-    perform cron.schedule('pgfr-drop-ancient-partitions', '0 4 1 * *',
-        'set statement_timeout = ''30s''; select pgfr_record.drop_ancient_partitions()')
-    where not exists (
-        select 1 from cron.job where jobname = 'pgfr-drop-ancient-partitions'
-    );
-EXCEPTION
-    WHEN undefined_table THEN
-        RAISE NOTICE 'pg_cron extension not found. Automatic scheduling disabled. Run pgfr_record.snapshot() and pgfr_record.sample() manually or via external scheduler.';
-    WHEN undefined_function THEN
-        RAISE NOTICE 'pg_cron extension not found. Automatic scheduling disabled. Run pgfr_record.snapshot() and pgfr_record.sample() manually or via external scheduler.';
-END;
-$$;
+-- Install-time scheduling is consolidated into enable(), which install.sql
+-- calls as its final step. Previously a DO block here duplicated enable()'s
+-- logic; see the consolidation commit / issue #57 for rationale.
 
 -- Performs comprehensive health check of Flight Recorder system components
 -- Reports status, metrics, and recommended actions for critical subsystems

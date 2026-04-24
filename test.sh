@@ -96,8 +96,11 @@ run_single_version() {
     echo "Installing pgTAP extension..."
     $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pgtap;" > /dev/null
 
-    echo "Disabling scheduled jobs for testing..."
-    $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres -c "SELECT pgfr_record.disable();" > /dev/null
+    # Note: pg_cron jobs were deactivated right after install.sql above
+    # (UPDATE cron.job SET active=false). That suffices for test isolation
+    # AND leaves job rows visible so test_wiring.sql's "job exists" assertions
+    # still pass. We deliberately don't call pgfr_record.disable() here — it
+    # would unschedule the jobs entirely and break those assertions.
 
     echo "Running tests with per-file timing..."
     $DOCKER_COMPOSE --profile $profile exec -T $service sh -c 'pg_prove --timer -U postgres -d postgres /tests/record/*.sql /tests/analyze/*.sql'
@@ -158,7 +161,8 @@ run_all_parallel() {
             $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -c "UPDATE cron.job SET active = false WHERE jobname LIKE 'pgfr%'" > /dev/null
             $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres --single-transaction -f /pgfr_analyze/install.sql > /dev/null
             $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pgtap;" > /dev/null
-            $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -c "SELECT pgfr_record.disable();" > /dev/null
+            # No disable() call — UPDATE cron.job SET active=false above already
+            # deactivates every pgfr job and leaves rows visible for test_wiring.
         ) &
     done
     wait

@@ -515,29 +515,8 @@ comment on function pgfr_record.sample_ring() is
 'Dual operation: existing sample() continues to work during migration. '
 'Call via pg_cron; use rotate_ring() separately on a slower schedule.';
 
--- 9. pg_cron wiring for ring rotation
-do $$
-begin
-    if exists (select from pg_extension where extname = 'pg_cron') then
-        -- ring sampler (every minute, same cadence as sample())
-        perform cron.schedule('pgfr-sample-ring', '* * * * *',
-            'set statement_timeout = ''500ms''; select pgfr_record.sample_ring()')
-        where not exists (select 1 from cron.job where jobname = 'pgfr-sample-ring');
-
-        -- ring rotation (every 2 hours). statement_timeout as a defense-in-depth
-        -- outer envelope; rotate_ring() also has an internal lock_timeout = 2s.
-        perform cron.schedule('pgfr-rotate-ring', '0 */2 * * *',
-            'set statement_timeout = ''10s''; select pgfr_record.rotate_ring()')
-        where not exists (select 1 from cron.job where jobname = 'pgfr-rotate-ring');
-
-        -- clear nodename so pg_cron uses unix socket (not TCP)
-        update cron.job set nodename = ''
-        where jobname in ('pgfr-sample-ring', 'pgfr-rotate-ring')
-          and nodename <> '';
-    end if;
-exception when others then
-    null; -- pg_cron not installed or accessible, skip silently
-end $$;
+-- 9. pg_cron wiring — consolidated into pgfr_record.enable() (see 05_functions_ops.sql).
+-- install.sql calls enable() as its final step; the scheduling lived here previously.
 
 -- 10. Reader view: recent_waits_v2
 -- Decodes the integer[] format to human-readable wait events.
