@@ -267,17 +267,31 @@ BEGIN
                             format('long autovacuum (pid=%s) holding xmin — check pg_stat_progress_vacuum',
                                 v_xmin.xmin_horizon_detail->'holder'->>'pid')
                         WHEN v_xmin.xmin_horizon_detail->'holder'->>'state' LIKE 'idle in transaction%' THEN
-                            format('PID %s idle in transaction for %ss (user=%s, db=%s) — pg_terminate_backend(%s)',
+                            format('PID %s idle in transaction for %ss (user=%s, db=%s) — pg_terminate_backend(%s); cancel does nothing on an idle backend. Prevent recurrence: set idle_in_transaction_session_timeout (or transaction_timeout on PG17+).',
                                 v_xmin.xmin_horizon_detail->'holder'->>'pid',
                                 v_xmin.xmin_horizon_detail->'holder'->>'xact_age_seconds',
                                 v_xmin.xmin_horizon_detail->'holder'->>'usename',
                                 v_xmin.xmin_horizon_detail->'holder'->>'datname',
                                 v_xmin.xmin_horizon_detail->'holder'->>'pid')
+                        WHEN v_xmin.xmin_horizon_detail->'holder'->>'state' = 'active' THEN
+                            -- Active txn pinning xmin is just as bad as idle-in-txn — autovacuum
+                            -- still can't freeze. pg_cancel_backend ends the current query (and
+                            -- the implicit txn for autocommit, releasing xmin) but if the query
+                            -- runs inside an explicit BEGIN the txn stays open and xmin will
+                            -- typically reappear; escalate to pg_terminate_backend in that case.
+                            format('PID %s active for %ss holding xmin (user=%s, db=%s, query: %s) — pg_cancel_backend(%s); escalate to pg_terminate_backend(%s) if backend_xmin reappears (txn was inside explicit BEGIN). Prevent recurrence: set statement_timeout (and transaction_timeout on PG17+).',
+                                v_xmin.xmin_horizon_detail->'holder'->>'pid',
+                                v_xmin.xmin_horizon_detail->'holder'->>'query_age_seconds',
+                                v_xmin.xmin_horizon_detail->'holder'->>'usename',
+                                v_xmin.xmin_horizon_detail->'holder'->>'datname',
+                                v_xmin.xmin_horizon_detail->'holder'->>'query_preview',
+                                v_xmin.xmin_horizon_detail->'holder'->>'pid',
+                                v_xmin.xmin_horizon_detail->'holder'->>'pid')
                         ELSE
-                            format('investigate PID %s (state=%s, query: %s) — try pg_cancel_backend(%s) first; pg_terminate_backend if cancellation does not release xmin',
+                            format('PID %s holding xmin (state=%s, backend_type=%s) — investigate via pg_stat_activity; pg_terminate_backend(%s) if no other path releases backend_xmin',
                                 v_xmin.xmin_horizon_detail->'holder'->>'pid',
                                 v_xmin.xmin_horizon_detail->'holder'->>'state',
-                                v_xmin.xmin_horizon_detail->'holder'->>'query_preview',
+                                v_xmin.xmin_horizon_detail->'holder'->>'backend_type',
                                 v_xmin.xmin_horizon_detail->'holder'->>'pid')
                     END
                 WHEN 'slot' THEN
@@ -926,5 +940,59 @@ LANGUAGE sql STABLE AS $$
     FROM start_snap s, end_snap e
 $$;
 COMMENT ON FUNCTION pgfr_analyze.compare(TIMESTAMPTZ, TIMESTAMPTZ) IS 'Compares database metrics between two time points, returning checkpoint, WAL, buffer, and IO activity deltas.';
+
+-- xmin horizon readers. Both read pgfr_record.snapshots.xmin_horizon_detail
+-- (JSONB) directly; no sidecar joins. The collector populates the JSONB
+-- with {source, age, holder} for the dominant holder per snapshot. See
+-- REFERENCE.md "xmin horizon monitoring".
+
+CREATE OR REPLACE FUNCTION pgfr_analyze.xmin_horizon_history(
+    p_start TIMESTAMPTZ,
+    p_end   TIMESTAMPTZ
+)
+RETURNS TABLE (
+    captured_at           TIMESTAMPTZ,
+    xmin_data_horizon_age BIGINT,
+    slot_catalog_xmin_age BIGINT,
+    xmin_any_horizon_age  BIGINT,
+    source                TEXT,
+    holder                JSONB
+)
+LANGUAGE sql STABLE AS $$
+    SELECT s.captured_at,
+           s.xmin_data_horizon_age,
+           s.slot_catalog_xmin_age,
+           s.xmin_any_horizon_age,
+           s.xmin_horizon_detail->>'source' AS source,
+           s.xmin_horizon_detail->'holder'  AS holder
+    FROM pgfr_record.snapshots s
+    WHERE s.captured_at BETWEEN p_start AND p_end
+      AND (s.xmin_data_horizon_age IS NOT NULL OR s.slot_catalog_xmin_age IS NOT NULL)
+    ORDER BY s.captured_at DESC;
+$$;
+COMMENT ON FUNCTION pgfr_analyze.xmin_horizon_history(TIMESTAMPTZ, TIMESTAMPTZ) IS
+'Timeline of xmin horizon ages and dominant-holder JSONB detail across snapshots in a window.';
+
+CREATE OR REPLACE FUNCTION pgfr_analyze.current_xmin_horizon_holder()
+RETURNS TABLE (
+    captured_at           TIMESTAMPTZ,
+    xmin_data_horizon_age BIGINT,
+    slot_catalog_xmin_age BIGINT,
+    source                TEXT,
+    holder                JSONB
+)
+LANGUAGE sql STABLE AS $$
+    SELECT s.captured_at,
+           s.xmin_data_horizon_age,
+           s.slot_catalog_xmin_age,
+           s.xmin_horizon_detail->>'source' AS source,
+           s.xmin_horizon_detail->'holder'  AS holder
+    FROM pgfr_record.snapshots s
+    WHERE s.xmin_horizon_detail IS NOT NULL
+    ORDER BY s.captured_at DESC
+    LIMIT 1;
+$$;
+COMMENT ON FUNCTION pgfr_analyze.current_xmin_horizon_holder() IS
+'Quick-answer reader: zero rows on a healthy cluster, otherwise one row for the dominant xmin holder at the latest snapshot.';
 
 -- Retrieves recent wait event samples from the flight recorder ring buffer
