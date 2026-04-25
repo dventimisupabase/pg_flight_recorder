@@ -16,6 +16,7 @@
 --   07_sparse_collectors.sql sparse PGSS/table/index collectors (v2 INSERT pattern)
 --   08_ring_buffer_v2.sql    ring buffer v2 tables, sample_ring, rotate_ring, flush, archive
 --   09_phase3_snapshots_v2.sql snapshots_v2 partitioned tables + dual-write trigger
+--   10_xmin_horizon.sql      xmin horizon holder sidecar tables (activity / slot / prepared)
 
 \ir sql/01_schema.sql
 \ir sql/02_tables_legacy.sql
@@ -27,6 +28,7 @@
 \ir sql/07_sparse_collectors.sql
 \ir sql/08_ring_buffer_v2.sql
 \ir sql/09_phase3_snapshots_v2.sql
+\ir sql/10_xmin_horizon.sql
 
 -- Post-install: migrate deprecated config key aliases to canonical names.
 -- Idempotent; safe on fresh install (keys won't exist yet) and upgrades.

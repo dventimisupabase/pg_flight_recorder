@@ -189,6 +189,57 @@ BEGIN
     END IF;
 END $$;
 
+-- Add xmin horizon monitoring columns to snapshots (additive-only upgrade, blueprint §4.1)
+-- These columns track transaction id horizons from various sources (activity, slots,
+-- prepared txns, replication) to support visibility/bloat incident analysis.
+DO $$
+BEGIN
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS activity_xmin XID;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS activity_xmin_age BIGINT;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS slot_xmin XID;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS slot_xmin_age BIGINT;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS slot_catalog_xmin XID;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS slot_catalog_xmin_age BIGINT;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS replication_xmin XID;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS replication_xmin_age BIGINT;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS prepared_xmin XID;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS prepared_xmin_age BIGINT;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS xmin_data_horizon_age BIGINT;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS xmin_any_horizon_age BIGINT;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS xmin_activity_collection_status TEXT;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS xmin_slot_collection_status TEXT;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS xmin_prepared_collection_status TEXT;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS xmin_replication_collection_status TEXT;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS xmin_activity_truncated_count INTEGER;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS xmin_slot_truncated_count INTEGER;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS xmin_prepared_truncated_count INTEGER;
+END $$;
+
+-- Add CHECK constraint with NOT VALID so existing rows aren't validated (no rewrite on upgrade, blueprint §9).
+-- Wrapped in exception handler to make re-running install.sql idempotent.
+DO $$
+BEGIN
+    ALTER TABLE pgfr_record.snapshots
+        ADD CONSTRAINT snapshots_xmin_any_horizon_age_drift_chk
+        CHECK (xmin_any_horizon_age IS NOT DISTINCT FROM
+               GREATEST(xmin_data_horizon_age, slot_catalog_xmin_age))
+        NOT VALID;
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Add xmin / walsender columns to replication_snapshots (blueprint §4.2)
+-- backend_xmin / backend_xmin_age track per-walsender xmin holdback;
+-- slot_name joins from pg_replication_slots.active_pid;
+-- is_logical_walsender is NOT NULL with default false so existing rows fill in cleanly without rewrite.
+DO $$
+BEGIN
+    ALTER TABLE pgfr_record.replication_snapshots ADD COLUMN IF NOT EXISTS backend_xmin XID;
+    ALTER TABLE pgfr_record.replication_snapshots ADD COLUMN IF NOT EXISTS backend_xmin_age BIGINT;
+    ALTER TABLE pgfr_record.replication_snapshots ADD COLUMN IF NOT EXISTS slot_name TEXT;
+    ALTER TABLE pgfr_record.replication_snapshots ADD COLUMN IF NOT EXISTS is_logical_walsender BOOLEAN NOT NULL DEFAULT false;
+END $$;
+
 CREATE UNLOGGED TABLE IF NOT EXISTS pgfr_record.samples_ring (
     slot_id             INTEGER PRIMARY KEY CHECK (slot_id >= 0 AND slot_id < 2880),
     captured_at         TIMESTAMPTZ NOT NULL,
