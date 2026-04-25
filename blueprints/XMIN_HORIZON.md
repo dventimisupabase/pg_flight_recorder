@@ -86,8 +86,10 @@ select
     age(replication_xmin),
     age(prepared_xmin)
   ) as xmin_data_horizon_age
-  -- xmin_any_horizon_age is a GENERATED column on snapshots (§4.1):
-  --   greatest(xmin_data_horizon_age, slot_catalog_xmin_age)
+  -- xmin_any_horizon_age is a plain bigint on snapshots (§4.1) written by the
+  -- collector and guarded by a CHECK ... NOT VALID constraint:
+  --   xmin_any_horizon_age IS NOT DISTINCT FROM
+  --     greatest(xmin_data_horizon_age, slot_catalog_xmin_age)
 from bits;
 ```
 
@@ -433,13 +435,12 @@ Data and catalog anomalies fire **independently** — both can fire at the same 
   - `"review hot_standby_feedback on standby '%s' (addr=%s, pid=%s, sync_state=%s)"` — and when `slot_name` matches a row in `xmin_slot_holders` for the same snapshot, append: `"; related physical slot '%s' also present — the walsender feedback and the slot xmin describe the same standby, not two separate problems"`.
 - **prepared** (from `xmin_prepared_holders`): `"ROLLBACK PREPARED '%s' (owner=%s, database=%s, prepared_at=%s)"`.
 
-**Attribution fallback**: when the dominant source's sidecar is empty, the anomaly fires with `recommendation` suffixed per the per-source status:
+**Attribution fallback**: when the dominant source's sidecar is empty, the anomaly fires with `recommendation` suffixed per the per-source status. The analyzer is point-in-time at the latest snapshot, so by definition the dominant source has a non-NULL aggregate age — meaning `no_holders` (which implies NULL age) is unreachable as a fallback path. Only two reachable cases:
 
-- `no_holders` → `" — source healthy: no holder in this source; anomaly attributed to aggregate age from a prior snapshot"`
 - `below_floor` → `" — holder detail below collection floor; raise xmin_holders_min_age or investigate directly via pg_stat_activity"`
 - `collector_failed` → `" — collector failed for this source; see collection_stats.error_message"`
 
-Never silently misattribute.
+Never silently misattribute. Cross-snapshot enrichment ("attribute to the snapshot where this holder was last seen") is a future feature tied to the wall-clock-duration signal in §11 non-goals.
 
 **Autovacuum worker caveat**: because the collector no longer filters autovacuum workers from the sidecar (see §5), they *can* appear as the dominant holder. The recommendation special-case above routes them to `pg_stat_progress_vacuum` instead of suggesting termination — an operator trying to terminate a 6-hour vacuum on a 2 TB table would just set progress back to zero.
 
@@ -540,35 +541,41 @@ Population / invariants (go green after §5):
 - `no_holders` vs `below_floor`: on a quiet cluster with no activity backends holding `backend_xmin`, assert `xmin_activity_collection_status = 'no_holders'` (not `below_floor` and not `collected`).
 - **Aggregate-always-populated.** Assert aggregate age columns are populated even when per-source status is `below_floor` — guards against regression of the §5 derive-from-CTE contract (the v0.3 bug where aggregates were derived from a floor-gated sidecar).
 - **Self-pin exclusion.** `snapshot()`'s own backend must not appear in `xmin_activity_holders`. Assertion: `SELECT count(*) = 0 FROM xmin_activity_holders WHERE snapshot_id = :last_id AND pid = pg_backend_pid()`.
-- **Long-running txn attribution with sentinel handshake** (replaces the flaky `txid_current() + pg_sleep` pattern from v0.2 and the race-prone immediate-call pattern from v0.3). v0.4 had a bug: `pg_temp` tables are session-local and not visible across sessions. v0.5 uses a regular table in the test schema:
+- **Long-running txn attribution — `pg_stat_activity` polling handshake.** Earlier versions used `pg_temp` (session-local, invisible across sessions) then a regular sentinel table (which inside an open RR transaction is invisible to other sessions until COMMIT — MVCC trap). The fix doesn't need a coordination table at all: poll `pg_stat_activity` directly for `backend_xmin IS NOT NULL`, which is exactly the condition we want.
 
   ```sql
-  -- test setup (session B)
-  CREATE TABLE IF NOT EXISTS pgfr_test_rr_sentinel (pid integer);
-  TRUNCATE pgfr_test_rr_sentinel;
-
-  -- session A (spawned via dblink)
+  -- session A (spawned via dblink, returns immediately and holds the connection):
   BEGIN ISOLATION LEVEL REPEATABLE READ;
-  SELECT 1 FROM pg_class;                                 -- forces snapshot; backend_xmin becomes live
-  INSERT INTO pgfr_test_rr_sentinel VALUES (pg_backend_pid());  -- handshake barrier, visible across sessions
-  -- dblink holds the connection open with the RR snapshot live
+  SELECT 1 FROM pg_class;          -- forces snapshot; backend_xmin becomes live cluster-wide
+  -- session A keeps the txn open; dblink returns control to session B
 
-  -- session B (the test)
-  -- poll sentinel before calling snapshot() — prevents race where B's read executes before A's SELECT has established xmin:
-  PERFORM 1 FROM (
-    SELECT count(*) AS n FROM pgfr_test_rr_sentinel
-  ) s WHERE s.n > 0;  -- bounded-retry loop in real test
+  -- session B (the test): poll pg_stat_activity until A's backend_xmin is set,
+  -- bounded by a deadline so a misbehaving fixture can't hang the suite forever:
+  DO $$
+  DECLARE deadline timestamptz := clock_timestamp() + interval '10 seconds';
+  BEGIN
+      LOOP
+          EXIT WHEN EXISTS (
+              SELECT 1 FROM pg_stat_activity
+              WHERE pid = current_setting('test.session_a_pid')::int
+                AND backend_xmin IS NOT NULL
+          );
+          IF clock_timestamp() > deadline THEN
+              RAISE EXCEPTION 'session A backend_xmin never appeared';
+          END IF;
+          PERFORM pg_sleep(0.05);
+      END LOOP;
+  END $$;
   PERFORM pgfr_record.snapshot();
   SELECT ok(EXISTS (
     SELECT 1 FROM pgfr_record.xmin_activity_holders
     WHERE snapshot_id = :latest AND pid = :session_a_pid AND backend_xmin IS NOT NULL
   ), 'session A appears in xmin_activity_holders with non-null backend_xmin');
 
-  -- teardown (always runs, even on assertion failure):
-  -- close dblink connection; DROP TABLE pgfr_test_rr_sentinel;
+  -- teardown: dblink_disconnect; the txn rolls back when its connection drops.
   ```
 
-  `dblink` spawns session A, matching the pattern already used in `tests/test_lock_non_snapshot.sql`.
+  No coordination table, no cross-session visibility issues, no teardown table to drop. `pg_stat_activity` is cluster-wide and reads are unaffected by the RR transaction's MVCC view.
 - **Parallel worker exclusion.** Force parallel query via `SET max_parallel_workers_per_gather = 2` and a query that plans parallel. Assert `xmin_activity_holders` contains the leader's pid, and contains NO rows whose `pid` matches `pg_stat_activity.leader_pid = <leader>` — the leader row has itself; no worker rows land. (There is no `leader_pid` column on the sidecar in v0.5; the assertion crosses to live `pg_stat_activity`.)
 - **Autovacuum worker inclusion** — **mocked, not triggered**. Live autovacuum is hard to deterministically invoke in pgTAP (depends on settings, timing, launcher cadence). Instead, insert a synthetic row into `xmin_activity_holders` with `backend_type = 'autovacuum worker'` and assert the analyzer's anomaly `recommendation` text contains `pg_stat_progress_vacuum` and does NOT contain `pg_terminate_backend`. This tests the policy (what matters) without racing on the filesystem.
 - **Intra-source tie-breaking determinism.** Seed two rows in `xmin_activity_holders` with identical `backend_xmin_age` and pids `1000` and `2000`. Call `current_xmin_horizon_holder()` / `xmin_horizon_history()` twice; assert the dominant pid is always `1000` (lower pid wins via `ORDER BY backend_xmin_age DESC, pid ASC`). Repeat for slot (`slot_name ASC`) and prepared (`gid ASC`).
@@ -636,7 +643,7 @@ Split out because they require multi-node infra and are skipped under the unit r
 
 - `pgfr_record/README.md` — add an entry to the captured-metrics table covering the four xmin sources.
 - `REFERENCE.md` — new section "xmin Horizon" documenting:
-  - columns on `snapshots`: five typed `*_xmin` / `*_xmin_age` pairs, one aggregate `xmin_data_horizon_age`, one GENERATED `xmin_any_horizon_age`, four per-source `*_collection_status`, three per-source `*_truncated_count`
+  - columns on `snapshots`: five typed `*_xmin` / `*_xmin_age` pairs, one aggregate `xmin_data_horizon_age`, one collector-written `xmin_any_horizon_age` (CHECK-constrained, not GENERATED), four per-source `*_collection_status`, three per-source `*_truncated_count`
   - four new columns on `replication_snapshots`: `backend_xmin`, `backend_xmin_age`, `slot_name`, `is_logical_walsender`
   - three holder sidecars with full column lists
   - config keys: `xmin_holders_top_n`, `xmin_holders_min_age`, `xmin_stall_warning_age`, `xmin_catalog_stall_warning_age`, `xmin_prepared_holders_top_n`, `xmin_prepared_min_age`, `xmin_query_preview_max_len`, `xmin_capture_query_preview`
@@ -705,7 +712,7 @@ These estimates assume `xmin_holders_top_n = 5` (default). Prepared uses its own
 | Catalog-only stall          | ~0.3 MB  | ~9 MB       |
 | Top-N cap saturated (ceiling)| ~12 MB  | ~350 MB     |
 
-Healthy-system floor is set by the nineteen new columns on `snapshots`: ~90 B × 1440 × 30 ≈ 3.9 MB/month for the columns themselves, plus partition overhead and the GENERATED column's ~8 B. Sidecars remain empty. Cost only scales up when the horizon is actually stalled, which is when forensic data is wanted.
+Healthy-system floor is set by the nineteen new columns on `snapshots`: ~90 B × 1440 × 30 ≈ 3.9 MB/month for the columns themselves (`xmin_any_horizon_age` is already counted in that ~90 B as a plain bigint). Sidecars remain empty. Cost only scales up when the horizon is actually stalled, which is when forensic data is wanted.
 
 Reference point: `statement_snapshots` baseline is ~960 MiB/30d raw at `top_n=50` (SPEC.md §9.2). Worst-case holders are ~1/3 of that; typical is 1–2 orders of magnitude below. These are order-of-magnitude estimates — `query_preview` can TOAST, per-row overhead varies with index fillfactor, and observed numbers will vary.
 
