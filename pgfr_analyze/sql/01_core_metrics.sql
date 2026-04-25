@@ -238,265 +238,101 @@ BEGIN
         recommendation := 'Check recent_locks for blocking queries; consider shorter transactions';
         RETURN NEXT;
     END IF;
-    -- xmin horizon anomalies (blueprint §6.1) — emitted before XID_WRAPAROUND_RISK
-    -- so cause precedes symptom. Four anomaly types: data warning, data stall,
-    -- catalog warning, catalog stall. Data and catalog fire independently
-    -- (non-XOR) — both can fire when a logical slot pins both xmin and
-    -- catalog_xmin above threshold.
-    DECLARE
-        v_xmin_snap RECORD;
-        v_xmin_warning_age BIGINT;
-        v_xmin_catalog_warning_age BIGINT;
-        v_dominant_source TEXT;
-        v_recommendation TEXT;
-        v_status_suffix TEXT;
-        v_dom_status TEXT;
-        v_act RECORD;
-        v_slot RECORD;
-        v_prep RECORD;
-        v_rep RECORD;
-    BEGIN
-        v_xmin_warning_age := COALESCE(
-            (SELECT value::bigint FROM pgfr_record.config
-             WHERE key = 'xmin_stall_warning_age' AND profile = 'default' LIMIT 1),
-            50000000);
-        v_xmin_catalog_warning_age := COALESCE(
-            (SELECT value::bigint FROM pgfr_record.config
-             WHERE key = 'xmin_catalog_stall_warning_age' AND profile = 'default' LIMIT 1),
-            50000000);
 
-        SELECT id, captured_at,
-               xmin_data_horizon_age, slot_catalog_xmin_age, xmin_any_horizon_age,
-               activity_xmin_age, slot_xmin_age, replication_xmin_age, prepared_xmin_age,
-               xmin_activity_collection_status, xmin_slot_collection_status,
-               xmin_prepared_collection_status, xmin_replication_collection_status
-          INTO v_xmin_snap
+    -- xmin horizon anomalies. Fires when the data or catalog xmin horizon
+    -- crosses the same fraction-of-autovacuum_freeze_max_age thresholds that
+    -- XID_WRAPAROUND_RISK uses, but emitted FIRST so cause precedes the
+    -- wraparound symptom. Holder details come from snapshots.xmin_horizon_detail
+    -- (JSONB; populated by the collector). Data and catalog fire independently:
+    -- both can trigger when a logical slot pins xmin and catalog_xmin together.
+    DECLARE
+        v_xmin RECORD;
+        v_xmin_rec TEXT;
+        v_xmin_src TEXT;
+    BEGIN
+        SELECT xmin_data_horizon_age, slot_catalog_xmin_age, xmin_horizon_detail
+          INTO v_xmin
         FROM pgfr_record.snapshots
         WHERE captured_at BETWEEN p_start_time AND p_end_time
           AND (xmin_data_horizon_age IS NOT NULL OR slot_catalog_xmin_age IS NOT NULL)
         ORDER BY captured_at DESC
         LIMIT 1;
 
-        IF v_xmin_snap.id IS NOT NULL THEN
-            -- Cross-source tie-breaking priority: slot > prepared > activity > replication.
-            -- Pick the source whose age equals xmin_data_horizon_age; ties broken by priority.
-            v_dominant_source := CASE
-                WHEN v_xmin_snap.slot_xmin_age IS NOT NULL
-                     AND v_xmin_snap.slot_xmin_age = v_xmin_snap.xmin_data_horizon_age THEN 'slot'
-                WHEN v_xmin_snap.prepared_xmin_age IS NOT NULL
-                     AND v_xmin_snap.prepared_xmin_age = v_xmin_snap.xmin_data_horizon_age THEN 'prepared'
-                WHEN v_xmin_snap.activity_xmin_age IS NOT NULL
-                     AND v_xmin_snap.activity_xmin_age = v_xmin_snap.xmin_data_horizon_age THEN 'activity'
-                WHEN v_xmin_snap.replication_xmin_age IS NOT NULL
-                     AND v_xmin_snap.replication_xmin_age = v_xmin_snap.xmin_data_horizon_age THEN 'replication'
-                ELSE NULL
+        IF v_xmin.xmin_horizon_detail IS NOT NULL THEN
+            v_xmin_src := v_xmin.xmin_horizon_detail->>'source';
+            v_xmin_rec := CASE v_xmin_src
+                WHEN 'activity' THEN
+                    CASE
+                        WHEN v_xmin.xmin_horizon_detail->'holder'->>'backend_type' = 'autovacuum worker' THEN
+                            format('long autovacuum (pid=%s) holding xmin — check pg_stat_progress_vacuum',
+                                v_xmin.xmin_horizon_detail->'holder'->>'pid')
+                        WHEN v_xmin.xmin_horizon_detail->'holder'->>'state' LIKE 'idle in transaction%' THEN
+                            format('PID %s idle in transaction for %ss (user=%s, db=%s) — pg_terminate_backend(%s)',
+                                v_xmin.xmin_horizon_detail->'holder'->>'pid',
+                                v_xmin.xmin_horizon_detail->'holder'->>'xact_age_seconds',
+                                v_xmin.xmin_horizon_detail->'holder'->>'usename',
+                                v_xmin.xmin_horizon_detail->'holder'->>'datname',
+                                v_xmin.xmin_horizon_detail->'holder'->>'pid')
+                        ELSE
+                            format('investigate PID %s (state=%s, query: %s) — try pg_cancel_backend(%s) first; pg_terminate_backend if cancellation does not release xmin',
+                                v_xmin.xmin_horizon_detail->'holder'->>'pid',
+                                v_xmin.xmin_horizon_detail->'holder'->>'state',
+                                v_xmin.xmin_horizon_detail->'holder'->>'query_preview',
+                                v_xmin.xmin_horizon_detail->'holder'->>'pid')
+                    END
+                WHEN 'slot' THEN
+                    format('investigate slot ''%s'' (type=%s); advance or DROP REPLICATION SLOT once subscriber state is confirmed',
+                        v_xmin.xmin_horizon_detail->'holder'->>'slot_name',
+                        v_xmin.xmin_horizon_detail->'holder'->>'slot_type')
+                WHEN 'slot_catalog' THEN
+                    format('logical slot ''%s'' pinning catalog_xmin — advance or DROP REPLICATION SLOT',
+                        v_xmin.xmin_horizon_detail->'holder'->>'slot_name')
+                WHEN 'prepared' THEN
+                    format('ROLLBACK PREPARED ''%s'' (owner=%s, database=%s, prepared_at=%s)',
+                        v_xmin.xmin_horizon_detail->'holder'->>'gid',
+                        v_xmin.xmin_horizon_detail->'holder'->>'owner',
+                        v_xmin.xmin_horizon_detail->'holder'->>'database',
+                        v_xmin.xmin_horizon_detail->'holder'->>'prepared_at')
+                WHEN 'replication' THEN
+                    format('review hot_standby_feedback on standby ''%s'' (pid=%s, slot=%s)',
+                        v_xmin.xmin_horizon_detail->'holder'->>'application_name',
+                        v_xmin.xmin_horizon_detail->'holder'->>'pid',
+                        v_xmin.xmin_horizon_detail->'holder'->>'slot_name')
+                ELSE 'see snapshots.xmin_horizon_detail'
             END;
+        END IF;
 
-            -- Build per-source recommendation by reading the dominant sidecar row.
-            v_recommendation := NULL;
-            v_dom_status := NULL;
-            v_status_suffix := '';
+        IF v_xmin.xmin_data_horizon_age IS NOT NULL
+           AND v_xmin.xmin_data_horizon_age > v_warning_threshold THEN
+            anomaly_type := 'XMIN_HORIZON_STALL';
+            severity := CASE WHEN v_xmin.xmin_data_horizon_age > v_critical_threshold
+                             THEN 'critical' ELSE 'high' END;
+            description := 'xmin horizon stalled — autovacuum cannot freeze user-table tuples';
+            metric_value := format('xmin_data_horizon_age=%s (%s%% of autovacuum_freeze_max_age); source=%s',
+                to_char(v_xmin.xmin_data_horizon_age, 'FM999,999,999'),
+                round(v_xmin.xmin_data_horizon_age::numeric / v_freeze_max_age * 100, 1),
+                COALESCE(v_xmin_src, 'unknown'));
+            threshold := format('xmin_data_horizon_age > %s%% of autovacuum_freeze_max_age',
+                round(v_xid_warning_ratio * 100, 0));
+            recommendation := COALESCE(v_xmin_rec, 'see snapshots.xmin_horizon_detail');
+            RETURN NEXT;
+        END IF;
 
-            IF v_dominant_source = 'activity' THEN
-                v_dom_status := v_xmin_snap.xmin_activity_collection_status;
-                SELECT pid, datname, usename, application_name, backend_type, state,
-                       xact_age_seconds, query_age_seconds, query_preview
-                  INTO v_act
-                FROM pgfr_record.xmin_activity_holders
-                WHERE snapshot_id = v_xmin_snap.id
-                ORDER BY backend_xmin_age DESC, pid ASC
-                LIMIT 1;
-                IF v_act.pid IS NOT NULL THEN
-                    IF v_act.backend_type = 'autovacuum worker' THEN
-                        v_recommendation := format(
-                            'long autovacuum (pid=%s, query=%s) holding xmin — check pg_stat_progress_vacuum for progress; do NOT terminate unless vacuum is stuck',
-                            v_act.pid, COALESCE(v_act.query_preview, ''));
-                    ELSIF v_act.state = 'active' THEN
-                        v_recommendation := format(
-                            'investigate PID %s (user=%s, app=%s, db=%s, query: %s) — try pg_cancel_backend(%s) first; escalate to pg_terminate_backend if cancellation does not release xmin',
-                            v_act.pid, COALESCE(v_act.usename,''), COALESCE(v_act.application_name,''),
-                            COALESCE(v_act.datname,''), COALESCE(v_act.query_preview,''), v_act.pid);
-                    ELSIF v_act.state LIKE 'idle in transaction%' THEN
-                        v_recommendation := format(
-                            'PID %s has been idle in transaction for %s seconds (user=%s, app=%s, db=%s) — pg_terminate_backend(%s) is usually appropriate',
-                            v_act.pid, COALESCE(v_act.xact_age_seconds, 0),
-                            COALESCE(v_act.usename,''), COALESCE(v_act.application_name,''),
-                            COALESCE(v_act.datname,''), v_act.pid);
-                    ELSE
-                        v_recommendation := format('investigate PID %s (state=%s, query: %s)',
-                            v_act.pid, v_act.state, COALESCE(v_act.query_preview,''));
-                    END IF;
-                END IF;
-            ELSIF v_dominant_source = 'slot' THEN
-                v_dom_status := v_xmin_snap.xmin_slot_collection_status;
-                SELECT slot_name, slot_type, active, restart_lsn, wal_status,
-                       conflicting, invalidation_reason
-                  INTO v_slot
-                FROM pgfr_record.xmin_slot_holders
-                WHERE snapshot_id = v_xmin_snap.id
-                ORDER BY GREATEST(COALESCE(xmin_age,0), COALESCE(catalog_xmin_age,0)) DESC,
-                         slot_name ASC
-                LIMIT 1;
-                IF v_slot.slot_name IS NOT NULL THEN
-                    IF v_slot.invalidation_reason IS NOT NULL THEN
-                        v_recommendation := format(
-                            'slot ''%s'' is already invalidated (%s); DROP REPLICATION SLOT',
-                            v_slot.slot_name, v_slot.invalidation_reason);
-                    ELSIF v_slot.wal_status = 'lost' THEN
-                        v_recommendation := format(
-                            'slot ''%s'' has lost required WAL; DROP REPLICATION SLOT',
-                            v_slot.slot_name);
-                    ELSE
-                        v_recommendation := format(
-                            'investigate slot ''%s'' (type=%s, active=%s, restart_lsn=%s); advance or DROP REPLICATION SLOT once subscriber state is confirmed',
-                            v_slot.slot_name, COALESCE(v_slot.slot_type,''), v_slot.active, v_slot.restart_lsn);
-                    END IF;
-                    -- Combined context: when the same slot also appears as an
-                    -- HSF holder in replication_snapshots, the walsender feedback
-                    -- and the slot xmin describe the same standby — note it so
-                    -- operators don't chase two separate problems.
-                    IF EXISTS (
-                        SELECT 1 FROM pgfr_record.replication_snapshots
-                        WHERE snapshot_id = v_xmin_snap.id
-                          AND slot_name = v_slot.slot_name
-                    ) THEN
-                        v_recommendation := v_recommendation
-                            || format('; related physical slot ''%s'' also drives hot_standby_feedback on the same standby — not two separate problems',
-                                      v_slot.slot_name);
-                    END IF;
-                END IF;
-            ELSIF v_dominant_source = 'prepared' THEN
-                v_dom_status := v_xmin_snap.xmin_prepared_collection_status;
-                SELECT gid, owner, database, prepared_at INTO v_prep
-                FROM pgfr_record.xmin_prepared_holders
-                WHERE snapshot_id = v_xmin_snap.id
-                ORDER BY prepared_xmin_age DESC, gid ASC
-                LIMIT 1;
-                IF v_prep.gid IS NOT NULL THEN
-                    v_recommendation := format(
-                        'ROLLBACK PREPARED ''%s'' (owner=%s, database=%s, prepared_at=%s)',
-                        v_prep.gid, COALESCE(v_prep.owner,''), COALESCE(v_prep.database,''), v_prep.prepared_at);
-                END IF;
-            ELSIF v_dominant_source = 'replication' THEN
-                v_dom_status := v_xmin_snap.xmin_replication_collection_status;
-                -- Filter logical walsenders (their backend_xmin mirrors the slot's)
-                SELECT pid, application_name, client_addr, sync_state, slot_name
-                  INTO v_rep
-                FROM pgfr_record.replication_snapshots
-                WHERE snapshot_id = v_xmin_snap.id
-                  AND NOT is_logical_walsender
-                  AND backend_xmin IS NOT NULL
-                ORDER BY backend_xmin_age DESC, pid ASC
-                LIMIT 1;
-                IF v_rep.pid IS NOT NULL THEN
-                    v_recommendation := format(
-                        'review hot_standby_feedback on standby ''%s'' (addr=%s, pid=%s, sync_state=%s)',
-                        COALESCE(v_rep.application_name,''), v_rep.client_addr, v_rep.pid,
-                        COALESCE(v_rep.sync_state,''));
-                    -- Combined context when same standby has a matching physical slot
-                    IF v_rep.slot_name IS NOT NULL AND EXISTS (
-                        SELECT 1 FROM pgfr_record.xmin_slot_holders
-                        WHERE snapshot_id = v_xmin_snap.id AND slot_name = v_rep.slot_name
-                    ) THEN
-                        v_recommendation := v_recommendation
-                            || format('; related physical slot ''%s'' also present — same standby, not two separate problems',
-                                      v_rep.slot_name);
-                    END IF;
-                END IF;
-            END IF;
-
-            -- Attribution fallback when sidecar row missing (status not 'collected').
-            -- Suffix includes the literal status value (`below_floor` /
-            -- `collector_failed`) so downstream tests and operator greps can
-            -- match it without needing to know the prose form.
-            IF v_recommendation IS NULL AND v_dom_status IS NOT NULL THEN
-                v_recommendation := format('xmin horizon stalled; holder detail not collected (%s)', v_dom_status);
-            ELSIF v_dom_status = 'below_floor' THEN
-                v_recommendation := v_recommendation || ' — holder detail not collected (below_floor); raise xmin_holders_min_age or investigate directly via pg_stat_activity';
-            ELSIF v_dom_status = 'collector_failed' THEN
-                v_recommendation := v_recommendation || ' — holder detail not collected (collector_failed); see collection_stats.error_message';
-            END IF;
-
-            -- DATA HORIZON anomalies
-            IF v_xmin_snap.xmin_data_horizon_age IS NOT NULL THEN
-                IF v_xmin_snap.xmin_data_horizon_age > v_critical_threshold THEN
-                    anomaly_type := 'XMIN_HORIZON_STALL';
-                    severity := 'critical';
-                    description := format('xmin horizon stalled by ''%s'' source', COALESCE(v_dominant_source, 'unknown'));
-                    metric_value := format('xmin_data_horizon_age=%s (%s%% of autovacuum_freeze_max_age); dominant: %s',
-                        to_char(v_xmin_snap.xmin_data_horizon_age, 'FM999,999,999'),
-                        round(v_xmin_snap.xmin_data_horizon_age::numeric / v_freeze_max_age * 100, 1),
-                        COALESCE(v_dominant_source, 'unknown'));
-                    threshold := format('> %s (80%% of %s)',
-                        to_char(v_critical_threshold, 'FM999,999,999'),
-                        to_char(v_freeze_max_age, 'FM999,999,999'));
-                    recommendation := COALESCE(v_recommendation, 'see xmin_*_holders sidecars');
-                    RETURN NEXT;
-                ELSIF v_xmin_snap.xmin_data_horizon_age > v_warning_threshold THEN
-                    anomaly_type := 'XMIN_HORIZON_STALL';
-                    severity := 'high';
-                    description := format('xmin horizon stalled by ''%s'' source', COALESCE(v_dominant_source, 'unknown'));
-                    metric_value := format('xmin_data_horizon_age=%s (%s%% of autovacuum_freeze_max_age); dominant: %s',
-                        to_char(v_xmin_snap.xmin_data_horizon_age, 'FM999,999,999'),
-                        round(v_xmin_snap.xmin_data_horizon_age::numeric / v_freeze_max_age * 100, 1),
-                        COALESCE(v_dominant_source, 'unknown'));
-                    threshold := format('> %s (50%% of %s)',
-                        to_char(v_warning_threshold, 'FM999,999,999'),
-                        to_char(v_freeze_max_age, 'FM999,999,999'));
-                    recommendation := COALESCE(v_recommendation, 'see xmin_*_holders sidecars');
-                    RETURN NEXT;
-                ELSIF v_xmin_snap.xmin_data_horizon_age > v_xmin_warning_age THEN
-                    anomaly_type := 'XMIN_HORIZON_STALL_WARNING';
-                    severity := 'warning';
-                    description := 'xmin horizon stalled for extended period';
-                    metric_value := format('xmin_data_horizon_age=%s (onset warning at %s); dominant: %s',
-                        to_char(v_xmin_snap.xmin_data_horizon_age, 'FM999,999,999'),
-                        to_char(v_xmin_warning_age, 'FM999,999,999'),
-                        COALESCE(v_dominant_source, 'unknown'));
-                    threshold := format('xmin_data_horizon_age > %s', to_char(v_xmin_warning_age, 'FM999,999,999'));
-                    recommendation := COALESCE(v_recommendation, 'see xmin_*_holders sidecars');
-                    RETURN NEXT;
-                END IF;
-            END IF;
-
-            -- CATALOG HORIZON anomalies (independent of data — non-XOR)
-            IF v_xmin_snap.slot_catalog_xmin_age IS NOT NULL THEN
-                IF v_xmin_snap.slot_catalog_xmin_age > v_critical_threshold THEN
-                    anomaly_type := 'CATALOG_XMIN_HORIZON_STALL';
-                    severity := 'critical';
-                    description := 'logical-replication catalog cleanup stalled by replication slot catalog_xmin';
-                    metric_value := format('slot_catalog_xmin_age=%s (%s%% of autovacuum_freeze_max_age)',
-                        to_char(v_xmin_snap.slot_catalog_xmin_age, 'FM999,999,999'),
-                        round(v_xmin_snap.slot_catalog_xmin_age::numeric / v_freeze_max_age * 100, 1));
-                    threshold := format('slot_catalog_xmin_age > %s (80%% of %s)',
-                        to_char(v_critical_threshold, 'FM999,999,999'),
-                        to_char(v_freeze_max_age, 'FM999,999,999'));
-                    recommendation := 'investigate logical replication slots with non-null catalog_xmin in xmin_slot_holders; advance or DROP REPLICATION SLOT once subscriber state is confirmed';
-                    RETURN NEXT;
-                ELSIF v_xmin_snap.slot_catalog_xmin_age > v_warning_threshold THEN
-                    anomaly_type := 'CATALOG_XMIN_HORIZON_STALL';
-                    severity := 'high';
-                    description := 'logical-replication catalog cleanup stalled by replication slot catalog_xmin';
-                    metric_value := format('slot_catalog_xmin_age=%s (%s%% of autovacuum_freeze_max_age)',
-                        to_char(v_xmin_snap.slot_catalog_xmin_age, 'FM999,999,999'),
-                        round(v_xmin_snap.slot_catalog_xmin_age::numeric / v_freeze_max_age * 100, 1));
-                    threshold := format('slot_catalog_xmin_age > %s (50%% of %s)',
-                        to_char(v_warning_threshold, 'FM999,999,999'),
-                        to_char(v_freeze_max_age, 'FM999,999,999'));
-                    recommendation := 'investigate logical replication slots with non-null catalog_xmin in xmin_slot_holders; advance or DROP REPLICATION SLOT once subscriber state is confirmed';
-                    RETURN NEXT;
-                ELSIF v_xmin_snap.slot_catalog_xmin_age > v_xmin_catalog_warning_age THEN
-                    anomaly_type := 'CATALOG_XMIN_HORIZON_STALL_WARNING';
-                    severity := 'warning';
-                    description := 'logical-replication catalog cleanup stalled for extended period';
-                    metric_value := format('slot_catalog_xmin_age=%s (onset warning at %s)',
-                        to_char(v_xmin_snap.slot_catalog_xmin_age, 'FM999,999,999'),
-                        to_char(v_xmin_catalog_warning_age, 'FM999,999,999'));
-                    threshold := format('slot_catalog_xmin_age > %s', to_char(v_xmin_catalog_warning_age, 'FM999,999,999'));
-                    recommendation := 'investigate logical replication slots with non-null catalog_xmin in xmin_slot_holders';
-                    RETURN NEXT;
-                END IF;
-            END IF;
+        IF v_xmin.slot_catalog_xmin_age IS NOT NULL
+           AND v_xmin.slot_catalog_xmin_age > v_warning_threshold THEN
+            anomaly_type := 'CATALOG_XMIN_HORIZON_STALL';
+            severity := CASE WHEN v_xmin.slot_catalog_xmin_age > v_critical_threshold
+                             THEN 'critical' ELSE 'high' END;
+            description := 'logical-replication catalog cleanup stalled by replication slot catalog_xmin';
+            metric_value := format('slot_catalog_xmin_age=%s (%s%% of autovacuum_freeze_max_age)',
+                to_char(v_xmin.slot_catalog_xmin_age, 'FM999,999,999'),
+                round(v_xmin.slot_catalog_xmin_age::numeric / v_freeze_max_age * 100, 1));
+            threshold := format('slot_catalog_xmin_age > %s%% of autovacuum_freeze_max_age',
+                round(v_xid_warning_ratio * 100, 0));
+            recommendation := COALESCE(
+                CASE WHEN v_xmin_src IN ('slot','slot_catalog') THEN v_xmin_rec END,
+                'investigate logical replication slots with non-null catalog_xmin (see pg_replication_slots)');
+            RETURN NEXT;
         END IF;
     END;
 

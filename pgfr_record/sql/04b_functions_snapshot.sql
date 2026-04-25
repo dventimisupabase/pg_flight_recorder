@@ -671,356 +671,172 @@ BEGIN
                 RAISE WARNING 'pgfr_record: pg_stat_statements collection failed: %', SQLERRM;
         END;
     END IF;
-    -- Collect xmin horizon (blueprint §5: materialized CTE per source, derive
-    -- aggregate unconditionally, gate sidecar insert from same CTE)
+    -- Collect xmin horizon. Read each of the four sources (activity / slot /
+    -- prepared / replication), pick the oldest holder per source with a
+    -- JSONB detail blob, compute aggregate ages, and write everything to
+    -- the snapshots row in one UPDATE. See REFERENCE.md "xmin horizon
+    -- monitoring" and blueprints/XMIN_HORIZON.md.
     BEGIN
+        PERFORM pgfr_record._set_section_timeout();
         DECLARE
-            v_sample_ts        INTEGER := extract(epoch from (v_captured_at - pgfr_record.epoch()))::integer;
-            v_top_n            INTEGER := COALESCE(pgfr_record._get_config('xmin_holders_top_n', '5')::integer, 5);
-            v_min_age          BIGINT  := COALESCE(pgfr_record._get_config('xmin_holders_min_age', '1000000')::bigint, 1000000);
-            v_capture_query    BOOLEAN := COALESCE(pgfr_record._get_config('xmin_capture_query_preview', 'true')::boolean, true);
-            v_query_max_len    INTEGER := COALESCE(pgfr_record._get_config('xmin_query_preview_max_len', '1024')::integer, 1024);
-            v_prep_min_age     BIGINT  := COALESCE(pgfr_record._get_config('xmin_prepared_min_age', '0')::bigint, 0);
-            v_prep_top_n       INTEGER := COALESCE(pgfr_record._get_config('xmin_prepared_holders_top_n', '50')::integer, 50);
-            v_pg               INTEGER := pgfr_record._pg_version();
-            v_activity_count   BIGINT;
-            v_activity_xmin    XID;
-            v_activity_xmin_age BIGINT;
-            v_activity_status  TEXT;
-            v_activity_truncated INTEGER;
-            v_slot_count       BIGINT;
-            v_slot_xmin        XID;
-            v_slot_xmin_age    BIGINT;
-            v_slot_catalog_xmin XID;
-            v_slot_catalog_xmin_age BIGINT;
-            v_slot_status      TEXT;
-            v_slot_truncated   INTEGER;
-            v_prepared_count   BIGINT;
-            v_prepared_xmin    XID;
-            v_prepared_xmin_age BIGINT;
-            v_prepared_status  TEXT;
-            v_prepared_truncated INTEGER;
-            v_replication_count BIGINT;
-            v_replication_xmin XID;
-            v_replication_xmin_age BIGINT;
-            v_replication_status TEXT;
-            v_data_horizon_age BIGINT;
-            v_any_horizon_age  BIGINT;
-            v_query_size_eff   INTEGER := least(current_setting('track_activity_query_size')::integer, v_query_max_len);
+            v_activity_xmin      XID;
+            v_activity_age       BIGINT;
+            v_activity_detail    JSONB;
+            v_slot_xmin          XID;
+            v_slot_age           BIGINT;
+            v_slot_catalog_xmin  XID;
+            v_slot_catalog_age   BIGINT;
+            v_slot_detail        JSONB;
+            v_prepared_xmin      XID;
+            v_prepared_age       BIGINT;
+            v_prepared_detail    JSONB;
+            v_replication_xmin   XID;
+            v_replication_age    BIGINT;
+            v_replication_detail JSONB;
+            v_data_age           BIGINT;
+            v_any_age            BIGINT;
+            v_dominant_source    TEXT;
+            v_dominant_detail    JSONB;
+            v_capture_query      BOOLEAN := COALESCE(pgfr_record._get_config('xmin_capture_query_preview','true')::boolean, true);
+            v_pg                 INTEGER := pgfr_record._pg_version();
         BEGIN
-            -- ACTIVITY source: pg_stat_activity.backend_xmin
-            -- Self-pin excluded via pid <> pg_backend_pid(); parallel workers excluded
-            -- via leader_pid IS NULL. Autovacuum workers are NOT excluded — they're a
-            -- legitimate horizon-holding failure mode (long vacuum on large heap).
-            BEGIN
-                PERFORM pgfr_record._set_section_timeout();
-                WITH activity AS MATERIALIZED (
-                    SELECT a.pid, a.datid, a.datname, a.usesysid, a.usename,
-                           a.application_name, a.client_addr, a.backend_type, a.state,
-                           a.backend_start, a.xact_start, a.query_start, a.state_change,
-                           a.wait_event_type, a.wait_event,
-                           a.backend_xid,
-                           CASE WHEN a.backend_xid IS NOT NULL THEN age(a.backend_xid) END AS backend_xid_age,
-                           a.backend_xmin,
-                           age(a.backend_xmin) AS backend_xmin_age,
-                           CASE WHEN a.xact_start IS NOT NULL
-                                THEN extract(epoch from (now() - a.xact_start))::bigint END AS xact_age_seconds,
-                           CASE WHEN a.query_start IS NOT NULL
-                                THEN extract(epoch from (now() - a.query_start))::bigint END AS query_age_seconds,
-                           a.query_id AS queryid,
+            -- ACTIVITY: oldest pg_stat_activity.backend_xmin. Self-pin and
+            -- parallel workers excluded; autovacuum workers retained (a long
+            -- vacuum on a multi-TB heap is a real horizon-holding case).
+            SELECT a.backend_xmin, age(a.backend_xmin),
+                   jsonb_build_object(
+                       'pid', a.pid,
+                       'usename', a.usename,
+                       'datname', a.datname,
+                       'application_name', a.application_name,
+                       'backend_type', a.backend_type,
+                       'state', a.state,
+                       'xact_age_seconds', extract(epoch from now() - a.xact_start)::bigint,
+                       'query_age_seconds', extract(epoch from now() - a.query_start)::bigint,
+                       'query_preview',
                            CASE WHEN v_capture_query
-                                THEN left(regexp_replace(coalesce(a.query, ''), '[\r\n\t]+', ' ', 'g'), v_query_size_eff)
-                                ELSE NULL END AS query_preview
-                    FROM pg_stat_activity a
-                    WHERE a.backend_xmin IS NOT NULL
-                      AND a.pid <> pg_backend_pid()
-                      AND a.leader_pid IS NULL
-                ),
-                agg AS (
-                    SELECT count(*) AS n,
-                           max(backend_xmin_age) AS max_age,
-                           (array_agg(backend_xmin ORDER BY backend_xmin_age DESC NULLS LAST, pid ASC))[1] AS oldest_xmin
-                    FROM activity
-                ),
-                ins AS (
-                    INSERT INTO pgfr_record.xmin_activity_holders (
-                        sample_ts, snapshot_id, pid, datid, datname, usesysid, usename,
-                        application_name, client_addr, backend_type, state,
-                        backend_start, xact_start, xact_age_seconds, query_start, query_age_seconds,
-                        state_change, wait_event_type, wait_event,
-                        backend_xid, backend_xid_age, backend_xmin, backend_xmin_age,
-                        queryid, query_preview
-                    )
-                    SELECT v_sample_ts, v_snapshot_id, a.pid, a.datid, a.datname, a.usesysid, a.usename,
-                           a.application_name, a.client_addr, a.backend_type, a.state,
-                           a.backend_start, a.xact_start, a.xact_age_seconds, a.query_start, a.query_age_seconds,
-                           a.state_change, a.wait_event_type, a.wait_event,
-                           a.backend_xid, a.backend_xid_age, a.backend_xmin, a.backend_xmin_age,
-                           a.queryid, a.query_preview
-                    FROM activity a, agg
-                    WHERE agg.max_age > v_min_age
-                    ORDER BY a.backend_xmin_age DESC, a.pid ASC
-                    LIMIT v_top_n
-                    ON CONFLICT (sample_ts, snapshot_id, pid) DO NOTHING
-                    RETURNING 1
-                )
-                SELECT n, max_age, oldest_xmin INTO v_activity_count, v_activity_xmin_age, v_activity_xmin FROM agg;
-                v_activity_status := CASE
-                    WHEN v_activity_count = 0 THEN 'no_holders'
-                    WHEN v_activity_xmin_age > v_min_age THEN 'collected'
-                    ELSE 'below_floor'
-                END;
-                v_activity_truncated := CASE WHEN v_activity_status = 'collected'
-                                             THEN GREATEST(0, (v_activity_count - v_top_n)::integer) END;
-                PERFORM pgfr_record._record_section_success(v_stat_id);
-            EXCEPTION WHEN OTHERS THEN
-                v_activity_status := 'collector_failed';
-                RAISE WARNING 'pgfr_record: xmin activity collection failed: %', SQLERRM;
+                                THEN left(regexp_replace(coalesce(a.query, ''), '[\r\n\t]+', ' ', 'g'), 1024)
+                                ELSE NULL END
+                   )
+              INTO v_activity_xmin, v_activity_age, v_activity_detail
+            FROM pg_stat_activity a
+            WHERE a.backend_xmin IS NOT NULL
+              AND a.pid <> pg_backend_pid()
+              AND a.leader_pid IS NULL
+            ORDER BY age(a.backend_xmin) DESC, a.pid ASC
+            LIMIT 1;
+
+            -- SLOT: oldest xmin AND oldest catalog_xmin captured separately
+            -- (a logical slot can pin one without the other). Detail describes
+            -- the slot contributing the dominant age.
+            SELECT s.xmin, age(s.xmin),
+                   jsonb_build_object(
+                       'slot_name', s.slot_name,
+                       'slot_type', s.slot_type,
+                       'database', s.database,
+                       'plugin', s.plugin,
+                       'active', s.active,
+                       'restart_lsn', s.restart_lsn::text,
+                       'wal_status', s.wal_status,
+                       'invalidation_reason',
+                           CASE WHEN v_pg >= 17 THEN s.invalidation_reason::text END
+                   )
+              INTO v_slot_xmin, v_slot_age, v_slot_detail
+            FROM pg_replication_slots s
+            WHERE s.xmin IS NOT NULL
+            ORDER BY age(s.xmin) DESC, s.slot_name ASC
+            LIMIT 1;
+
+            SELECT s.catalog_xmin, age(s.catalog_xmin)
+              INTO v_slot_catalog_xmin, v_slot_catalog_age
+            FROM pg_replication_slots s
+            WHERE s.catalog_xmin IS NOT NULL
+            ORDER BY age(s.catalog_xmin) DESC, s.slot_name ASC
+            LIMIT 1;
+
+            -- PREPARED: oldest prepared transaction.
+            SELECT p.transaction, age(p.transaction),
+                   jsonb_build_object(
+                       'gid', p.gid,
+                       'owner', p.owner,
+                       'database', p.database,
+                       'prepared_at', p.prepared
+                   )
+              INTO v_prepared_xmin, v_prepared_age, v_prepared_detail
+            FROM pg_prepared_xacts p
+            ORDER BY age(p.transaction) DESC, p.gid ASC
+            LIMIT 1;
+
+            -- REPLICATION: derived from the replication_snapshots rows just
+            -- written for this snapshot. Logical walsenders excluded (their
+            -- backend_xmin mirrors the slot's; routed via slot detail).
+            SELECT r.backend_xmin, r.backend_xmin_age,
+                   jsonb_build_object(
+                       'pid', r.pid,
+                       'application_name', r.application_name,
+                       'client_addr', r.client_addr::text,
+                       'sync_state', r.sync_state,
+                       'slot_name', r.slot_name
+                   )
+              INTO v_replication_xmin, v_replication_age, v_replication_detail
+            FROM pgfr_record.replication_snapshots r
+            WHERE r.snapshot_id = v_snapshot_id
+              AND r.backend_xmin IS NOT NULL
+              AND NOT r.is_logical_walsender
+            ORDER BY r.backend_xmin_age DESC, r.pid ASC
+            LIMIT 1;
+
+            -- Aggregates. GREATEST in PostgreSQL ignores NULLs and returns
+            -- NULL only when all arguments are NULL.
+            v_data_age := GREATEST(v_activity_age, v_slot_age, v_prepared_age, v_replication_age);
+            v_any_age  := GREATEST(v_data_age, v_slot_catalog_age);
+
+            -- Dominant source: priority slot > prepared > activity > replication
+            -- on tied ages; a strictly-older source of any type always wins.
+            -- slot_catalog is its own pseudo-source for catalog-only stalls.
+            v_dominant_source := CASE
+                WHEN v_slot_age IS NOT NULL AND v_slot_age = v_data_age THEN 'slot'
+                WHEN v_prepared_age IS NOT NULL AND v_prepared_age = v_data_age THEN 'prepared'
+                WHEN v_activity_age IS NOT NULL AND v_activity_age = v_data_age THEN 'activity'
+                WHEN v_replication_age IS NOT NULL AND v_replication_age = v_data_age THEN 'replication'
+                WHEN v_slot_catalog_age IS NOT NULL THEN 'slot_catalog'
+                ELSE NULL
+            END;
+            v_dominant_detail := CASE v_dominant_source
+                WHEN 'slot'         THEN v_slot_detail
+                WHEN 'prepared'     THEN v_prepared_detail
+                WHEN 'activity'     THEN v_activity_detail
+                WHEN 'replication'  THEN v_replication_detail
+                WHEN 'slot_catalog' THEN v_slot_detail
+                ELSE NULL
             END;
 
-            -- SLOT source: pg_replication_slots (xmin and/or catalog_xmin)
-            -- Floor-gated on GREATEST(data, catalog) so a logical-only catalog stall
-            -- still writes to the sidecar (the sole source for CATALOG_XMIN_HORIZON_STALL).
-            -- conflicting (PG16+) and invalidation_reason (PG17+) populated conditionally.
-            BEGIN
-                PERFORM pgfr_record._set_section_timeout();
-                IF v_pg >= 17 THEN
-                    WITH slot AS MATERIALIZED (
-                        SELECT slot_name, slot_type, database, plugin, active, active_pid,
-                               xmin, age(xmin) AS xmin_age,
-                               catalog_xmin, age(catalog_xmin) AS catalog_xmin_age,
-                               restart_lsn, confirmed_flush_lsn, wal_status, safe_wal_size,
-                               conflicting, invalidation_reason
-                        FROM pg_replication_slots
-                        WHERE xmin IS NOT NULL OR catalog_xmin IS NOT NULL
-                    ),
-                    agg AS (
-                        SELECT count(*) AS n,
-                               max(xmin_age) AS max_xmin_age,
-                               max(catalog_xmin_age) AS max_catalog_xmin_age,
-                               (array_agg(xmin ORDER BY xmin_age DESC NULLS LAST, slot_name ASC))[1] AS oldest_xmin,
-                               (array_agg(catalog_xmin ORDER BY catalog_xmin_age DESC NULLS LAST, slot_name ASC))[1] AS oldest_catalog_xmin
-                        FROM slot
-                    ),
-                    ins AS (
-                        INSERT INTO pgfr_record.xmin_slot_holders (
-                            sample_ts, snapshot_id, slot_name, slot_type, database, plugin,
-                            active, active_pid, xmin, xmin_age, catalog_xmin, catalog_xmin_age,
-                            restart_lsn, confirmed_flush_lsn, wal_status, safe_wal_size,
-                            conflicting, invalidation_reason
-                        )
-                        SELECT v_sample_ts, v_snapshot_id, s.slot_name, s.slot_type, s.database, s.plugin,
-                               s.active, s.active_pid, s.xmin, s.xmin_age, s.catalog_xmin, s.catalog_xmin_age,
-                               s.restart_lsn, s.confirmed_flush_lsn, s.wal_status, s.safe_wal_size,
-                               s.conflicting, s.invalidation_reason
-                        FROM slot s, agg
-                        WHERE GREATEST(COALESCE(agg.max_xmin_age, 0), COALESCE(agg.max_catalog_xmin_age, 0)) > v_min_age
-                        ORDER BY GREATEST(COALESCE(s.xmin_age, 0), COALESCE(s.catalog_xmin_age, 0)) DESC, s.slot_name ASC
-                        LIMIT v_top_n
-                        ON CONFLICT (sample_ts, snapshot_id, slot_name) DO NOTHING
-                        RETURNING 1
-                    )
-                    SELECT n, max_xmin_age, max_catalog_xmin_age, oldest_xmin, oldest_catalog_xmin
-                      INTO v_slot_count, v_slot_xmin_age, v_slot_catalog_xmin_age,
-                           v_slot_xmin, v_slot_catalog_xmin
-                    FROM agg;
-                ELSIF v_pg >= 16 THEN
-                    WITH slot AS MATERIALIZED (
-                        SELECT slot_name, slot_type, database, plugin, active, active_pid,
-                               xmin, age(xmin) AS xmin_age,
-                               catalog_xmin, age(catalog_xmin) AS catalog_xmin_age,
-                               restart_lsn, confirmed_flush_lsn, wal_status, safe_wal_size,
-                               conflicting, NULL::text AS invalidation_reason
-                        FROM pg_replication_slots
-                        WHERE xmin IS NOT NULL OR catalog_xmin IS NOT NULL
-                    ),
-                    agg AS (
-                        SELECT count(*) AS n,
-                               max(xmin_age) AS max_xmin_age,
-                               max(catalog_xmin_age) AS max_catalog_xmin_age,
-                               (array_agg(xmin ORDER BY xmin_age DESC NULLS LAST, slot_name ASC))[1] AS oldest_xmin,
-                               (array_agg(catalog_xmin ORDER BY catalog_xmin_age DESC NULLS LAST, slot_name ASC))[1] AS oldest_catalog_xmin
-                        FROM slot
-                    ),
-                    ins AS (
-                        INSERT INTO pgfr_record.xmin_slot_holders (
-                            sample_ts, snapshot_id, slot_name, slot_type, database, plugin,
-                            active, active_pid, xmin, xmin_age, catalog_xmin, catalog_xmin_age,
-                            restart_lsn, confirmed_flush_lsn, wal_status, safe_wal_size,
-                            conflicting, invalidation_reason
-                        )
-                        SELECT v_sample_ts, v_snapshot_id, s.slot_name, s.slot_type, s.database, s.plugin,
-                               s.active, s.active_pid, s.xmin, s.xmin_age, s.catalog_xmin, s.catalog_xmin_age,
-                               s.restart_lsn, s.confirmed_flush_lsn, s.wal_status, s.safe_wal_size,
-                               s.conflicting, s.invalidation_reason
-                        FROM slot s, agg
-                        WHERE GREATEST(COALESCE(agg.max_xmin_age, 0), COALESCE(agg.max_catalog_xmin_age, 0)) > v_min_age
-                        ORDER BY GREATEST(COALESCE(s.xmin_age, 0), COALESCE(s.catalog_xmin_age, 0)) DESC, s.slot_name ASC
-                        LIMIT v_top_n
-                        ON CONFLICT (sample_ts, snapshot_id, slot_name) DO NOTHING
-                        RETURNING 1
-                    )
-                    SELECT n, max_xmin_age, max_catalog_xmin_age, oldest_xmin, oldest_catalog_xmin
-                      INTO v_slot_count, v_slot_xmin_age, v_slot_catalog_xmin_age,
-                           v_slot_xmin, v_slot_catalog_xmin
-                    FROM agg;
-                ELSE
-                    WITH slot AS MATERIALIZED (
-                        SELECT slot_name, slot_type, database, plugin, active, active_pid,
-                               xmin, age(xmin) AS xmin_age,
-                               catalog_xmin, age(catalog_xmin) AS catalog_xmin_age,
-                               restart_lsn, confirmed_flush_lsn, wal_status, safe_wal_size,
-                               NULL::boolean AS conflicting, NULL::text AS invalidation_reason
-                        FROM pg_replication_slots
-                        WHERE xmin IS NOT NULL OR catalog_xmin IS NOT NULL
-                    ),
-                    agg AS (
-                        SELECT count(*) AS n,
-                               max(xmin_age) AS max_xmin_age,
-                               max(catalog_xmin_age) AS max_catalog_xmin_age,
-                               (array_agg(xmin ORDER BY xmin_age DESC NULLS LAST, slot_name ASC))[1] AS oldest_xmin,
-                               (array_agg(catalog_xmin ORDER BY catalog_xmin_age DESC NULLS LAST, slot_name ASC))[1] AS oldest_catalog_xmin
-                        FROM slot
-                    ),
-                    ins AS (
-                        INSERT INTO pgfr_record.xmin_slot_holders (
-                            sample_ts, snapshot_id, slot_name, slot_type, database, plugin,
-                            active, active_pid, xmin, xmin_age, catalog_xmin, catalog_xmin_age,
-                            restart_lsn, confirmed_flush_lsn, wal_status, safe_wal_size,
-                            conflicting, invalidation_reason
-                        )
-                        SELECT v_sample_ts, v_snapshot_id, s.slot_name, s.slot_type, s.database, s.plugin,
-                               s.active, s.active_pid, s.xmin, s.xmin_age, s.catalog_xmin, s.catalog_xmin_age,
-                               s.restart_lsn, s.confirmed_flush_lsn, s.wal_status, s.safe_wal_size,
-                               s.conflicting, s.invalidation_reason
-                        FROM slot s, agg
-                        WHERE GREATEST(COALESCE(agg.max_xmin_age, 0), COALESCE(agg.max_catalog_xmin_age, 0)) > v_min_age
-                        ORDER BY GREATEST(COALESCE(s.xmin_age, 0), COALESCE(s.catalog_xmin_age, 0)) DESC, s.slot_name ASC
-                        LIMIT v_top_n
-                        ON CONFLICT (sample_ts, snapshot_id, slot_name) DO NOTHING
-                        RETURNING 1
-                    )
-                    SELECT n, max_xmin_age, max_catalog_xmin_age, oldest_xmin, oldest_catalog_xmin
-                      INTO v_slot_count, v_slot_xmin_age, v_slot_catalog_xmin_age,
-                           v_slot_xmin, v_slot_catalog_xmin
-                    FROM agg;
-                END IF;
-                v_slot_status := CASE
-                    WHEN v_slot_count = 0 THEN 'no_holders'
-                    WHEN GREATEST(COALESCE(v_slot_xmin_age,0), COALESCE(v_slot_catalog_xmin_age,0)) > v_min_age THEN 'collected'
-                    ELSE 'below_floor'
-                END;
-                v_slot_truncated := CASE WHEN v_slot_status = 'collected'
-                                         THEN GREATEST(0, (v_slot_count - v_top_n)::integer) END;
-                PERFORM pgfr_record._record_section_success(v_stat_id);
-            EXCEPTION WHEN OTHERS THEN
-                v_slot_status := 'collector_failed';
-                RAISE WARNING 'pgfr_record: xmin slot collection failed: %', SQLERRM;
-            END;
-
-            -- PREPARED source: pg_prepared_xacts. Own floor (default 0 = always
-            -- collect when present) and own cap because prepared xacts are rare,
-            -- tiny, and high-signal — every one is worth recording.
-            BEGIN
-                PERFORM pgfr_record._set_section_timeout();
-                WITH prepared AS MATERIALIZED (
-                    SELECT transaction AS prepared_xmin,
-                           age(transaction) AS prepared_xmin_age,
-                           gid, prepared AS prepared_at, owner, database
-                    FROM pg_prepared_xacts
-                ),
-                agg AS (
-                    SELECT count(*) AS n,
-                           max(prepared_xmin_age) AS max_age,
-                           (array_agg(prepared_xmin ORDER BY prepared_xmin_age DESC NULLS LAST, gid ASC))[1] AS oldest_xmin
-                    FROM prepared
-                ),
-                ins AS (
-                    INSERT INTO pgfr_record.xmin_prepared_holders (
-                        sample_ts, snapshot_id, gid, prepared_xmin, prepared_xmin_age,
-                        prepared_at, owner, database
-                    )
-                    SELECT v_sample_ts, v_snapshot_id, p.gid, p.prepared_xmin, p.prepared_xmin_age,
-                           p.prepared_at, p.owner, p.database
-                    FROM prepared p, agg
-                    WHERE COALESCE(agg.max_age, -1) > v_prep_min_age - 1   -- always-collect when default 0
-                    ORDER BY p.prepared_xmin_age DESC, p.gid ASC
-                    LIMIT v_prep_top_n
-                    ON CONFLICT (sample_ts, snapshot_id, gid) DO NOTHING
-                    RETURNING 1
-                )
-                SELECT n, max_age, oldest_xmin INTO v_prepared_count, v_prepared_xmin_age, v_prepared_xmin FROM agg;
-                v_prepared_status := CASE
-                    WHEN v_prepared_count = 0 THEN 'no_holders'
-                    WHEN COALESCE(v_prepared_xmin_age, -1) > v_prep_min_age THEN 'collected'
-                    ELSE 'below_floor'
-                END;
-                v_prepared_truncated := CASE WHEN v_prepared_status = 'collected'
-                                             THEN GREATEST(0, (v_prepared_count - v_prep_top_n)::integer) END;
-                PERFORM pgfr_record._record_section_success(v_stat_id);
-            EXCEPTION WHEN OTHERS THEN
-                v_prepared_status := 'collector_failed';
-                RAISE WARNING 'pgfr_record: xmin prepared collection failed: %', SQLERRM;
-            END;
-
-            -- REPLICATION aggregate: derive from the replication_snapshots rows
-            -- written earlier in this function for v_snapshot_id. Logical
-            -- walsenders are excluded (their backend_xmin mirrors the slot's;
-            -- attribution belongs to the slot sidecar).
-            BEGIN
-                PERFORM pgfr_record._set_section_timeout();
-                SELECT count(*) FILTER (WHERE backend_xmin IS NOT NULL AND NOT is_logical_walsender),
-                       max(backend_xmin_age) FILTER (WHERE NOT is_logical_walsender),
-                       (array_agg(backend_xmin ORDER BY backend_xmin_age DESC NULLS LAST, pid ASC)
-                          FILTER (WHERE NOT is_logical_walsender))[1]
-                  INTO v_replication_count, v_replication_xmin_age, v_replication_xmin
-                FROM pgfr_record.replication_snapshots
-                WHERE snapshot_id = v_snapshot_id;
-                v_replication_status := CASE
-                    WHEN v_replication_count = 0 OR v_replication_xmin_age IS NULL THEN 'no_holders'
-                    WHEN v_replication_xmin_age > v_min_age THEN 'collected'
-                    ELSE 'below_floor'
-                END;
-            EXCEPTION WHEN OTHERS THEN
-                v_replication_status := 'collector_failed';
-                RAISE WARNING 'pgfr_record: xmin replication aggregate failed: %', SQLERRM;
-            END;
-
-            -- Compute combined data horizon and any-horizon (NULL-safe).
-            v_data_horizon_age := GREATEST(
-                v_activity_xmin_age,
-                v_slot_xmin_age,
-                v_replication_xmin_age,
-                v_prepared_xmin_age
-            );
-            v_any_horizon_age := GREATEST(v_data_horizon_age, v_slot_catalog_xmin_age);
-
-            -- Write all aggregate columns + per-source statuses to the snapshots
-            -- row. xmin_any_horizon_age must equal greatest(...) by CHECK constraint.
             UPDATE pgfr_record.snapshots
-               SET activity_xmin                    = v_activity_xmin,
-                   activity_xmin_age                = v_activity_xmin_age,
-                   slot_xmin                        = v_slot_xmin,
-                   slot_xmin_age                    = v_slot_xmin_age,
-                   slot_catalog_xmin                = v_slot_catalog_xmin,
-                   slot_catalog_xmin_age            = v_slot_catalog_xmin_age,
-                   replication_xmin                 = v_replication_xmin,
-                   replication_xmin_age             = v_replication_xmin_age,
-                   prepared_xmin                    = v_prepared_xmin,
-                   prepared_xmin_age                = v_prepared_xmin_age,
-                   xmin_data_horizon_age            = v_data_horizon_age,
-                   xmin_any_horizon_age             = v_any_horizon_age,
-                   xmin_activity_collection_status  = COALESCE(v_activity_status, 'collector_failed'),
-                   xmin_slot_collection_status      = COALESCE(v_slot_status, 'collector_failed'),
-                   xmin_prepared_collection_status  = COALESCE(v_prepared_status, 'collector_failed'),
-                   xmin_replication_collection_status = COALESCE(v_replication_status, 'collector_failed'),
-                   xmin_activity_truncated_count    = v_activity_truncated,
-                   xmin_slot_truncated_count        = v_slot_truncated,
-                   xmin_prepared_truncated_count    = v_prepared_truncated
+               SET activity_xmin         = v_activity_xmin,
+                   activity_xmin_age     = v_activity_age,
+                   slot_xmin             = v_slot_xmin,
+                   slot_xmin_age         = v_slot_age,
+                   slot_catalog_xmin     = v_slot_catalog_xmin,
+                   slot_catalog_xmin_age = v_slot_catalog_age,
+                   replication_xmin      = v_replication_xmin,
+                   replication_xmin_age  = v_replication_age,
+                   prepared_xmin         = v_prepared_xmin,
+                   prepared_xmin_age     = v_prepared_age,
+                   xmin_data_horizon_age = v_data_age,
+                   xmin_any_horizon_age  = v_any_age,
+                   xmin_horizon_detail   = CASE
+                       WHEN v_dominant_source IS NULL THEN NULL
+                       ELSE jsonb_build_object(
+                           'source', v_dominant_source,
+                           'age', v_any_age,
+                           'holder', v_dominant_detail
+                       )
+                   END
              WHERE id = v_snapshot_id;
+            PERFORM pgfr_record._record_section_success(v_stat_id);
         END;
     EXCEPTION WHEN OTHERS THEN
-        RAISE WARNING 'pgfr_record: xmin horizon section failed: %', SQLERRM;
+        RAISE WARNING 'pgfr_record: xmin horizon collection failed: %', SQLERRM;
     END;
 
     -- Collect table stats
