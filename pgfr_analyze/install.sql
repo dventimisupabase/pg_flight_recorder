@@ -21,6 +21,7 @@
 --   09_incident_analysis.sql      what_happened_at, incident_timeline, blast_radius
 --   10_v2_readers.sql             v2_time_range, statement/table/index_activity_v2,
 --                                 ring v2 reader rewrites
+--   11_xmin_horizon.sql           xmin_horizon_history, current_xmin_horizon_holder
 
 \ir sql/01_core_metrics.sql
 \ir sql/02_ring_readers.sql
@@ -32,3 +33,4 @@
 \ir sql/08_config.sql
 \ir sql/09_incident_analysis.sql
 \ir sql/10_v2_readers.sql
+\ir sql/11_xmin_horizon.sql
