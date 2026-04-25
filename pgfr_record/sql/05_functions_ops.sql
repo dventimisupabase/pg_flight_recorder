@@ -420,6 +420,9 @@ BEGIN
             'PERFORM pgfr_record._ensure_partition(''activity_samples_archive_v2'', current_date + 1, ''sample_ts desc, pid''); '
             'PERFORM pgfr_record._ensure_partition(''lock_samples_archive_v2'', current_date + 1, ''sample_ts desc, blocked_pid''); '
             'PERFORM pgfr_record._ensure_partition(''wait_samples_archive_v2'', current_date + 1, ''sample_ts desc, wait_event_type, wait_event''); '
+            'PERFORM pgfr_record._ensure_partition(''xmin_activity_holders'', current_date + 1, ''backend_xmin_age desc, sample_ts desc''); '
+            'PERFORM pgfr_record._ensure_partition(''xmin_slot_holders'', current_date + 1, ''slot_name, sample_ts desc''); '
+            'PERFORM pgfr_record._ensure_partition(''xmin_prepared_holders'', current_date + 1, ''gid, sample_ts desc''); '
             'END $x$');
         v_scheduled := v_scheduled + 1;
         -- Ensure pg_cron uses the unix socket for all pgfr jobs (not TCP).
