@@ -308,9 +308,17 @@ BEGIN
                         v_xmin.xmin_horizon_detail->'holder'->>'database',
                         v_xmin.xmin_horizon_detail->'holder'->>'prepared_at')
                 WHEN 'replication' THEN
-                    format('review hot_standby_feedback on standby ''%s'' (pid=%s, slot=%s)',
+                    -- The walsender PID is on the primary; the actual cause is a
+                    -- long-running query on the standby whose snapshot xmin is
+                    -- being shipped back via hot_standby_feedback. Standby
+                    -- workloads are usually autocommit reads, so pg_cancel_backend
+                    -- on the standby is the right first action. Don't disable
+                    -- hot_standby_feedback — that just trades xmin holdback for
+                    -- "canceling statement due to conflict with recovery" failures
+                    -- on the standby.
+                    format('standby ''%s'' (addr=%s, slot=%s) is reporting backend_xmin via hot_standby_feedback — connect to that standby, find the long-running query in its pg_stat_activity, and pg_cancel_backend it there. Do not disable hot_standby_feedback (causes recovery-conflict cancellations on the standby).',
                         v_xmin.xmin_horizon_detail->'holder'->>'application_name',
-                        v_xmin.xmin_horizon_detail->'holder'->>'pid',
+                        v_xmin.xmin_horizon_detail->'holder'->>'client_addr',
                         v_xmin.xmin_horizon_detail->'holder'->>'slot_name')
                 ELSE 'see snapshots.xmin_horizon_detail'
             END;
