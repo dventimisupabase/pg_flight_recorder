@@ -67,6 +67,7 @@ create table if not exists pgfr_record.snapshots_v2 (
     connections_max     integer,
     db_size_bytes       bigint,
     datfrozenxid_age    integer,
+    datminmxid_age      integer,
     archived_count      bigint,
     last_archived_wal   text,
     last_archived_time  timestamptz,
@@ -86,6 +87,9 @@ create table if not exists pgfr_record.snapshots_v2 (
 
 create table if not exists pgfr_record.snapshots_v2_default
     partition of pgfr_record.snapshots_v2 default;
+
+-- Additive upgrade path: ensure MultiXID age column exists on pre-existing installs
+alter table pgfr_record.snapshots_v2 add column if not exists datminmxid_age integer;
 
 comment on table pgfr_record.snapshots_v2 is
 'Cluster-level snapshot metrics, daily RANGE-partitioned by int4 sample_ts. '
@@ -307,7 +311,7 @@ begin
         temp_files, temp_bytes,
         xact_commit, xact_rollback, blks_read, blks_hit,
         connections_active, connections_total, connections_max,
-        db_size_bytes, datfrozenxid_age,
+        db_size_bytes, datfrozenxid_age, datminmxid_age,
         archived_count, last_archived_wal, last_archived_time,
         failed_count, last_failed_wal, last_failed_time, archiver_stats_reset,
         confl_tablespace, confl_lock, confl_snapshot,
@@ -344,6 +348,7 @@ begin
         current_setting('max_connections')::integer,
         pg_database_size(current_database())::bigint,
         age((select datfrozenxid from pg_database where datname = current_database())),
+        mxid_age((select datminmxid from pg_database where datname = current_database())),
         ar.archived_count, ar.last_archived_wal, ar.last_archived_time,
         ar.failed_count, ar.last_failed_wal, ar.last_failed_time, ar.stats_reset,
         cs.confl_tablespace, cs.confl_lock, cs.confl_snapshot,

@@ -86,6 +86,36 @@ SELECT * FROM pgfr_analyze.incident_timeline(
 SELECT * FROM pgfr_record.apply_profile('default');
 ```
 
+### XID / MultiXID wraparound monitoring
+
+```sql
+-- Current XID and MultiXID ages at database level (from the latest snapshot)
+SELECT datfrozenxid_age, datminmxid_age
+FROM pgfr_record.snapshots
+ORDER BY captured_at DESC LIMIT 1;
+
+-- Top 10 tables by XID or MultiXID age
+SELECT relid::regclass, relfrozenxid_age, relminmxid_age
+FROM pgfr_record.table_snapshots
+WHERE snapshot_id = (SELECT max(id) FROM pgfr_record.snapshots)
+ORDER BY greatest(relfrozenxid_age, relminmxid_age) DESC NULLS LAST
+LIMIT 10;
+
+-- Wraparound anomalies (XID + MultiXID, cluster + per-table)
+SELECT anomaly_type, severity, metric_value, recommendation
+FROM pgfr_analyze.anomaly_report(now() - interval '1 hour', now())
+WHERE anomaly_type LIKE '%WRAPAROUND%';
+
+-- Tune thresholds (lower warning ratio to alert earlier on busy clusters)
+INSERT INTO pgfr_record.config (key, value) VALUES
+    ('xid_warning_ratio',  '0.25'),
+    ('mxid_warning_ratio', '0.25')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+```
+
+See [REFERENCE.md](REFERENCE.md#xid--multixid-wraparound-thresholds) for the
+full config key list and rationale (postgres-howto #0044 guidance).
+
 ### Performance analysis
 
 ```sql

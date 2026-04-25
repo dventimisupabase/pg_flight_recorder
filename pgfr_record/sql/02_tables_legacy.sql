@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS pgfr_record.snapshots (
     connections_max             INTEGER,
     db_size_bytes               BIGINT,
     datfrozenxid_age            INTEGER,
+    datminmxid_age              INTEGER,
     archived_count              BIGINT,
     last_archived_wal           TEXT,
     last_archived_time          TIMESTAMPTZ,
@@ -169,6 +170,23 @@ BEGIN
     ALTER TABLE pgfr_record.statement_snapshots ADD COLUMN IF NOT EXISTS blk_write_time_delta DOUBLE PRECISION;
     ALTER TABLE pgfr_record.statement_snapshots ADD COLUMN IF NOT EXISTS wal_records_delta BIGINT;
     ALTER TABLE pgfr_record.statement_snapshots ADD COLUMN IF NOT EXISTS wal_bytes_delta NUMERIC;
+    -- MultiXID wraparound monitoring (additive upgrade path). See:
+    --   https://postgres.ai/docs/postgres-howtos/performance-optimization/monitoring/how-to-monitor-transaction-id-wraparound-risks
+    -- After migrate_phase3 these names resolve to views, so only ALTER when the
+    -- relation is still a heap table (relkind='r'). Post-phase3, the column lives
+    -- on snapshots_v2 / table_snapshots_v2 (handled in their own files).
+    IF EXISTS (
+        SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'pgfr_record' AND c.relname = 'snapshots' AND c.relkind = 'r'
+    ) THEN
+        ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS datminmxid_age INTEGER;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'pgfr_record' AND c.relname = 'table_snapshots' AND c.relkind = 'r'
+    ) THEN
+        ALTER TABLE pgfr_record.table_snapshots ADD COLUMN IF NOT EXISTS relminmxid_age INTEGER;
+    END IF;
 END $$;
 
 CREATE UNLOGGED TABLE IF NOT EXISTS pgfr_record.samples_ring (
@@ -422,6 +440,7 @@ CREATE TABLE IF NOT EXISTS pgfr_record.table_snapshots (
     last_analyze        TIMESTAMPTZ,
     last_autoanalyze    TIMESTAMPTZ,
     relfrozenxid_age    INTEGER,
+    relminmxid_age      INTEGER,
     reltuples           BIGINT,
     vacuum_running      BOOLEAN,
     last_vacuum_duration_ms BIGINT,
