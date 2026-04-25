@@ -351,6 +351,19 @@ BEGIN
                             'investigate slot ''%s'' (type=%s, active=%s, restart_lsn=%s); advance or DROP REPLICATION SLOT once subscriber state is confirmed',
                             v_slot.slot_name, COALESCE(v_slot.slot_type,''), v_slot.active, v_slot.restart_lsn);
                     END IF;
+                    -- Combined context: when the same slot also appears as an
+                    -- HSF holder in replication_snapshots, the walsender feedback
+                    -- and the slot xmin describe the same standby — note it so
+                    -- operators don't chase two separate problems.
+                    IF EXISTS (
+                        SELECT 1 FROM pgfr_record.replication_snapshots
+                        WHERE snapshot_id = v_xmin_snap.id
+                          AND slot_name = v_slot.slot_name
+                    ) THEN
+                        v_recommendation := v_recommendation
+                            || format('; related physical slot ''%s'' also drives hot_standby_feedback on the same standby — not two separate problems',
+                                      v_slot.slot_name);
+                    END IF;
                 END IF;
             ELSIF v_dominant_source = 'prepared' THEN
                 v_dom_status := v_xmin_snap.xmin_prepared_collection_status;
@@ -392,13 +405,16 @@ BEGIN
                 END IF;
             END IF;
 
-            -- Attribution fallback when sidecar row missing (status not 'collected'):
+            -- Attribution fallback when sidecar row missing (status not 'collected').
+            -- Suffix includes the literal status value (`below_floor` /
+            -- `collector_failed`) so downstream tests and operator greps can
+            -- match it without needing to know the prose form.
             IF v_recommendation IS NULL AND v_dom_status IS NOT NULL THEN
-                v_recommendation := format('xmin horizon stalled; holder detail not collected: %s', v_dom_status);
+                v_recommendation := format('xmin horizon stalled; holder detail not collected (%s)', v_dom_status);
             ELSIF v_dom_status = 'below_floor' THEN
-                v_recommendation := v_recommendation || ' — holder detail below collection floor';
+                v_recommendation := v_recommendation || ' — holder detail not collected (below_floor); raise xmin_holders_min_age or investigate directly via pg_stat_activity';
             ELSIF v_dom_status = 'collector_failed' THEN
-                v_recommendation := v_recommendation || ' — collector_failed; see collection_stats.error_message';
+                v_recommendation := v_recommendation || ' — holder detail not collected (collector_failed); see collection_stats.error_message';
             END IF;
 
             -- DATA HORIZON anomalies

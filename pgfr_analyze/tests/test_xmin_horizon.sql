@@ -382,34 +382,32 @@ SELECT lives_ok(
     'xmin_horizon_history() runs without error'
 );
 
--- Row shape: must include horizon_type column (v0.5+ disambiguates slot rows)
-SELECT has_column('pgfr_analyze', 'xmin_horizon_history',
-    NULL,        -- column not on a real table; check function returns instead
+-- Row shape: must include horizon_type column (v0.5+ disambiguates slot rows).
+-- has_column doesn't apply to set-returning functions; query pg_proc directly.
+SELECT ok(
+    EXISTS (
+        SELECT 1
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'pgfr_analyze'
+          AND p.proname = 'xmin_horizon_history'
+          AND 'horizon_type' = ANY(p.proargnames)
+    ),
     'horizon_type column is part of xmin_horizon_history return shape'
 );
 
--- EXPLAIN-based partition-pruning assertion: when called with a 1-day window,
--- the plan must NOT scan more than a few daily partitions.
+-- Partition pruning: the function must declare WHERE sample_ts BETWEEN ... AND ...
+-- on each partitioned sidecar. Direct test on the SQL body — the planner-level
+-- assertion (Append node child count under EXPLAIN) is brittle to partition
+-- naming and cluster size, so we test the predicate is present at all.
 SELECT ok(
-    (SELECT count(*) FROM (
-        SELECT regexp_split_to_table(
-            (SELECT string_agg(line, E'\n') FROM (
-                SELECT (q::text) AS line
-                FROM unnest(
-                    string_to_array(
-                        (SELECT string_agg(plan_line, E'\n') FROM (
-                            SELECT (
-                                'EXPLAIN ' || $$SELECT * FROM pgfr_analyze.xmin_horizon_history(now() - interval '1 day', now())$$
-                            )::text AS plan_line
-                        ) sub),
-                        E'\n'
-                    )
-                ) AS q
-            ) sub),
-            E'\n'
-        ) AS line
-    ) sub WHERE line ILIKE '%xmin_activity_holders_2%') < 5,
-    'xmin_horizon_history(): partition pruning visible in EXPLAIN (fewer than 5 daily partitions scanned for a 1-day window)'
+    (SELECT pg_get_functiondef(p.oid)
+     FROM pg_proc p
+     JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname = 'pgfr_analyze'
+       AND p.proname = 'xmin_horizon_history'
+     LIMIT 1) LIKE '%sample_ts BETWEEN%',
+    'xmin_horizon_history() pushes down sample_ts BETWEEN predicate for partition pruning'
 );
 
 -- =============================================================================

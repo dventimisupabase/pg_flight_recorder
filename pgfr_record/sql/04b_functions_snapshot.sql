@@ -700,6 +700,7 @@ BEGIN
             v_prepared_xmin_age BIGINT;
             v_prepared_status  TEXT;
             v_prepared_truncated INTEGER;
+            v_replication_count BIGINT;
             v_replication_xmin XID;
             v_replication_xmin_age BIGINT;
             v_replication_status TEXT;
@@ -968,21 +969,15 @@ BEGIN
             -- attribution belongs to the slot sidecar).
             BEGIN
                 PERFORM pgfr_record._set_section_timeout();
-                SELECT count(*) FILTER (WHERE backend_xmin IS NOT NULL),
+                SELECT count(*) FILTER (WHERE backend_xmin IS NOT NULL AND NOT is_logical_walsender),
                        max(backend_xmin_age) FILTER (WHERE NOT is_logical_walsender),
                        (array_agg(backend_xmin ORDER BY backend_xmin_age DESC NULLS LAST, pid ASC)
                           FILTER (WHERE NOT is_logical_walsender))[1]
-                  INTO v_prepared_count, v_replication_xmin_age, v_replication_xmin
+                  INTO v_replication_count, v_replication_xmin_age, v_replication_xmin
                 FROM pgfr_record.replication_snapshots
                 WHERE snapshot_id = v_snapshot_id;
-                -- Note: v_prepared_count reused as scratch for replication count;
-                -- recompute prepared count would be wrong — use a separate variable:
-                PERFORM 1;  -- placeholder; recompute via direct query below
-                SELECT count(*) FILTER (WHERE backend_xmin IS NOT NULL AND NOT is_logical_walsender)
-                  INTO v_prepared_count
-                FROM pgfr_record.replication_snapshots WHERE snapshot_id = v_snapshot_id;
                 v_replication_status := CASE
-                    WHEN v_prepared_count = 0 OR v_replication_xmin_age IS NULL THEN 'no_holders'
+                    WHEN v_replication_count = 0 OR v_replication_xmin_age IS NULL THEN 'no_holders'
                     WHEN v_replication_xmin_age > v_min_age THEN 'collected'
                     ELSE 'below_floor'
                 END;
@@ -990,14 +985,6 @@ BEGIN
                 v_replication_status := 'collector_failed';
                 RAISE WARNING 'pgfr_record: xmin replication aggregate failed: %', SQLERRM;
             END;
-
-            -- Recompute prepared_count for the snapshot row (we clobbered it
-            -- as scratch above; restore from the prepared sidecar).
-            BEGIN
-                SELECT count(*) INTO v_prepared_count
-                FROM pgfr_record.xmin_prepared_holders
-                WHERE snapshot_id = v_snapshot_id AND sample_ts = v_sample_ts;
-            EXCEPTION WHEN OTHERS THEN NULL; END;
 
             -- Compute combined data horizon and any-horizon (NULL-safe).
             v_data_horizon_age := GREATEST(
