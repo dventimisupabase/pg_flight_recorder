@@ -1,4 +1,4 @@
--- baseline_measure.sql — §9.2 Baseline measurements for pg-flight-recorder
+-- baseline_measure.sql — §9.2 Baseline measurements for pg_flight_recorder
 -- Implements SPEC.md §9.2 "Baseline measurement — actual row counts and sizes"
 -- Run against: pgfr_bench17 on port 5433 (PG 17.x)
 -- Output: CSV (use psql --csv -f baseline_measure.sql)

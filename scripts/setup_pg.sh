@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup_pg.sh — Install PostgreSQL 17, pg-flight-recorder, run pgbench for 1h+
+# setup_pg.sh — Install PostgreSQL 17, pg_flight_recorder, run pgbench for 1h+
 # Security: localhost only, password auth, log_connections=on
 # Run as root on Ubuntu 24.04
 
@@ -99,13 +99,13 @@ CREATE EXTENSION IF NOT EXISTS pg_cron;
 GRANT ALL ON SCHEMA cron TO pgfr_bench17;
 EOSQL
 
-# ── 5. Clone pg-flight-recorder ─────────────────────────────────────────────
-log "Cloning pg-flight-recorder ($PGFR_BRANCH branch)..."
+# ── 5. Clone pg_flight_recorder ─────────────────────────────────────────────
+log "Cloning pg_flight_recorder ($PGFR_BRANCH branch)..."
 if [[ -d "$PGFR_DIR" ]]; then
   cd "$PGFR_DIR" && git pull --rebase
 else
   git clone --depth 1 --branch "$PGFR_BRANCH" \
-    https://github.com/NikolayS/pg-flight-recorder "$PGFR_DIR"
+    https://github.com/dventimisupabase/pg_flight_recorder "$PGFR_DIR"
 fi
 
 # ── 6. Apply PG17 compatibility patch ───────────────────────────────────────
@@ -133,8 +133,8 @@ with open('/root/pgfr/pgfr_record/install.sql', 'w') as f:
     f.write(content)
 PYEOF
 
-# ── 7. Install pg-flight-recorder ───────────────────────────────────────────
-log "Installing pg-flight-recorder..."
+# ── 7. Install pg_flight_recorder ───────────────────────────────────────────
+log "Installing pg_flight_recorder..."
 sudo -u postgres psql -p $PGPORT -d $PGDB -f "$PGFR_DIR/pgfr_record/install.sql"
 
 # Create PG17 compatibility view (maps renamed columns)

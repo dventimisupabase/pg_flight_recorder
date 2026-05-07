@@ -19,7 +19,7 @@ CONTAINER="${1:-pgfr_record_test-17}"
 DB="${2:-pgfr_bench}"
 PSQL="docker exec -i ${CONTAINER} psql -U postgres -d ${DB}"
 
-echo "=== pg-flight-recorder: Old-schema UPDATE bloat demo ==="
+echo "=== pg_flight_recorder: Old-schema UPDATE bloat demo ==="
 echo "Container : ${CONTAINER}"
 echo "Database  : ${DB}"
 echo ""

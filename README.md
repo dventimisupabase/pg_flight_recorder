@@ -1,14 +1,14 @@
-# pg-flight-recorder
+# pg_flight_recorder
 
-[![GitHub release](https://img.shields.io/github/v/release/dventimisupabase/pg-flight-recorder)](https://github.com/dventimisupabase/pg-flight-recorder/releases/latest)
-[![Test Suite](https://github.com/dventimisupabase/pg-flight-recorder/actions/workflows/test.yml/badge.svg)](https://github.com/dventimisupabase/pg-flight-recorder/actions/workflows/test.yml)
-[![Lint](https://github.com/dventimisupabase/pg-flight-recorder/actions/workflows/lint.yml/badge.svg)](https://github.com/dventimisupabase/pg-flight-recorder/actions/workflows/lint.yml)
+[![GitHub release](https://img.shields.io/github/v/release/dventimisupabase/pg_flight_recorder)](https://github.com/dventimisupabase/pg_flight_recorder/releases/latest)
+[![Test Suite](https://github.com/dventimisupabase/pg_flight_recorder/actions/workflows/test.yml/badge.svg)](https://github.com/dventimisupabase/pg_flight_recorder/actions/workflows/test.yml)
+[![Lint](https://github.com/dventimisupabase/pg_flight_recorder/actions/workflows/lint.yml/badge.svg)](https://github.com/dventimisupabase/pg_flight_recorder/actions/workflows/lint.yml)
 
 Server-side flight recorder for PostgreSQL. Answers "what was happening in my database?"
 
-**[View the project website](https://dventimisupabase.github.io/pg-flight-recorder/)**
+**[View the project website](https://dventimisupabase.github.io/pg_flight_recorder/)**
 
-pg-flight-recorder continuously samples PostgreSQL system state in the background via pg_cron -- no external agents, sidecars, or polling required. It captures wait events, active sessions, locks, WAL activity, checkpoints, I/O, table and index stats, query performance, replication state, and configuration changes. When something goes wrong, the data is already there.
+pg_flight_recorder continuously samples PostgreSQL system state in the background via pg_cron -- no external agents, sidecars, or polling required. It captures wait events, active sessions, locks, WAL activity, checkpoints, I/O, table and index stats, query performance, replication state, and configuration changes. When something goes wrong, the data is already there.
 
 ## Architecture
 
@@ -39,7 +39,7 @@ Two extensions, each published as a separate [dbdev](https://database.dev) packa
 
 ## Quick start
 
-Download from [GitHub Releases](https://github.com/dventimisupabase/pg-flight-recorder/releases/latest) or clone the repo, then:
+Download from [GitHub Releases](https://github.com/dventimisupabase/pg_flight_recorder/releases/latest) or clone the repo, then:
 
 ```bash
 # Install core + optional analysis extension

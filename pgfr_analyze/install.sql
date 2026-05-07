@@ -1,4 +1,4 @@
--- pg-flight-recorder: pgfr_analyze module install script
+-- pg_flight_recorder: pgfr_analyze module install script
 --
 -- Requires pgfr_record module installed first.
 -- Uses psql `\ir` (include-relative); paths resolve against this file's

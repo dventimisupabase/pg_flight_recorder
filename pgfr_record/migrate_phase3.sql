@@ -1,4 +1,4 @@
--- migrate_phase3.sql — pg-flight-recorder Phase 3 migration
+-- migrate_phase3.sql — pg_flight_recorder Phase 3 migration
 --
 -- Migrates from legacy heap tables to daily-partitioned v2 tables.
 -- Run AFTER install.sql has applied Phase 3 schema (v2 tables exist).

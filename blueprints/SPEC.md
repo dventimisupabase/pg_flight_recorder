@@ -65,7 +65,7 @@
 - [x] pgTAP suite — 688 assertions across 20 test files
 - [x] PG18 compatibility — `pg_stat_wal` column removals, PGSS column renames, `_ensure_partition()` index fix (commit `c5b7f52`)
 
-### Phase 2 — ring buffer redesign (target: `storage-overhaul` on fork of `dventimisupabase/pg-flight-recorder`)
+### Phase 2 — ring buffer redesign (target: `storage-overhaul` on fork of `dventimisupabase/pg_flight_recorder`)
 
 - [x] Phase 2 ring buffer code merged to `storage-overhaul-spec` (cherry-pick from `dventimisupabase` commit `6e8124b`)
 - [x] `ring_config` singleton table
@@ -115,7 +115,7 @@
 
 ## 1. Background and Motivation
 
-pg-flight-recorder records comprehensive PostgreSQL telemetry continuously via
+pg_flight_recorder records comprehensive PostgreSQL telemetry continuously via
 pg_cron — wait events, active sessions, lock contention, WAL activity, checkpoints,
 I/O, table and index statistics, query performance (`pg_stat_statements`),
 replication state, and configuration. The data accumulates in a set of LOGGED tables
@@ -483,7 +483,7 @@ interval-activity queries spanning a deallocation event may undercount.
 
 **`dealloc` is cluster-wide, not per-database:** `pg_stat_statements_info` is a
 single cluster-level view. A query storm on database A that causes mass evictions
-increments `dealloc` for all databases. A pg-flight-recorder instance on database B
+increments `dealloc` for all databases. A pg_flight_recorder instance on database B
 will see the increment and flag its snapshot as incomplete — even though database B
 lost zero queries. Reader function warnings must say **"cluster-level PGSS evictions
 detected during this window"**, not "data for this database is missing." This
@@ -952,7 +952,7 @@ Old config keys (`aggregate_retention_days`, `archive_retention_days`,
 phase.
 
 **Logical replication warning:** `TRUNCATE` is replicated by logical replication
-(`pgoutput` and compatible plugins). If pg-flight-recorder tables are published to
+(`pgoutput` and compatible plugins). If pg_flight_recorder tables are published to
 a downstream data warehouse (ClickHouse, Snowflake, Redshift) for long-term
 retention, the nightly `truncate_old_partitions()` will replicate downstream and
 wipe the warehouse history. Users streaming telemetry via logical replication must
@@ -977,7 +977,7 @@ orders-of-magnitude storage reduction) under realistic and extreme conditions.
 Both old and new schemas run side by side on identical hardware with identical
 workloads. Results are published to `benchmarks/` in the repository.
 
-See also: https://github.com/dventimisupabase/pg-flight-recorder/pull/13 for
+See also: https://github.com/dventimisupabase/pg_flight_recorder/pull/13 for
 prior benchmarking context.
 
 ### 9.1 Test environment
@@ -1002,7 +1002,7 @@ the benchmark environment. All figures in the storage analysis table are current
 derived from schema inspection and row-count arithmetic. They must be validated
 against a running installation before any optimization work begins.
 
-Run pg-flight-recorder at default configuration for 24 hours, then measure:
+Run pg_flight_recorder at default configuration for 24 hours, then measure:
 
 ```sql
 -- Actual row counts

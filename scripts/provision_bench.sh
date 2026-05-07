@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# provision_bench.sh — provision Hetzner VM for pg-flight-recorder benchmarks
+# provision_bench.sh — provision Hetzner VM for pg_flight_recorder benchmarks
 # Security: firewall FIRST, PostgreSQL on localhost only, password auth, log_connections=on
 # Idempotent: safe to re-run; tears down at end
 

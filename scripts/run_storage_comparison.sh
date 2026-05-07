@@ -19,7 +19,7 @@ DB="${2:-pgfr_bench}"
 PSQL="docker exec -i ${CONTAINER} psql -U postgres -d ${DB}"
 TICKS=10000
 
-echo "=== pg-flight-recorder: Storage Comparison ==="
+echo "=== pg_flight_recorder: Storage Comparison ==="
 echo "Container : ${CONTAINER}"
 echo "Database  : ${DB}"
 echo "Ticks     : ${TICKS}"
