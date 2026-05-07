@@ -1073,7 +1073,7 @@
         <div class="arch-card reveal">
           <div class="arch-card-label">Sampled Activity</div>
           <h3>Wait events, sessions, locks</h3>
-          <p>High-frequency sampling into ring buffers for minimal overhead. Automatically flushed to durable aggregates and archives.</p>
+          <p>Per-minute sampling into UNLOGGED ring buffers for low overhead. Automatically flushed to durable aggregates and archives.</p>
           <div class="arch-flow">
             <span class="arch-node">pg_stat_activity</span>
             <span class="arch-arrow">&rarr;</span>
@@ -1230,7 +1230,7 @@
           <div class="workflow-grid">
             <div class="workflow-text">
               <h3>Active incident response</h3>
-              <p>Switch to high-frequency collection, then use time-travel functions to reconstruct exactly what happened.</p>
+              <p>Apply the troubleshooting profile to keep collecting under load, then use time-travel functions to reconstruct exactly what happened.</p>
               <ul>
                 <li>Apply troubleshooting profile for detailed capture</li>
                 <li>Point-in-time activity reconstruction</li>
@@ -1245,7 +1245,7 @@
                 <span class="terminal-dot"></span>
                 <span class="terminal-title">Incident response</span>
               </div>
-              <div class="terminal-body"><pre><span class="t-cm">-- Switch to high-frequency collection</span>
+              <div class="terminal-body"><pre><span class="t-cm">-- Apply troubleshooting profile</span>
 <span class="t-kw">SELECT</span> * <span class="t-kw">FROM</span> <span class="t-fn">pgfr_record.apply_profile</span>(<span class="t-str">'troubleshooting'</span>);
 
 <span class="t-cm">-- What was happening at a specific time?</span>
