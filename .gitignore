@@ -8,3 +8,6 @@ benchmark/
 
 # Supabase CLI local state
 supabase/
+
+# Personal review notes (not committed)
+pr-*-reflection.md

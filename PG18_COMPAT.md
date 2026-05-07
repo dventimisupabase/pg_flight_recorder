@@ -66,28 +66,28 @@ This was pre-existing (not PG18-specific) but triggered visibly on every `sample
 
 ## Test Results: 688 assertions
 
-| File | Tests | Failed | Classification |
-|------|-------|--------|----------------|
-| 01_foundation | 50 | 0 | ✅ PASS |
-| 02_ring_buffer_analysis | 30 | 0 | ✅ PASS |
-| 03_safety_features | 75 | **2** | ⚠ Pre-existing: cron count (5 expected, 7 actual — GC jobs) |
-| 04_boundary_critical | 60 | 0 | ✅ PASS |
-| 05_error_version | 99 | 0 | ✅ PASS (needed PG18 version guard updates) |
-| 06_load_archive_capacity | 35 | 0 | ✅ PASS |
-| 07_pathology_generators | 60 | 0 | ✅ PASS |
-| 08_pathology_value_checks | 42 | 0 | ✅ PASS |
-| 09_ring_buffer_optimization | 24 | 0 | ✅ PASS |
-| 10_xid_wraparound | 10 | **1** | ⚠ Pre-existing: fresh DB, no aged XID |
-| 11_statistics_enhancements | 18 | 0 | ✅ PASS |
-| 12_anomaly_enhancements | 14 | 0 | ✅ PASS |
-| 13_autovacuum_observer | 30 | 0 | ✅ PASS |
-| 14_oid_exhaustion | 16 | 0 | ✅ PASS |
-| 15_statement_deltas | 20 | 0 | ✅ PASS |
-| test_migration | 10 | **10** | ⚠ `migrate_to_v2` not implemented yet |
-| test_partition_infra | 25 | **25** | ⚠ Test isolation: tries to CREATE existing table |
-| test_sparse_collector | 26 | 0 | ✅ PASS |
-| test_sparse_table_index | 12 | **1** | ⚠ Pre-existing: T12 fails on fresh DB (0 idx_scans) |
-| test_wiring | 23 | 0 | ✅ PASS |
+| File                        | Tests | Failed | Classification                                              |
+|-----------------------------|-------|--------|-------------------------------------------------------------|
+| 01_foundation               | 50    | 0      | ✅ PASS                                                     |
+| 02_ring_buffer_analysis     | 30    | 0      | ✅ PASS                                                     |
+| 03_safety_features          | 75    | **2**  | ⚠ Pre-existing: cron count (5 expected, 7 actual — GC jobs) |
+| 04_boundary_critical        | 60    | 0      | ✅ PASS                                                     |
+| 05_error_version            | 99    | 0      | ✅ PASS (needed PG18 version guard updates)                 |
+| 06_load_archive_capacity    | 35    | 0      | ✅ PASS                                                     |
+| 07_pathology_generators     | 60    | 0      | ✅ PASS                                                     |
+| 08_pathology_value_checks   | 42    | 0      | ✅ PASS                                                     |
+| 09_ring_buffer_optimization | 24    | 0      | ✅ PASS                                                     |
+| 10_xid_wraparound           | 10    | **1**  | ⚠ Pre-existing: fresh DB, no aged XID                       |
+| 11_statistics_enhancements  | 18    | 0      | ✅ PASS                                                     |
+| 12_anomaly_enhancements     | 14    | 0      | ✅ PASS                                                     |
+| 13_autovacuum_observer      | 30    | 0      | ✅ PASS                                                     |
+| 14_oid_exhaustion           | 16    | 0      | ✅ PASS                                                     |
+| 15_statement_deltas         | 20    | 0      | ✅ PASS                                                     |
+| test_migration              | 10    | **10** | ⚠ `migrate_to_v2` not implemented yet                       |
+| test_partition_infra        | 25    | **25** | ⚠ Test isolation: tries to CREATE existing table            |
+| test_sparse_collector       | 26    | 0      | ✅ PASS                                                     |
+| test_sparse_table_index     | 12    | **1**  | ⚠ Pre-existing: T12 fails on fresh DB (0 idx_scans)         |
+| test_wiring                 | 23    | 0      | ✅ PASS                                                     |
 
 **Total: 688 assertions, 39 failures, all non-PG18 issues**
 
