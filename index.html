@@ -1019,18 +1019,19 @@
             <span class="terminal-dot"></span>
             <span class="terminal-title">psql &mdash; postgres</span>
           </div>
-          <div class="terminal-body"><pre><span class="t-prompt">postgres=#</span> <span class="t-kw">SELECT</span> * <span class="t-kw">FROM</span> <span class="t-fn">pgfr_record.health_check</span>();
+          <div class="terminal-body"><pre><span class="t-prompt">postgres=#</span> <span class="t-kw">SELECT</span> component, status, details <span class="t-kw">FROM</span> <span class="t-fn">pgfr_record.health_check</span>();
 
-<span class="t-hd"> component      </span><span class="t-dim">|</span><span class="t-hd"> status </span><span class="t-dim">|</span><span class="t-hd"> detail</span>
-<span class="t-dim">----------------+--------+----------------------------------</span>
- collection     <span class="t-dim">|</span> <span class="t-ok">ok</span>     <span class="t-dim">|</span> last run 34s ago
- ring_buffers   <span class="t-dim">|</span> <span class="t-ok">ok</span>     <span class="t-dim">|</span> 94/120 slots (78%)
- disk_usage     <span class="t-dim">|</span> <span class="t-ok">ok</span>     <span class="t-dim">|</span> 186 MB total
- circuit_break  <span class="t-dim">|</span> <span class="t-ok">ok</span>     <span class="t-dim">|</span> avg: 89ms (threshold: 1000ms)
- connections    <span class="t-dim">|</span> <span class="t-ok">ok</span>     <span class="t-dim">|</span> 28/100 active (28%)
- xid_age        <span class="t-dim">|</span> <span class="t-ok">ok</span>     <span class="t-dim">|</span> age 1,247,832 (0.6% of limit)
- statements     <span class="t-dim">|</span> <span class="t-ok">ok</span>     <span class="t-dim">|</span> pg_stat_statements active
-<span class="t-dim">(7 rows)</span></pre></div>
+<span class="t-hd">       component        </span><span class="t-dim">|</span><span class="t-hd"> status  </span><span class="t-dim">|</span><span class="t-hd">             details</span>
+<span class="t-dim">------------------------+---------+---------------------------------</span>
+ Flight Recorder System <span class="t-dim">|</span> <span class="t-ok">ENABLED</span> <span class="t-dim">|</span> Mode: normal
+ Schema Size            <span class="t-dim">|</span> <span class="t-ok">OK</span>      <span class="t-dim">|</span> 186 MB / 1024 MB (18.2%)
+ Circuit Breaker        <span class="t-dim">|</span> <span class="t-ok">OK</span>      <span class="t-dim">|</span> 0 trips in last hour
+ Sample Collection      <span class="t-dim">|</span> <span class="t-ok">OK</span>      <span class="t-dim">|</span> Last: 00:00:34 ago
+ Snapshot Collection    <span class="t-dim">|</span> <span class="t-ok">OK</span>      <span class="t-dim">|</span> Last: 00:00:42 ago
+ Data Volume            <span class="t-dim">|</span> <span class="t-ok">INFO</span>    <span class="t-dim">|</span> Samples: 12483, Snapshots: 8762
+ pg_stat_statements     <span class="t-dim">|</span> <span class="t-ok">Healthy</span> <span class="t-dim">|</span> Utilization: 28% (1387/5000)
+ pg_cron Jobs           <span class="t-dim">|</span> <span class="t-ok">OK</span>      <span class="t-dim">|</span> 4/4 jobs active and running
+<span class="t-dim">(8 rows)</span></pre></div>
         </div>
       </div>
     </div>
