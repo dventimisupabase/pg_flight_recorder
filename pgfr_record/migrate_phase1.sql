@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
 -- Phase 1 Migration: old tables → v2 partitioned tables
 -- Safe to run on live system. Idempotent.
 -- Run AFTER installing the new pgfr_record/install.sql (which adds v2 tables).

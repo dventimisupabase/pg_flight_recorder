@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
 CREATE OR REPLACE FUNCTION pgfr_analyze.recent_waits_current()
 RETURNS TABLE (
     captured_at TIMESTAMPTZ,

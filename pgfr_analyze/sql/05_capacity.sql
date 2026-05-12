@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
 CREATE OR REPLACE FUNCTION pgfr_analyze.capacity_summary(
     p_time_window INTERVAL DEFAULT interval '24 hours'
 )

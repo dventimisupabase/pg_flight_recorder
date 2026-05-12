@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
 -- pg_flight_recorder: pgfr_analyze module install script
 --
 -- Requires pgfr_record module installed first.

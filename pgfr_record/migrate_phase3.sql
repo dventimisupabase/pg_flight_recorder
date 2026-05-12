@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
 -- migrate_phase3.sql — pg_flight_recorder Phase 3 migration
 --
 -- Migrates from legacy heap tables to daily-partitioned v2 tables.

@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
 CREATE OR REPLACE FUNCTION pgfr_analyze.performance_report(p_lookback_interval INTERVAL DEFAULT '24 hours')
 RETURNS TABLE(
     metric TEXT,

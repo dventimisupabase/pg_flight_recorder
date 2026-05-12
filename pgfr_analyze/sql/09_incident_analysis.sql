@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
 CREATE OR REPLACE FUNCTION pgfr_analyze.what_happened_at(
     p_timestamp TIMESTAMPTZ,
     p_context_window INTERVAL DEFAULT '5 minutes'

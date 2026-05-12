@@ -20,6 +20,18 @@ INSTALL="${EXT_DIR}/install.sql"
 
 [ -f "$INSTALL" ] || { echo "build_dbdev_package: missing $INSTALL" >&2; exit 1; }
 
+# License header. Written to $OUT before awk runs so the minifier (which
+# strips `--` lines from source files) doesn't drop it. Source files carry
+# their own SPDX headers for source-form distribution; this banner ensures
+# the bundled single-file dbdev package surfaces the license too.
+cat > "$OUT" <<'LICENSE_EOF'
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+-- Licensed under the Apache License, Version 2.0
+-- https://www.apache.org/licenses/LICENSE-2.0
+
+LICENSE_EOF
+
 awk -v ext_dir="$EXT_DIR" '
 # Minifier stages:
 #   1. Inline  : replace `\i <path>` with the referenced file contents.
@@ -66,7 +78,7 @@ function emit_line(line,   stripped) {
     next
 }
 { emit_line($0) }
-' "$INSTALL" > "$OUT"
+' "$INSTALL" >> "$OUT"
 
 SIZE=$(wc -c < "$OUT")
 echo "Built $OUT (${SIZE} bytes)"

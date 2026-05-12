@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
 -- Phase 1: Sparse statement_snapshots collector
 -- SPEC §5.2 — storage-overhaul-spec branch
 -- PG14+ minimum (requires pg_stat_statements_info, toplevel column)

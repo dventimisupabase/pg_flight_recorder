@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
 --------------------------------------------------------------------------------
 -- Phase 3: daily-partitioned snapshots_v2 and aligned child tables
 --

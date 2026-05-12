@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
 CREATE OR REPLACE FUNCTION pgfr_analyze.config_changes(
     p_start_time TIMESTAMPTZ,
     p_end_time TIMESTAMPTZ

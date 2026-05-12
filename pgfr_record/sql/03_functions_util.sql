@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
 CREATE OR REPLACE FUNCTION pgfr_record._pretty_bytes(bytes BIGINT)
 RETURNS TEXT
 LANGUAGE sql IMMUTABLE AS $$

@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
 -- migrate_phase3_rollback.sql — undo Phase 3 migration
 --
 -- Restores legacy heap tables as primary tables by:

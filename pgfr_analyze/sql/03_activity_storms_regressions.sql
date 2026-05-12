@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
 CREATE OR REPLACE FUNCTION pgfr_analyze.activity_at(p_timestamp TIMESTAMPTZ)
 RETURNS TABLE(
     sample_captured_at      TIMESTAMPTZ,

@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
 -- Uninstall pgfr_record (DESTRUCTIVE — removes all data)
 -- Run with: psql --single-transaction -f pgfr_record/uninstall.sql
 

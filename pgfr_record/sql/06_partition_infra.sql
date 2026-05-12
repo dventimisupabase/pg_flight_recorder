@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
 -- =============================================================================
 -- Phase 1: Core Partition Infrastructure (Issue #2)
 -- Implements §7.1 and §7.2 of blueprints/SPEC.md

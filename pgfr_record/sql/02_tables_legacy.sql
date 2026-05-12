@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
 CREATE TABLE IF NOT EXISTS pgfr_record.snapshots (
     id              SERIAL PRIMARY KEY,
     captured_at     TIMESTAMPTZ NOT NULL DEFAULT now(),

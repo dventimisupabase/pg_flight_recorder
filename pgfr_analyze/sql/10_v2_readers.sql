@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
 create or replace function pgfr_analyze.v2_time_range(
     p_start timestamptz,
     p_end   timestamptz

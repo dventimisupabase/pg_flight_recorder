@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
 -- RING BUFFER v2: N-partition TRUNCATE-based rotation
 -- Follows pg_ash design (ash-install.sql). Replaces the UPDATE-based ring buffer
 -- (samples_ring / wait_samples_ring / lock_samples_ring) with a LOGGED, partitioned,

@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
 CREATE OR REPLACE FUNCTION pgfr_record.cleanup(p_retain_interval INTERVAL DEFAULT NULL)
 RETURNS TABLE(
     deleted_snapshots   BIGINT,
