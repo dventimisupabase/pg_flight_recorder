@@ -182,6 +182,29 @@ SELECT pgfr_record.disable();
 SELECT pgfr_record.enable();
 ```
 
+## pg_cron run history
+
+pg_cron logs every job execution to `cron.job_run_details` with no built-in purge. pgfr_record schedules roughly ten jobs (four of them every minute), so at default cadence this adds about 5,000 rows/day of unbounded growth on top of any other pg_cron jobs you run.
+
+**Recommended: disable `cron.log_run`.** Errors from failed jobs still appear in the Postgres server log (`cron.log_min_messages` defaults to `WARNING`) — you lose nothing important, only the `job_run_details` table entries.
+
+```sql
+ALTER SYSTEM SET cron.log_run = off;
+-- requires Postgres restart (postmaster context)
+```
+
+If you need successful-run history for other pg_cron jobs (as of pg_cron 1.6 there is no per-job logging toggle), schedule a periodic purge instead:
+
+```sql
+SELECT cron.schedule(
+  'pgfr_purge_cron_log',
+  '0 * * * *',
+  $$DELETE FROM cron.job_run_details WHERE end_time < now() - interval '1 day'$$
+);
+```
+
+`pgfr_record.enable()` raises a `WARNING` if `cron.log_run` is left on.
+
 ## Export
 
 With default retention: ~2.5GB uncompressed, ~150MB compressed.

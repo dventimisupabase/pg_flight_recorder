@@ -93,6 +93,27 @@ SELECT * FROM pgfr_record.deltas;
 | `troubleshooting`  | 60s             | Active incident response               |
 | `minimal_overhead` | 300s            | Resource-constrained systems           |
 
+## pg_cron run history
+
+Every scheduled job writes a row to `cron.job_run_details`, and pg_cron has no built-in purge. pgfr_record schedules ~10 jobs (four fire every minute), so at default cadence expect ~5,000 rows/day growing forever on top of any other pg_cron jobs.
+
+`pgfr_record.enable()` raises a `WARNING` when it detects `cron.log_run` is on. To silence it, pick one:
+
+```sql
+-- Preferred: disable run logging entirely (errors still hit the server log).
+ALTER SYSTEM SET cron.log_run = off;
+-- requires a Postgres restart (postmaster context)
+
+-- Or, if you need run history for other pg_cron jobs, purge periodically:
+SELECT cron.schedule(
+  'pgfr_purge_cron_log',
+  '0 * * * *',
+  $$DELETE FROM cron.job_run_details WHERE end_time < now() - interval '1 day'$$
+);
+```
+
+See the [top-level README](https://github.com/dventimisupabase/pg_flight_recorder/blob/main/README.md#pg_cron-run-history) for the full rationale.
+
 ## Related extensions
 
 - [pgfr_analyze](https://database.dev/dventimi/pgfr_analyze) -- reporting, anomaly detection, time-travel forensics

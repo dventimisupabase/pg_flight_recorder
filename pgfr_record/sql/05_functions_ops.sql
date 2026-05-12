@@ -441,6 +441,22 @@ BEGIN
             -- Don't fail enable() if validation has issues
             NULL;
         END;
+        -- pg_cron writes one row to cron.job_run_details per job execution with
+        -- no built-in purge. pgfr schedules ~10 jobs (4 of them every minute),
+        -- so at default cadence this is roughly 5,000 rows/day forever. Errors
+        -- from failed jobs still appear in the Postgres server log via
+        -- cron.log_min_messages (default WARNING) — see README "pg_cron run history".
+        DECLARE
+            v_cron_log_run TEXT;
+        BEGIN
+            v_cron_log_run := current_setting('cron.log_run', true);
+            IF v_cron_log_run IS NULL OR lower(v_cron_log_run) IN ('on', 'true', 'yes', '1') THEN
+                RAISE WARNING 'pg_cron run history [WARNING]: cron.log_run is on — cron.job_run_details grows unbounded (~5000 rows/day from pgfr jobs at default cadence). Recommended: ALTER SYSTEM SET cron.log_run = off (requires restart). Alternative: schedule a periodic DELETE on cron.job_run_details. See README "pg_cron run history".';
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            -- Don't fail enable() if the GUC is unavailable
+            NULL;
+        END;
         RETURN format('Flight Recorder collection restarted. Scheduled %s cron jobs in %s mode (sample: %s).',
                      v_scheduled, v_mode, v_sample_schedule);
     EXCEPTION
