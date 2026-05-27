@@ -19,7 +19,7 @@ Flight Recorder collects two types of data:
 | **Sampled Activity** | Wait events, sessions, locks           | 1 min     | Ring buffer: 2h, Archives: 7d     |
 | **Snapshots**        | WAL, checkpoints, I/O, tables, indexes | 1 min     | 30 days                           |
 
-Data flows through ring buffers (hot, low-overhead) into durable archives and aggregates (cold, long-retention). Safety mechanisms -- circuit breaker, load shedding, per-section timeouts, and pg_cron job timeouts -- prevent the recorder from impacting production workloads.
+Sampled activity flows through ring buffers (hot, low-overhead) into durable archives and aggregates (cold, long-retention). Snapshots are written directly into retention tables -- no ring buffer in the path. Safety mechanisms -- circuit breaker, load shedding, per-section timeouts, and pg_cron job timeouts -- prevent the recorder from impacting production workloads.
 
 ## Extensions
 
@@ -38,7 +38,7 @@ Two extensions, each published as a separate [dbdev](https://database.dev) packa
 
 ## Quick start
 
-Download from [GitHub Releases](https://github.com/dventimisupabase/pg_flight_recorder/releases/latest) or clone the repo, then:
+Download from [GitHub Releases](https://github.com/dventimisupabase/pg_flight_recorder/releases/latest) or clone the repo, `cd` into the project root, then:
 
 ```bash
 # Install core + optional analysis extension
@@ -68,6 +68,8 @@ SELECT * FROM pgfr_record.health_check();
 ```
 
 ### Daily monitoring
+
+Returns a markdown report covering anomalies, wait events, top queries, and other activity over the given window. Suitable for a daily glance, or pasted into a chat with an LLM for triage.
 
 ```sql
 SELECT pgfr_analyze.report('1 hour');
@@ -132,7 +134,7 @@ SELECT * FROM pgfr_analyze.detect_regressions('1 day');
 SELECT * FROM pgfr_analyze.detect_query_storms('1 hour');
 
 -- Table hotspots
-SELECT * FROM pgfr_analyze.table_hotspots(now() - '1 day', now());
+SELECT * FROM pgfr_analyze.table_hotspots(now() - interval '1 day', now());
 
 -- Unused indexes
 SELECT * FROM pgfr_analyze.unused_indexes('7 days');
@@ -178,8 +180,14 @@ Flight Recorder includes automatic protections:
 Collection modes provide manual control: `normal`, `light`, `emergency`.
 
 ```sql
+-- Drop progress tracking but keep 60s sampling (lower overhead, same cadence)
+SELECT pgfr_record.set_mode('light');
+
 -- Reduce to minimum collection (300s sampling, locks/progress off)
 SELECT pgfr_record.set_mode('emergency');
+
+-- Return to full collection
+SELECT pgfr_record.set_mode('normal');
 
 -- Full stop: unschedule all pg_cron jobs
 SELECT pgfr_record.disable();
