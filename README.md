@@ -59,10 +59,17 @@ SELECT pgfr_analyze.report('1 hour');
 
 ## Common workflows
 
-### Daily monitoring
+### Verifying the recorder
+
+Confirms that collection is running, pg_cron jobs are active, the circuit breaker isn't tripping, schema size is in range, and `pg_stat_statements` (if installed) isn't churning. Run after install, after upgrades, or whenever a report looks thin -- not on a daily cadence.
 
 ```sql
 SELECT * FROM pgfr_record.health_check();
+```
+
+### Daily monitoring
+
+```sql
 SELECT pgfr_analyze.report('1 hour');
 ```
 
