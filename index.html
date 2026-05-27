@@ -1196,13 +1196,13 @@
         <div class="tab-panel active" id="monitoring">
           <div class="workflow-grid">
             <div class="workflow-text">
-              <h3>Daily health checks</h3>
-              <p>One function tells you if everything is healthy. The report gives you a summary of the last hour's activity, anomalies, and trends.</p>
+              <h3>Daily monitoring</h3>
+              <p>Two distinct checks. First confirm the recorder itself is healthy — run after install, after upgrades, or whenever a report looks thin. Then read the database's daily diagnostic report: anomalies, wait events, top queries, and trends.</p>
               <ul>
-                <li>Collection status and ring buffer health</li>
-                <li>Disk usage and circuit breaker state</li>
-                <li>Connection utilization and XID age</li>
-                <li>Anomaly detection with severity levels</li>
+                <li><strong>Recorder self-check:</strong> collection status, ring buffer health, circuit breaker trips, pg_cron job activity</li>
+                <li><strong>Database report:</strong> markdown summary over the given window — pasteable into an LLM for triage</li>
+                <li>Anomaly detection with severity levels and recommendations</li>
+                <li>Pre-deployment preflight checks</li>
               </ul>
             </div>
             <div class="terminal workflow-terminal">
@@ -1212,10 +1212,10 @@
                 <span class="terminal-dot"></span>
                 <span class="terminal-title">Daily monitoring</span>
               </div>
-              <div class="terminal-body"><pre><span class="t-cm">-- Quick health check</span>
+              <div class="terminal-body"><pre><span class="t-cm">-- Sanity-check the recorder itself</span>
 <span class="t-kw">SELECT</span> * <span class="t-kw">FROM</span> <span class="t-fn">pgfr_record.health_check</span>();
 
-<span class="t-cm">-- Full diagnostic report</span>
+<span class="t-cm">-- Daily diagnostic report on the database</span>
 <span class="t-kw">SELECT</span> <span class="t-fn">pgfr_analyze.report</span>(<span class="t-str">'1 hour'</span>);
 
 <span class="t-cm">-- Check for alerts</span>
@@ -1256,8 +1256,8 @@
 
 <span class="t-cm">-- Reconstruct an incident timeline</span>
 <span class="t-kw">SELECT</span> * <span class="t-kw">FROM</span> <span class="t-fn">pgfr_analyze.incident_timeline</span>(
-  <span class="t-str">'2024-01-15 14:00'</span>::<span class="t-kw">timestamptz</span>,
-  <span class="t-str">'2024-01-15 15:00'</span>::<span class="t-kw">timestamptz</span>
+  <span class="t-str">'2024-01-15 14:00'</span>,
+  <span class="t-str">'2024-01-15 15:00'</span>
 );
 
 <span class="t-cm">-- Return to normal after incident</span>
@@ -1293,7 +1293,7 @@
 
 <span class="t-cm">-- Table hotspots</span>
 <span class="t-kw">SELECT</span> * <span class="t-kw">FROM</span> <span class="t-fn">pgfr_analyze.table_hotspots</span>(
-  <span class="t-fn">now</span>() - <span class="t-str">'1 day'</span>, <span class="t-fn">now</span>()
+  <span class="t-fn">now</span>() - <span class="t-kw">interval</span> <span class="t-str">'1 day'</span>, <span class="t-fn">now</span>()
 );
 
 <span class="t-cm">-- Find unused indexes</span>
@@ -1421,13 +1421,13 @@
     <div class="container">
       <div class="section-label reveal">Get Started</div>
       <h2 class="section-title reveal">Three steps to visibility.</h2>
-      <p class="section-desc reveal">Requires PostgreSQL 15+, pg_cron, and superuser privileges. No compilation, no agents, no config files.</p>
+      <p class="section-desc reveal">Requires PostgreSQL 15+ and pg_cron. No compilation, no agents, no config files.</p>
 
       <div class="steps stagger">
         <div class="step reveal">
           <div class="step-number">01</div>
           <h3>Install</h3>
-          <p>Download from GitHub Releases or clone the repo, then run the SQL scripts.</p>
+          <p>Download from GitHub Releases or clone the repo, <code>cd</code> into the project root, then run the SQL scripts.</p>
           <div class="code-block">
             <button class="copy-btn" aria-label="Copy to clipboard">
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M5 11H3.5A1.5 1.5 0 012 9.5v-7A1.5 1.5 0 013.5 1h7A1.5 1.5 0 0112 2.5V5"/></svg>
@@ -1444,7 +1444,10 @@ psql --single-transaction -f pgfr_analyze/install.sql</pre>
             <button class="copy-btn" aria-label="Copy to clipboard">
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M5 11H3.5A1.5 1.5 0 012 9.5v-7A1.5 1.5 0 013.5 1h7A1.5 1.5 0 0112 2.5V5"/></svg>
             </button>
-            <pre><span class="t-kw">SELECT</span> <span class="t-fn">pgfr_record.enable</span>();
+            <pre><span class="t-cm">-- Enable collection</span>
+<span class="t-kw">SELECT</span> <span class="t-fn">pgfr_record.enable</span>();
+
+<span class="t-cm">-- Verify the recorder is running</span>
 <span class="t-kw">SELECT</span> * <span class="t-kw">FROM</span> <span class="t-fn">pgfr_record.health_check</span>();</pre>
           </div>
         </div>
