@@ -50,10 +50,10 @@ psql --single-transaction -f pgfr_analyze/install.sql
 -- Enable collection
 SELECT pgfr_record.enable();
 
--- Check health
+-- Verify the recorder is running
 SELECT * FROM pgfr_record.health_check();
 
--- Generate a diagnostic report
+-- Generate a diagnostic report on the database
 SELECT pgfr_analyze.report('1 hour');
 ```
 
