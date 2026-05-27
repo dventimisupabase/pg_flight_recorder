@@ -82,7 +82,7 @@ Complete reference for [pg_flight_recorder](README.md). For installation and get
 | `pgfr_analyze.report(start timestamptz, end timestamptz)` | `text` | Diagnostic report for a specific time range |
 | `pgfr_analyze.summary_report(start timestamptz, end timestamptz)` | `record` | Summary statistics |
 | `pgfr_analyze.performance_report(start timestamptz, end timestamptz)` | `record` | Performance-focused report |
-| `pgfr_analyze.anomaly_report(start timestamptz, end timestamptz)` | `record` | Anomaly analysis: checkpoints, buffer pressure, temp spills, locks, XID + MultiXID wraparound risk |
+| `pgfr_analyze.anomaly_report(start timestamptz, end timestamptz)` | `record` | Anomaly analysis: checkpoints, buffer pressure, temp spills, locks, XID + MultiXID wraparound risk, xmin horizon stalls (data + catalog, four severity tiers; cause precedes wraparound symptom) |
 | `pgfr_analyze.check_alerts()` | `record` | Check active alert conditions |
 
 ### Forensics
@@ -93,6 +93,8 @@ Complete reference for [pg_flight_recorder](README.md). For installation and get
 | `pgfr_analyze.incident_timeline(start timestamptz, end timestamptz)` | `record` | Reconstructed event timeline for an incident window |
 | `pgfr_analyze.blast_radius(queryid bigint)` | `record` | Impact analysis for a specific query: I/O, CPU, lock, temp file effects |
 | `pgfr_analyze.blast_radius_report(interval)` | `text` | Text report on high-impact queries |
+| `pgfr_analyze.xmin_horizon_history(start timestamptz, end timestamptz)` | `record` | Timeline of xmin holders within a window. Joins three sidecars + replication via `UNION ALL`; `horizon_type` (`'data'` / `'catalog'` / `'both'`) disambiguates slot rows. Pushes down `sample_ts` predicate for partition pruning. |
+| `pgfr_analyze.current_xmin_horizon_holder()` | `record` | Quick-answer reader. Returns zero rows on a healthy cluster, otherwise one row for the dominant holder per cross-source priority (`slot > prepared > activity > replication`). |
 
 ### Performance analysis
 
@@ -331,6 +333,14 @@ Aggregates summarize ring buffer data into 5-minute windows.
 | `confl_active_logicalslot` | bigint | Logical slot conflicts (replicas) |
 | `max_catalog_oid` | bigint | Highest catalog OID |
 | `large_object_count` | bigint | Number of large objects |
+| `activity_xmin` / `activity_xmin_age` | xid / bigint | Oldest `pg_stat_activity.backend_xmin` (self- and parallel-worker-excluded) |
+| `slot_xmin` / `slot_xmin_age` | xid / bigint | Oldest `pg_replication_slots.xmin` |
+| `slot_catalog_xmin` / `slot_catalog_xmin_age` | xid / bigint | Oldest `pg_replication_slots.catalog_xmin` (logical-decoding catalog cleanup horizon) |
+| `replication_xmin` / `replication_xmin_age` | xid / bigint | Oldest `pg_stat_replication.backend_xmin` (physical walsenders only) |
+| `prepared_xmin` / `prepared_xmin_age` | xid / bigint | Oldest `pg_prepared_xacts.transaction` |
+| `xmin_data_horizon_age` | bigint | `GREATEST` of the four data-source ages |
+| `xmin_any_horizon_age` | bigint | `GREATEST(xmin_data_horizon_age, slot_catalog_xmin_age)` |
+| `xmin_horizon_detail` | jsonb | `{source, age, holder: {...}}` describing the dominant holder. `source` ∈ `activity` / `slot` / `slot_catalog` / `prepared` / `replication`. NULL when no holder. |
 
 **`pgfr_record.statement_snapshots`** -- Per-query statistics from pg_stat_statements
 
@@ -447,6 +457,9 @@ Aggregates summarize ring buffer data into 5-minute windows.
 | `write_lag` | interval | Write lag |
 | `flush_lag` | interval | Flush lag |
 | `replay_lag` | interval | Replay lag |
+| `backend_xmin` / `backend_xmin_age` | xid / bigint | Walsender's `backend_xmin` and `age()` |
+| `slot_name` | text | Slot driving this walsender (joined from `pg_replication_slots.active_pid`) |
+| `is_logical_walsender` | boolean | `true` for logical-decoding walsenders (excluded from the `replication_xmin` aggregate; the slot's own xmin is captured via `slot_xmin` / `slot_catalog_xmin` on the same snapshot row) |
 
 **`pgfr_record.vacuum_progress_snapshots`** -- Vacuum progress
 
@@ -649,6 +662,60 @@ Applies to both database-level (`XID_WRAPAROUND_RISK` / `MXID_WRAPAROUND_RISK`)
 and per-table (`TABLE_XID_WRAPAROUND_RISK` / `TABLE_MXID_WRAPAROUND_RISK`) anomalies.
 Per-table checks honor each relation's `autovacuum_freeze_max_age` /
 `autovacuum_multixact_freeze_max_age` reloption override.
+
+### xmin horizon monitoring
+
+Captures *who* is pinning the xmin horizon (long-running transactions, stale
+replication slots, hot-standby-feedback, prepared xacts) so post-hoc forensics
+isn't reduced to live-querying four catalogs after the offender has
+disconnected. See [postgres-howto on monitoring xmin horizon](https://postgres.ai/docs/postgres-howtos/performance-optimization/monitoring/how-to-monitor-xmin-horizon).
+
+Per-source ages live in typed columns on `pgfr_record.snapshots`
+(`activity_xmin_age`, `slot_xmin_age`, `slot_catalog_xmin_age`,
+`replication_xmin_age`, `prepared_xmin_age`); the dominant holder's
+source-specific details live in `xmin_horizon_detail JSONB`.
+
+Anomalies emitted by `pgfr_analyze.anomaly_report()` (in addition to the
+existing `XID_WRAPAROUND_RISK` / `MXID_WRAPAROUND_RISK`):
+
+| Anomaly | Severity | Trigger |
+|---------|----------|---------|
+| `XMIN_HORIZON_STALL` | `high` / `critical` | `xmin_data_horizon_age > xid_warning_ratio` / `xid_critical_ratio` of `autovacuum_freeze_max_age` (defaults 50% / 80%) |
+| `CATALOG_XMIN_HORIZON_STALL` | `high` / `critical` | Same thresholds applied to `slot_catalog_xmin_age` |
+
+Data and catalog fire independently — both can trigger when a logical slot
+pins `xmin` and `catalog_xmin` together. Recommendation text is sourced from
+`xmin_horizon_detail` and is source-specific: `pg_cancel_backend` first for
+active backends, `pg_terminate_backend` for idle-in-txn, `pg_stat_progress_vacuum`
+for autovacuum workers, `DROP REPLICATION SLOT` for slots, `ROLLBACK PREPARED`
+for prepared xacts. Tie-breaking when multiple sources share the oldest age:
+`slot > prepared > activity > replication`.
+
+The `xid_warning_ratio` / `xid_critical_ratio` config keys (already used by
+`XID_WRAPAROUND_RISK`) also govern these anomalies — there are no separate
+xmin-specific thresholds.
+
+One xmin-specific config key:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `xmin_capture_query_preview` | `true` | If `false`, the `query_preview` field in `xmin_horizon_detail.holder` is NULL — query text is not stored or transformed. Privacy switch for sensitive deployments. |
+
+Sample queries:
+
+```sql
+-- Who's holding the horizon right now?
+select * from pgfr_analyze.current_xmin_horizon_holder();
+
+-- Timeline of holders over the last 6 hours:
+select * from pgfr_analyze.xmin_horizon_history(now() - interval '6 hours', now());
+
+-- 24-hour horizon-age trend (data + catalog):
+select captured_at, xmin_data_horizon_age, slot_catalog_xmin_age, xmin_any_horizon_age
+from pgfr_record.snapshots
+where captured_at > now() - interval '24 hours'
+order by captured_at;
+```
 
 ### Vacuum control
 

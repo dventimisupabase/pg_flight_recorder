@@ -504,23 +504,30 @@ BEGIN
         INSERT INTO pgfr_record.replication_snapshots (
             snapshot_id, pid, client_addr, application_name, state, sync_state,
             sent_lsn, write_lsn, flush_lsn, replay_lsn,
-            write_lag, flush_lag, replay_lag
+            write_lag, flush_lag, replay_lag,
+            backend_xmin, backend_xmin_age,
+            slot_name, is_logical_walsender
         )
         SELECT
             v_snapshot_id,
-            pid,
-            client_addr,
-            application_name,
-            state,
-            sync_state,
-            sent_lsn,
-            write_lsn,
-            flush_lsn,
-            replay_lsn,
-            write_lag,
-            flush_lag,
-            replay_lag
-        FROM pg_stat_replication;
+            r.pid,
+            r.client_addr,
+            r.application_name,
+            r.state,
+            r.sync_state,
+            r.sent_lsn,
+            r.write_lsn,
+            r.flush_lsn,
+            r.replay_lsn,
+            r.write_lag,
+            r.flush_lag,
+            r.replay_lag,
+            r.backend_xmin,
+            CASE WHEN r.backend_xmin IS NOT NULL THEN age(r.backend_xmin) END,
+            s.slot_name,
+            COALESCE(s.slot_type = 'logical', false)
+        FROM pg_stat_replication r
+        LEFT JOIN pg_replication_slots s ON s.active_pid = r.pid;
         PERFORM pgfr_record._record_section_success(v_stat_id);
     EXCEPTION WHEN OTHERS THEN
         RAISE WARNING 'pgfr_record: Replication stats collection failed: %', SQLERRM;
@@ -667,6 +674,174 @@ BEGIN
                 RAISE WARNING 'pgfr_record: pg_stat_statements collection failed: %', SQLERRM;
         END;
     END IF;
+    -- Collect xmin horizon. Read each of the four sources (activity / slot /
+    -- prepared / replication), pick the oldest holder per source with a
+    -- JSONB detail blob, compute aggregate ages, and write everything to
+    -- the snapshots row in one UPDATE. See REFERENCE.md "xmin horizon
+    -- monitoring" and blueprints/XMIN_HORIZON.md.
+    BEGIN
+        PERFORM pgfr_record._set_section_timeout();
+        DECLARE
+            v_activity_xmin      XID;
+            v_activity_age       BIGINT;
+            v_activity_detail    JSONB;
+            v_slot_xmin          XID;
+            v_slot_age           BIGINT;
+            v_slot_catalog_xmin  XID;
+            v_slot_catalog_age   BIGINT;
+            v_slot_detail        JSONB;
+            v_prepared_xmin      XID;
+            v_prepared_age       BIGINT;
+            v_prepared_detail    JSONB;
+            v_replication_xmin   XID;
+            v_replication_age    BIGINT;
+            v_replication_detail JSONB;
+            v_data_age           BIGINT;
+            v_any_age            BIGINT;
+            v_dominant_source    TEXT;
+            v_dominant_detail    JSONB;
+            v_capture_query      BOOLEAN := COALESCE(pgfr_record._get_config('xmin_capture_query_preview','true')::boolean, true);
+            v_pg                 INTEGER := pgfr_record._pg_version();
+        BEGIN
+            -- ACTIVITY: oldest pg_stat_activity.backend_xmin. Self-pin and
+            -- parallel workers excluded; autovacuum workers retained (a long
+            -- vacuum on a multi-TB heap is a real horizon-holding case).
+            SELECT a.backend_xmin, age(a.backend_xmin),
+                   jsonb_build_object(
+                       'pid', a.pid,
+                       'usename', a.usename,
+                       'datname', a.datname,
+                       'application_name', a.application_name,
+                       'backend_type', a.backend_type,
+                       'state', a.state,
+                       'xact_age_seconds', extract(epoch from now() - a.xact_start)::bigint,
+                       'query_age_seconds', extract(epoch from now() - a.query_start)::bigint,
+                       'query_preview',
+                           CASE WHEN v_capture_query
+                                THEN left(regexp_replace(coalesce(a.query, ''), '[\r\n\t]+', ' ', 'g'), 1024)
+                                ELSE NULL END
+                   )
+              INTO v_activity_xmin, v_activity_age, v_activity_detail
+            FROM pg_stat_activity a
+            WHERE a.backend_xmin IS NOT NULL
+              AND a.pid <> pg_backend_pid()
+              AND a.leader_pid IS NULL
+            ORDER BY age(a.backend_xmin) DESC, a.pid ASC
+            LIMIT 1;
+
+            -- SLOT: oldest xmin AND oldest catalog_xmin captured separately
+            -- (a logical slot can pin one without the other). Detail describes
+            -- the slot contributing the dominant age.
+            SELECT s.xmin, age(s.xmin),
+                   jsonb_build_object(
+                       'slot_name', s.slot_name,
+                       'slot_type', s.slot_type,
+                       'database', s.database,
+                       'plugin', s.plugin,
+                       'active', s.active,
+                       'restart_lsn', s.restart_lsn::text,
+                       'wal_status', s.wal_status,
+                       'invalidation_reason',
+                           CASE WHEN v_pg >= 17 THEN s.invalidation_reason::text END
+                   )
+              INTO v_slot_xmin, v_slot_age, v_slot_detail
+            FROM pg_replication_slots s
+            WHERE s.xmin IS NOT NULL
+            ORDER BY age(s.xmin) DESC, s.slot_name ASC
+            LIMIT 1;
+
+            SELECT s.catalog_xmin, age(s.catalog_xmin)
+              INTO v_slot_catalog_xmin, v_slot_catalog_age
+            FROM pg_replication_slots s
+            WHERE s.catalog_xmin IS NOT NULL
+            ORDER BY age(s.catalog_xmin) DESC, s.slot_name ASC
+            LIMIT 1;
+
+            -- PREPARED: oldest prepared transaction.
+            SELECT p.transaction, age(p.transaction),
+                   jsonb_build_object(
+                       'gid', p.gid,
+                       'owner', p.owner,
+                       'database', p.database,
+                       'prepared_at', p.prepared
+                   )
+              INTO v_prepared_xmin, v_prepared_age, v_prepared_detail
+            FROM pg_prepared_xacts p
+            ORDER BY age(p.transaction) DESC, p.gid ASC
+            LIMIT 1;
+
+            -- REPLICATION: derived from the replication_snapshots rows just
+            -- written for this snapshot. Logical walsenders excluded (their
+            -- backend_xmin mirrors the slot's; routed via slot detail).
+            SELECT r.backend_xmin, r.backend_xmin_age,
+                   jsonb_build_object(
+                       'pid', r.pid,
+                       'application_name', r.application_name,
+                       'client_addr', r.client_addr::text,
+                       'sync_state', r.sync_state,
+                       'slot_name', r.slot_name
+                   )
+              INTO v_replication_xmin, v_replication_age, v_replication_detail
+            FROM pgfr_record.replication_snapshots r
+            WHERE r.snapshot_id = v_snapshot_id
+              AND r.backend_xmin IS NOT NULL
+              AND NOT r.is_logical_walsender
+            ORDER BY r.backend_xmin_age DESC, r.pid ASC
+            LIMIT 1;
+
+            -- Aggregates. GREATEST in PostgreSQL ignores NULLs and returns
+            -- NULL only when all arguments are NULL.
+            v_data_age := GREATEST(v_activity_age, v_slot_age, v_prepared_age, v_replication_age);
+            v_any_age  := GREATEST(v_data_age, v_slot_catalog_age);
+
+            -- Dominant source: priority slot > prepared > activity > replication
+            -- on tied ages; a strictly-older source of any type always wins.
+            -- slot_catalog is its own pseudo-source for catalog-only stalls.
+            v_dominant_source := CASE
+                WHEN v_slot_age IS NOT NULL AND v_slot_age = v_data_age THEN 'slot'
+                WHEN v_prepared_age IS NOT NULL AND v_prepared_age = v_data_age THEN 'prepared'
+                WHEN v_activity_age IS NOT NULL AND v_activity_age = v_data_age THEN 'activity'
+                WHEN v_replication_age IS NOT NULL AND v_replication_age = v_data_age THEN 'replication'
+                WHEN v_slot_catalog_age IS NOT NULL THEN 'slot_catalog'
+                ELSE NULL
+            END;
+            v_dominant_detail := CASE v_dominant_source
+                WHEN 'slot'         THEN v_slot_detail
+                WHEN 'prepared'     THEN v_prepared_detail
+                WHEN 'activity'     THEN v_activity_detail
+                WHEN 'replication'  THEN v_replication_detail
+                WHEN 'slot_catalog' THEN v_slot_detail
+                ELSE NULL
+            END;
+
+            UPDATE pgfr_record.snapshots
+               SET activity_xmin         = v_activity_xmin,
+                   activity_xmin_age     = v_activity_age,
+                   slot_xmin             = v_slot_xmin,
+                   slot_xmin_age         = v_slot_age,
+                   slot_catalog_xmin     = v_slot_catalog_xmin,
+                   slot_catalog_xmin_age = v_slot_catalog_age,
+                   replication_xmin      = v_replication_xmin,
+                   replication_xmin_age  = v_replication_age,
+                   prepared_xmin         = v_prepared_xmin,
+                   prepared_xmin_age     = v_prepared_age,
+                   xmin_data_horizon_age = v_data_age,
+                   xmin_any_horizon_age  = v_any_age,
+                   xmin_horizon_detail   = CASE
+                       WHEN v_dominant_source IS NULL THEN NULL
+                       ELSE jsonb_build_object(
+                           'source', v_dominant_source,
+                           'age', v_any_age,
+                           'holder', v_dominant_detail
+                       )
+                   END
+             WHERE id = v_snapshot_id;
+            PERFORM pgfr_record._record_section_success(v_stat_id);
+        END;
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'pgfr_record: xmin horizon collection failed: %', SQLERRM;
+    END;
+
     -- Collect table stats
     BEGIN
         PERFORM pgfr_record._set_section_timeout();

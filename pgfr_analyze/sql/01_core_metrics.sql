@@ -241,6 +241,126 @@ BEGIN
         recommendation := 'Check recent_locks for blocking queries; consider shorter transactions';
         RETURN NEXT;
     END IF;
+
+    -- xmin horizon anomalies. Fires when the data or catalog xmin horizon
+    -- crosses the same fraction-of-autovacuum_freeze_max_age thresholds that
+    -- XID_WRAPAROUND_RISK uses, but emitted FIRST so cause precedes the
+    -- wraparound symptom. Holder details come from snapshots.xmin_horizon_detail
+    -- (JSONB; populated by the collector). Data and catalog fire independently:
+    -- both can trigger when a logical slot pins xmin and catalog_xmin together.
+    DECLARE
+        v_xmin RECORD;
+        v_xmin_rec TEXT;
+        v_xmin_src TEXT;
+    BEGIN
+        SELECT xmin_data_horizon_age, slot_catalog_xmin_age, xmin_horizon_detail
+          INTO v_xmin
+        FROM pgfr_record.snapshots
+        WHERE captured_at BETWEEN p_start_time AND p_end_time
+          AND (xmin_data_horizon_age IS NOT NULL OR slot_catalog_xmin_age IS NOT NULL)
+        ORDER BY captured_at DESC
+        LIMIT 1;
+
+        IF v_xmin.xmin_horizon_detail IS NOT NULL THEN
+            v_xmin_src := v_xmin.xmin_horizon_detail->>'source';
+            v_xmin_rec := CASE v_xmin_src
+                WHEN 'activity' THEN
+                    CASE
+                        WHEN v_xmin.xmin_horizon_detail->'holder'->>'backend_type' = 'autovacuum worker' THEN
+                            format('long autovacuum (pid=%s) holding xmin — check pg_stat_progress_vacuum',
+                                v_xmin.xmin_horizon_detail->'holder'->>'pid')
+                        WHEN v_xmin.xmin_horizon_detail->'holder'->>'state' LIKE 'idle in transaction%' THEN
+                            format('PID %s idle in transaction for %ss (user=%s, db=%s) — pg_terminate_backend(%s); cancel does nothing on an idle backend. Prevent recurrence: set idle_in_transaction_session_timeout (or transaction_timeout on PG17+).',
+                                v_xmin.xmin_horizon_detail->'holder'->>'pid',
+                                v_xmin.xmin_horizon_detail->'holder'->>'xact_age_seconds',
+                                v_xmin.xmin_horizon_detail->'holder'->>'usename',
+                                v_xmin.xmin_horizon_detail->'holder'->>'datname',
+                                v_xmin.xmin_horizon_detail->'holder'->>'pid')
+                        WHEN v_xmin.xmin_horizon_detail->'holder'->>'state' = 'active' THEN
+                            -- Active txn pinning xmin is just as bad as idle-in-txn — autovacuum
+                            -- still can't freeze. pg_cancel_backend ends the current query (and
+                            -- the implicit txn for autocommit, releasing xmin) but if the query
+                            -- runs inside an explicit BEGIN the txn stays open and xmin will
+                            -- typically reappear; escalate to pg_terminate_backend in that case.
+                            format('PID %s active for %ss holding xmin (user=%s, db=%s, query: %s) — pg_cancel_backend(%s); escalate to pg_terminate_backend(%s) if backend_xmin reappears (txn was inside explicit BEGIN). Prevent recurrence: set statement_timeout (and transaction_timeout on PG17+).',
+                                v_xmin.xmin_horizon_detail->'holder'->>'pid',
+                                v_xmin.xmin_horizon_detail->'holder'->>'query_age_seconds',
+                                v_xmin.xmin_horizon_detail->'holder'->>'usename',
+                                v_xmin.xmin_horizon_detail->'holder'->>'datname',
+                                v_xmin.xmin_horizon_detail->'holder'->>'query_preview',
+                                v_xmin.xmin_horizon_detail->'holder'->>'pid',
+                                v_xmin.xmin_horizon_detail->'holder'->>'pid')
+                        ELSE
+                            format('PID %s holding xmin (state=%s, backend_type=%s) — investigate via pg_stat_activity; pg_terminate_backend(%s) if no other path releases backend_xmin',
+                                v_xmin.xmin_horizon_detail->'holder'->>'pid',
+                                v_xmin.xmin_horizon_detail->'holder'->>'state',
+                                v_xmin.xmin_horizon_detail->'holder'->>'backend_type',
+                                v_xmin.xmin_horizon_detail->'holder'->>'pid')
+                    END
+                WHEN 'slot' THEN
+                    format('investigate slot ''%s'' (type=%s); advance or DROP REPLICATION SLOT once subscriber state is confirmed',
+                        v_xmin.xmin_horizon_detail->'holder'->>'slot_name',
+                        v_xmin.xmin_horizon_detail->'holder'->>'slot_type')
+                WHEN 'slot_catalog' THEN
+                    format('logical slot ''%s'' pinning catalog_xmin — advance or DROP REPLICATION SLOT',
+                        v_xmin.xmin_horizon_detail->'holder'->>'slot_name')
+                WHEN 'prepared' THEN
+                    format('ROLLBACK PREPARED ''%s'' (owner=%s, database=%s, prepared_at=%s)',
+                        v_xmin.xmin_horizon_detail->'holder'->>'gid',
+                        v_xmin.xmin_horizon_detail->'holder'->>'owner',
+                        v_xmin.xmin_horizon_detail->'holder'->>'database',
+                        v_xmin.xmin_horizon_detail->'holder'->>'prepared_at')
+                WHEN 'replication' THEN
+                    -- The walsender PID is on the primary; the actual cause is a
+                    -- long-running query on the standby whose snapshot xmin is
+                    -- being shipped back via hot_standby_feedback. Standby
+                    -- workloads are usually autocommit reads, so pg_cancel_backend
+                    -- on the standby is the right first action. Don't disable
+                    -- hot_standby_feedback — that just trades xmin holdback for
+                    -- "canceling statement due to conflict with recovery" failures
+                    -- on the standby.
+                    format('standby ''%s'' (addr=%s, slot=%s) is reporting backend_xmin via hot_standby_feedback — connect to that standby, find the long-running query in its pg_stat_activity, and pg_cancel_backend it there. Do not disable hot_standby_feedback (causes recovery-conflict cancellations on the standby).',
+                        v_xmin.xmin_horizon_detail->'holder'->>'application_name',
+                        v_xmin.xmin_horizon_detail->'holder'->>'client_addr',
+                        v_xmin.xmin_horizon_detail->'holder'->>'slot_name')
+                ELSE 'see snapshots.xmin_horizon_detail'
+            END;
+        END IF;
+
+        IF v_xmin.xmin_data_horizon_age IS NOT NULL
+           AND v_xmin.xmin_data_horizon_age > v_warning_threshold THEN
+            anomaly_type := 'XMIN_HORIZON_STALL';
+            severity := CASE WHEN v_xmin.xmin_data_horizon_age > v_critical_threshold
+                             THEN 'critical' ELSE 'high' END;
+            description := 'xmin horizon stalled — autovacuum cannot freeze user-table tuples';
+            metric_value := format('xmin_data_horizon_age=%s (%s%% of autovacuum_freeze_max_age); source=%s',
+                to_char(v_xmin.xmin_data_horizon_age, 'FM999,999,999'),
+                round(v_xmin.xmin_data_horizon_age::numeric / v_freeze_max_age * 100, 1),
+                COALESCE(v_xmin_src, 'unknown'));
+            threshold := format('xmin_data_horizon_age > %s%% of autovacuum_freeze_max_age',
+                round(v_xid_warning_ratio * 100, 0));
+            recommendation := COALESCE(v_xmin_rec, 'see snapshots.xmin_horizon_detail');
+            RETURN NEXT;
+        END IF;
+
+        IF v_xmin.slot_catalog_xmin_age IS NOT NULL
+           AND v_xmin.slot_catalog_xmin_age > v_warning_threshold THEN
+            anomaly_type := 'CATALOG_XMIN_HORIZON_STALL';
+            severity := CASE WHEN v_xmin.slot_catalog_xmin_age > v_critical_threshold
+                             THEN 'critical' ELSE 'high' END;
+            description := 'logical-replication catalog cleanup stalled by replication slot catalog_xmin';
+            metric_value := format('slot_catalog_xmin_age=%s (%s%% of autovacuum_freeze_max_age)',
+                to_char(v_xmin.slot_catalog_xmin_age, 'FM999,999,999'),
+                round(v_xmin.slot_catalog_xmin_age::numeric / v_freeze_max_age * 100, 1));
+            threshold := format('slot_catalog_xmin_age > %s%% of autovacuum_freeze_max_age',
+                round(v_xid_warning_ratio * 100, 0));
+            recommendation := COALESCE(
+                CASE WHEN v_xmin_src IN ('slot','slot_catalog') THEN v_xmin_rec END,
+                'investigate logical replication slots with non-null catalog_xmin (see pg_replication_slots)');
+            RETURN NEXT;
+        END IF;
+    END;
+
     -- Database-level XID wraparound check
     SELECT datfrozenxid_age INTO v_datfrozenxid_age
     FROM pgfr_record.snapshots
@@ -831,5 +951,59 @@ LANGUAGE sql STABLE AS $$
     FROM start_snap s, end_snap e
 $$;
 COMMENT ON FUNCTION pgfr_analyze.compare(TIMESTAMPTZ, TIMESTAMPTZ) IS 'Compares database metrics between two time points, returning checkpoint, WAL, buffer, and IO activity deltas.';
+
+-- xmin horizon readers. Both read pgfr_record.snapshots.xmin_horizon_detail
+-- (JSONB) directly; no sidecar joins. The collector populates the JSONB
+-- with {source, age, holder} for the dominant holder per snapshot. See
+-- REFERENCE.md "xmin horizon monitoring".
+
+CREATE OR REPLACE FUNCTION pgfr_analyze.xmin_horizon_history(
+    p_start TIMESTAMPTZ,
+    p_end   TIMESTAMPTZ
+)
+RETURNS TABLE (
+    captured_at           TIMESTAMPTZ,
+    xmin_data_horizon_age BIGINT,
+    slot_catalog_xmin_age BIGINT,
+    xmin_any_horizon_age  BIGINT,
+    source                TEXT,
+    holder                JSONB
+)
+LANGUAGE sql STABLE AS $$
+    SELECT s.captured_at,
+           s.xmin_data_horizon_age,
+           s.slot_catalog_xmin_age,
+           s.xmin_any_horizon_age,
+           s.xmin_horizon_detail->>'source' AS source,
+           s.xmin_horizon_detail->'holder'  AS holder
+    FROM pgfr_record.snapshots s
+    WHERE s.captured_at BETWEEN p_start AND p_end
+      AND (s.xmin_data_horizon_age IS NOT NULL OR s.slot_catalog_xmin_age IS NOT NULL)
+    ORDER BY s.captured_at DESC;
+$$;
+COMMENT ON FUNCTION pgfr_analyze.xmin_horizon_history(TIMESTAMPTZ, TIMESTAMPTZ) IS
+'Timeline of xmin horizon ages and dominant-holder JSONB detail across snapshots in a window.';
+
+CREATE OR REPLACE FUNCTION pgfr_analyze.current_xmin_horizon_holder()
+RETURNS TABLE (
+    captured_at           TIMESTAMPTZ,
+    xmin_data_horizon_age BIGINT,
+    slot_catalog_xmin_age BIGINT,
+    source                TEXT,
+    holder                JSONB
+)
+LANGUAGE sql STABLE AS $$
+    SELECT s.captured_at,
+           s.xmin_data_horizon_age,
+           s.slot_catalog_xmin_age,
+           s.xmin_horizon_detail->>'source' AS source,
+           s.xmin_horizon_detail->'holder'  AS holder
+    FROM pgfr_record.snapshots s
+    WHERE s.xmin_horizon_detail IS NOT NULL
+    ORDER BY s.captured_at DESC
+    LIMIT 1;
+$$;
+COMMENT ON FUNCTION pgfr_analyze.current_xmin_horizon_holder() IS
+'Quick-answer reader: zero rows on a healthy cluster, otherwise one row for the dominant xmin holder at the latest snapshot.';
 
 -- Retrieves recent wait event samples from the flight recorder ring buffer

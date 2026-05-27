@@ -9,7 +9,8 @@
 --
 -- Files:
 --   01_core_metrics.sql           schema, modification_rate, hot_update_ratio,
---                                 anomaly_report, summary_report, compare
+--                                 anomaly_report, summary_report, compare,
+--                                 xmin_horizon_history, current_xmin_horizon_holder
 --   02_ring_readers.sql           recent_waits_current, recent_activity_current,
 --                                 recent_locks_current, wait_summary, statement_compare
 --   03_activity_storms_regressions.sql  activity_at, detect_query_storms,

@@ -11,6 +11,7 @@ pgfr_record installs a set of tables, views, and pg_cron jobs that continuously 
 - **Continuous background sampling** via pg_cron -- no external agents or sidecars
 - **Ring buffers** (UNLOGGED) for real-time wait events, active sessions, and lock contention
 - **Durable snapshots** every minute: WAL, checkpoints, I/O, tables, indexes, statements, replication, configuration
+- **xmin horizon attribution**: captures who is pinning the xmin horizon (long-running txns, stale replication slots, hot-standby-feedback, prepared xacts) so wraparound forensics isn't reduced to live-querying four catalogs after the offender has disconnected
 - **Aggregates and archives** for longer retention (7 days for archives, 30 days for snapshots)
 - **Safety mechanisms**: circuit breaker, load shedding
 - **Collection modes**: normal, light, emergency, kill

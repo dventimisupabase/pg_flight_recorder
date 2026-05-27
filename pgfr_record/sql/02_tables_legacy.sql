@@ -192,6 +192,40 @@ BEGIN
     END IF;
 END $$;
 
+-- Add xmin horizon monitoring columns to snapshots (additive-only upgrade).
+-- Five typed source xmins (activity / slot / slot_catalog / replication / prepared)
+-- with per-source ages, two aggregate ages, and one JSONB column with the
+-- dominant holder's source-specific details. See REFERENCE.md "xmin horizon
+-- monitoring" and blueprints/XMIN_HORIZON.md.
+DO $$
+BEGIN
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS activity_xmin XID;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS activity_xmin_age BIGINT;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS slot_xmin XID;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS slot_xmin_age BIGINT;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS slot_catalog_xmin XID;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS slot_catalog_xmin_age BIGINT;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS replication_xmin XID;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS replication_xmin_age BIGINT;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS prepared_xmin XID;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS prepared_xmin_age BIGINT;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS xmin_data_horizon_age BIGINT;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS xmin_any_horizon_age BIGINT;
+    ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS xmin_horizon_detail JSONB;
+END $$;
+
+-- Add xmin / walsender columns to replication_snapshots.
+-- backend_xmin tracks per-walsender xmin holdback; slot_name joins from
+-- pg_replication_slots.active_pid; is_logical_walsender is COALESCE-wrapped
+-- by the collector so it's genuinely binary, never three-valued.
+DO $$
+BEGIN
+    ALTER TABLE pgfr_record.replication_snapshots ADD COLUMN IF NOT EXISTS backend_xmin XID;
+    ALTER TABLE pgfr_record.replication_snapshots ADD COLUMN IF NOT EXISTS backend_xmin_age BIGINT;
+    ALTER TABLE pgfr_record.replication_snapshots ADD COLUMN IF NOT EXISTS slot_name TEXT;
+    ALTER TABLE pgfr_record.replication_snapshots ADD COLUMN IF NOT EXISTS is_logical_walsender BOOLEAN NOT NULL DEFAULT false;
+END $$;
+
 CREATE UNLOGGED TABLE IF NOT EXISTS pgfr_record.samples_ring (
     slot_id             INTEGER PRIMARY KEY CHECK (slot_id >= 0 AND slot_id < 2880),
     captured_at         TIMESTAMPTZ NOT NULL,
