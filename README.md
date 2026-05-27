@@ -84,8 +84,8 @@ SELECT * FROM pgfr_analyze.what_happened_at('2024-01-15 14:32');
 
 -- Reconstruct an incident timeline
 SELECT * FROM pgfr_analyze.incident_timeline(
-    '2024-01-15 14:00'::timestamptz,
-    '2024-01-15 15:00'::timestamptz
+    '2024-01-15 14:00',
+    '2024-01-15 15:00'
 );
 
 -- Return to normal after incident
