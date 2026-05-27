@@ -1,5 +1,9 @@
 # Project Guidelines
 
+## Git Workflow
+
+Branches follow [Conventional Branches](https://conventional-branch.github.io/): `<type>/<short-description>`, where `<type>` matches Conventional Commits (`feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `perf`, `build`, `ci`, `style`, `revert`) and the description is kebab-case (e.g., `docs/improvements`, `feat/wraparound-monitoring`).
+
 ## Project Structure
 
 Two extensions, each in its own subdirectory:
