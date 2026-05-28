@@ -121,7 +121,7 @@ LANGUAGE sql STABLE AS $$
             WHEN mxid_age(c.relminmxid) > 200000000 THEN 'CRITICAL: MultiXID wraparound risk'
             WHEN age(c.relfrozenxid) > 100000000 THEN 'WARNING: High XID age'
             WHEN mxid_age(c.relminmxid) > 100000000 THEN 'WARNING: High MultiXID age'
-            WHEN c.relname = 'samples_ring' AND s.n_tup_upd > 100 AND (100.0 * s.n_tup_hot_upd / NULLIF(s.n_tup_upd, 0)) < 50 THEN 'WARNING: Low HOT update ratio'
+            WHEN c.relname = 'samples_ring_legacy' AND s.n_tup_upd > 100 AND (100.0 * s.n_tup_hot_upd / NULLIF(s.n_tup_upd, 0)) < 50 THEN 'WARNING: Low HOT update ratio'
             WHEN s.n_dead_tup > (50 + (0.2 * s.n_live_tup)::bigint) THEN 'INFO: Autovacuum pending'
             ELSE 'OK'
         END::text
@@ -130,7 +130,7 @@ LANGUAGE sql STABLE AS $$
     LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
     WHERE n.nspname = 'pgfr_record'
       AND c.relkind = 'r'
-      AND c.relname IN ('samples_ring', 'wait_samples_ring', 'activity_samples_ring', 'lock_samples_ring')
+      AND c.relname IN ('samples_ring_legacy', 'wait_samples_ring_legacy', 'activity_samples_ring_legacy', 'lock_samples_ring_legacy')
     ORDER BY c.relname;
 $$;
 COMMENT ON FUNCTION pgfr_record.ring_buffer_health() IS
@@ -220,10 +220,10 @@ LANGUAGE plpgsql AS $$
 DECLARE
     v_status TEXT;
 BEGIN
-    EXECUTE format('ALTER TABLE pgfr_record.samples_ring SET (autovacuum_enabled = %L)', p_enabled);
-    EXECUTE format('ALTER TABLE pgfr_record.wait_samples_ring SET (autovacuum_enabled = %L)', p_enabled);
-    EXECUTE format('ALTER TABLE pgfr_record.activity_samples_ring SET (autovacuum_enabled = %L)', p_enabled);
-    EXECUTE format('ALTER TABLE pgfr_record.lock_samples_ring SET (autovacuum_enabled = %L)', p_enabled);
+    EXECUTE format('ALTER TABLE pgfr_record.samples_ring_legacy SET (autovacuum_enabled = %L)', p_enabled);
+    EXECUTE format('ALTER TABLE pgfr_record.wait_samples_ring_legacy SET (autovacuum_enabled = %L)', p_enabled);
+    EXECUTE format('ALTER TABLE pgfr_record.activity_samples_ring_legacy SET (autovacuum_enabled = %L)', p_enabled);
+    EXECUTE format('ALTER TABLE pgfr_record.lock_samples_ring_legacy SET (autovacuum_enabled = %L)', p_enabled);
 
     IF p_enabled THEN
         v_status := 'Autovacuum ENABLED on ring buffer tables. Autovacuum will periodically collapse HOT chains.';
@@ -257,7 +257,7 @@ BEGIN
     END IF;
 
     -- Get current slot count
-    SELECT COUNT(*) INTO v_current_slots FROM pgfr_record.samples_ring;
+    SELECT COUNT(*) INTO v_current_slots FROM pgfr_record.samples_ring_legacy;
 
     -- Check if resize is needed
     IF v_current_slots = v_target_slots THEN
@@ -267,7 +267,7 @@ BEGIN
     -- Preserve autovacuum setting
     SELECT COALESCE(
         (SELECT reloptions::text LIKE '%autovacuum_enabled=false%'
-         FROM pg_class WHERE relname = 'samples_ring' AND relnamespace = 'pgfr_record'::regnamespace),
+         FROM pg_class WHERE relname = 'samples_ring_legacy' AND relnamespace = 'pgfr_record'::regnamespace),
         false
     ) INTO v_autovacuum_enabled;
     v_autovacuum_enabled := NOT v_autovacuum_enabled;  -- Invert because we checked for false
@@ -275,10 +275,10 @@ BEGIN
     RAISE NOTICE 'Rebuilding ring buffers from % to % slots...', v_current_slots, v_target_slots;
 
     -- TRUNCATE CASCADE clears all child tables via FK
-    TRUNCATE pgfr_record.samples_ring CASCADE;
+    TRUNCATE pgfr_record.samples_ring_legacy CASCADE;
 
     -- Rebuild samples_ring
-    INSERT INTO pgfr_record.samples_ring (slot_id, captured_at, epoch_seconds)
+    INSERT INTO pgfr_record.samples_ring_legacy (slot_id, captured_at, epoch_seconds)
     SELECT
         generate_series AS slot_id,
         '1970-01-01'::timestamptz,
@@ -286,19 +286,19 @@ BEGIN
     FROM generate_series(0, v_target_slots - 1);
 
     -- Rebuild wait_samples_ring
-    INSERT INTO pgfr_record.wait_samples_ring (slot_id, row_num)
+    INSERT INTO pgfr_record.wait_samples_ring_legacy (slot_id, row_num)
     SELECT s.slot_id, r.row_num
     FROM generate_series(0, v_target_slots - 1) s(slot_id)
     CROSS JOIN generate_series(0, 99) r(row_num);
 
     -- Rebuild activity_samples_ring
-    INSERT INTO pgfr_record.activity_samples_ring (slot_id, row_num)
+    INSERT INTO pgfr_record.activity_samples_ring_legacy (slot_id, row_num)
     SELECT s.slot_id, r.row_num
     FROM generate_series(0, v_target_slots - 1) s(slot_id)
     CROSS JOIN generate_series(0, 24) r(row_num);
 
     -- Rebuild lock_samples_ring
-    INSERT INTO pgfr_record.lock_samples_ring (slot_id, row_num)
+    INSERT INTO pgfr_record.lock_samples_ring_legacy (slot_id, row_num)
     SELECT s.slot_id, r.row_num
     FROM generate_series(0, v_target_slots - 1) s(slot_id)
     CROSS JOIN generate_series(0, 99) r(row_num);
@@ -551,7 +551,11 @@ BEGIN
             WHEN v_recent_trips >= 3 THEN 'System under stress - consider emergency mode'
             ELSE NULL
         END::text;
-    SELECT max(captured_at) INTO v_last_sample FROM pgfr_record.samples_ring;
+    -- Last sample comes from the v2 wait_samples partitioned tables; the
+    -- sample_ts is an int4 offset from pgfr_record.epoch().
+    SELECT pgfr_record.epoch() + max(sample_ts) * interval '1 second'
+      INTO v_last_sample
+      FROM pgfr_record.wait_samples;
     SELECT max(captured_at) INTO v_last_snapshot FROM pgfr_record.snapshots;
     RETURN QUERY SELECT
         'Sample Collection'::text,
@@ -587,7 +591,8 @@ BEGIN
             THEN 'Check pg_cron jobs'
             ELSE NULL
         END::text;
-    SELECT count(*) INTO v_sample_count FROM pgfr_record.samples_ring;
+    -- Sample volume from v2 wait_samples (one row per active wait group per tick).
+    SELECT count(*) INTO v_sample_count FROM pgfr_record.wait_samples;
     SELECT count(*) INTO v_snapshot_count FROM pgfr_record.snapshots;
     RETURN QUERY SELECT
         'Data Volume'::text,
@@ -776,7 +781,7 @@ DECLARE
 BEGIN
     v_mode := pgfr_record._get_config('mode', 'normal');
     SELECT schema_size_mb INTO v_schema_size_mb FROM pgfr_record._check_schema_size();
-    SELECT count(*) INTO v_sample_count FROM pgfr_record.samples_ring;
+    SELECT count(*) INTO v_sample_count FROM pgfr_record.samples_ring_legacy;
     SELECT count(*) INTO v_snapshot_count FROM pgfr_record.snapshots;
     SELECT avg(duration_ms) INTO v_avg_sample_ms
     FROM pgfr_record.collection_stats

@@ -17,25 +17,25 @@ SELECT plan(79);
 
 -- Test slot_id = 119 (should succeed - max valid)
 SELECT lives_ok(
-    $$UPDATE pgfr_record.samples_ring SET captured_at = now() WHERE slot_id = 119$$,
+    $$UPDATE pgfr_record.samples_ring_legacy SET captured_at = now() WHERE slot_id = 119$$,
     'Boundary: slot_id = 119 should be valid (max slot)'
 );
 
 -- Test slot_id = 0 (should succeed - min valid)
 SELECT lives_ok(
-    $$UPDATE pgfr_record.samples_ring SET captured_at = now() WHERE slot_id = 0$$,
+    $$UPDATE pgfr_record.samples_ring_legacy SET captured_at = now() WHERE slot_id = 0$$,
     'Boundary: slot_id = 0 should be valid (min slot)'
 );
 
 -- Test slot_id wraparound (verify both 0 and 119 exist)
 SELECT ok(
-    (SELECT count(*) FROM pgfr_record.samples_ring WHERE slot_id IN (0, 119)) = 2,
+    (SELECT count(*) FROM pgfr_record.samples_ring_legacy WHERE slot_id IN (0, 119)) = 2,
     'Boundary: Slots 0 and 119 should both exist for wraparound'
 );
 
 -- Test all 120 slots exist
 SELECT is(
-    (SELECT count(DISTINCT slot_id) FROM pgfr_record.samples_ring),
+    (SELECT count(DISTINCT slot_id) FROM pgfr_record.samples_ring_legacy),
     120::bigint,
     'Boundary: Exactly 120 unique slots should exist (0-119)'
 );
@@ -44,61 +44,61 @@ SELECT is(
 
 -- Wait samples: row_num = 99 (should succeed - max valid)
 SELECT lives_ok(
-    $$UPDATE pgfr_record.wait_samples_ring
+    $$UPDATE pgfr_record.wait_samples_ring_legacy
       SET backend_type = 'test' WHERE slot_id = 0 AND row_num = 99$$,
     'Boundary: wait_samples row_num = 99 should be valid (max row)'
 );
 
 -- Wait samples: row_num = 0 (should succeed - min valid)
 SELECT lives_ok(
-    $$UPDATE pgfr_record.wait_samples_ring
+    $$UPDATE pgfr_record.wait_samples_ring_legacy
       SET backend_type = 'test' WHERE slot_id = 0 AND row_num = 0$$,
     'Boundary: wait_samples row_num = 0 should be valid (min row)'
 );
 
 -- Activity samples: row_num = 24 (should succeed - max valid)
 SELECT lives_ok(
-    $$UPDATE pgfr_record.activity_samples_ring
+    $$UPDATE pgfr_record.activity_samples_ring_legacy
       SET pid = 9999 WHERE slot_id = 0 AND row_num = 24$$,
     'Boundary: activity_samples row_num = 24 should be valid (max row)'
 );
 
 -- Activity samples: row_num = 0 (should succeed - min valid)
 SELECT lives_ok(
-    $$UPDATE pgfr_record.activity_samples_ring
+    $$UPDATE pgfr_record.activity_samples_ring_legacy
       SET pid = 9999 WHERE slot_id = 0 AND row_num = 0$$,
     'Boundary: activity_samples row_num = 0 should be valid (min row)'
 );
 
 -- Lock samples: row_num = 99 (should succeed - max valid)
 SELECT lives_ok(
-    $$UPDATE pgfr_record.lock_samples_ring
+    $$UPDATE pgfr_record.lock_samples_ring_legacy
       SET blocked_pid = 9999 WHERE slot_id = 0 AND row_num = 99$$,
     'Boundary: lock_samples row_num = 99 should be valid (max row)'
 );
 
 -- Lock samples: row_num = 0 (should succeed - min valid)
 SELECT lives_ok(
-    $$UPDATE pgfr_record.lock_samples_ring
+    $$UPDATE pgfr_record.lock_samples_ring_legacy
       SET blocked_pid = 9999 WHERE slot_id = 0 AND row_num = 0$$,
     'Boundary: lock_samples row_num = 0 should be valid (min row)'
 );
 
 -- Verify pre-population counts
 SELECT is(
-    (SELECT count(*) FROM pgfr_record.wait_samples_ring),
+    (SELECT count(*) FROM pgfr_record.wait_samples_ring_legacy),
     12000::bigint,
     'Boundary: wait_samples_ring should have 12,000 pre-populated rows (120 slots x 100 rows)'
 );
 
 SELECT is(
-    (SELECT count(*) FROM pgfr_record.activity_samples_ring),
+    (SELECT count(*) FROM pgfr_record.activity_samples_ring_legacy),
     3000::bigint,
     'Boundary: activity_samples_ring should have 3,000 pre-populated rows (120 slots x 25 rows)'
 );
 
 SELECT is(
-    (SELECT count(*) FROM pgfr_record.lock_samples_ring),
+    (SELECT count(*) FROM pgfr_record.lock_samples_ring_legacy),
     12000::bigint,
     'Boundary: lock_samples_ring should have 12,000 pre-populated rows (120 slots x 100 rows)'
 );
@@ -258,7 +258,7 @@ DECLARE
     v_end timestamptz;
 BEGIN
     SELECT min(captured_at), min(captured_at) INTO v_start, v_end
-    FROM pgfr_record.samples_ring WHERE captured_at IS NOT NULL;
+    FROM pgfr_record.samples_ring_legacy WHERE captured_at IS NOT NULL;
 
     IF v_start IS NOT NULL THEN
         PERFORM * FROM pgfr_analyze.wait_summary(v_start, v_end);
@@ -274,7 +274,7 @@ DECLARE
     v_end timestamptz;
 BEGIN
     SELECT max(captured_at), min(captured_at) INTO v_start, v_end
-    FROM pgfr_record.samples_ring WHERE captured_at IS NOT NULL;
+    FROM pgfr_record.samples_ring_legacy WHERE captured_at IS NOT NULL;
 
     IF v_start IS NOT NULL AND v_end IS NOT NULL THEN
         PERFORM * FROM pgfr_analyze.wait_summary(v_start, v_end);
@@ -521,7 +521,7 @@ SELECT ok(
 
 -- Test pre-collection checks don't prevent sample()
 SELECT lives_ok(
-    $$SELECT pgfr_record.sample()$$,
+    $$SELECT pgfr_record.sample_ring()$$,
     'Pre-Collection: sample() should succeed even with pre-collection checks enabled'
 );
 
@@ -533,7 +533,7 @@ SELECT ok(
 
 -- Test pre-collection checks are actually called during sample()
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 SELECT ok(
@@ -710,7 +710,7 @@ SELECT lives_ok(
 
 -- Test views during sample() execution
 SELECT lives_ok(
-    $$SELECT pgfr_record.sample()$$,
+    $$SELECT pgfr_record.sample_ring()$$,
     'Real-Time: sample() should not conflict with real-time views'
 );
 

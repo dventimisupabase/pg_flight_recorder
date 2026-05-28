@@ -27,39 +27,16 @@ RETURNS TABLE(
 )
 LANGUAGE sql STABLE AS $$
     WITH
-    -- find nearest sample_ts from v2 ring (or fallback to legacy slot)
-    nearest_ts AS (
-        select captured_at, offset_secs, null::integer as slot_id, sample_ts
-        from (
-            -- v2: activity_samples
-            select pgfr_record.epoch() + sample_ts * interval '1 second' as captured_at,
-                   abs(extract(epoch from (
-                       pgfr_record.epoch() + sample_ts * interval '1 second' - p_timestamp
-                   ))) as offset_secs,
-                   sample_ts
-            from pgfr_record.activity_samples
-            order by offset_secs
-            limit 1
-        ) v2
-        union all
-        select captured_at, offset_secs, slot_id, null::int4 as sample_ts
-        from (
-            -- legacy ring
-            select slot_id, captured_at,
-                   abs(extract(epoch from (captured_at - p_timestamp))) as offset_secs
-            from pgfr_record.samples_ring
-            order by offset_secs
-            limit 1
-        ) leg
-        order by offset_secs
-        limit 1
-    ),
+    -- find nearest sample_ts from v2 ring (legacy fallback retired)
     nearest_sample AS (
-        select captured_at,
-               offset_secs,
-               slot_id,
-               extract(epoch from captured_at - pgfr_record.epoch())::int4 as sample_ts
-        from nearest_ts
+        SELECT pgfr_record.epoch() + sample_ts * interval '1 second' AS captured_at,
+               abs(extract(epoch FROM (
+                   pgfr_record.epoch() + sample_ts * interval '1 second' - p_timestamp
+               ))) AS offset_secs,
+               sample_ts
+        FROM pgfr_record.activity_samples
+        ORDER BY offset_secs
+        LIMIT 1
     ),
     nearest_snapshot AS (
         SELECT s.id, s.captured_at, s.autovacuum_workers,
@@ -73,29 +50,22 @@ LANGUAGE sql STABLE AS $$
         LIMIT 1
     ),
     sample_waits AS (
-        -- v2: decode wait_samples integer array
         SELECT wem.type || ':' || wem.event AS wait_event,
                abs(ws.data[i + 1]) AS count
         FROM pgfr_record.wait_samples ws
-        cross join nearest_sample ns
-        cross join generate_subscripts(ws.data, 1) AS i
-        join pgfr_record.wait_event_map wem ON wem.id = abs(ws.data[i])::smallint
+        CROSS JOIN nearest_sample ns
+        CROSS JOIN generate_subscripts(ws.data, 1) AS i
+        JOIN pgfr_record.wait_event_map wem ON wem.id = abs(ws.data[i])::smallint
         WHERE ws.data[i] < 0
           AND ws.sample_ts = ns.sample_ts
           AND wem.state NOT IN ('idle', 'idle in transaction')
-        UNION ALL
-        -- legacy ring
-        SELECT w.wait_event_type || ':' || w.wait_event AS wait_event, w.count
-        FROM pgfr_record.wait_samples_ring w
-        JOIN nearest_sample ns ON ns.slot_id = w.slot_id
-        WHERE w.state NOT IN ('idle', 'idle in transaction')
     ),
     wait_ranked AS (
-        select wait_event, sum(count) as count
-        from sample_waits
-        group by wait_event
-        order by count desc
-        limit 3
+        SELECT wait_event, sum(count) AS count
+        FROM sample_waits
+        GROUP BY wait_event
+        ORDER BY count DESC
+        LIMIT 3
     ),
     wait_array AS (
         SELECT array_agg(wait_event ORDER BY count DESC) AS events,
@@ -104,37 +74,18 @@ LANGUAGE sql STABLE AS $$
     ),
     sample_activity AS (
         SELECT
-            count(*) FILTER (WHERE state = 'active') AS active_sessions,
-            count(*) FILTER (WHERE wait_event IS NOT NULL) AS waiting_sessions,
-            count(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_transaction
-        FROM (
-            -- v2
-            SELECT a.state, a.wait_event
-            FROM pgfr_record.activity_samples a
-            JOIN nearest_sample ns ON a.sample_ts = ns.sample_ts
-            UNION ALL
-            -- legacy
-            SELECT a.state, a.wait_event
-            FROM pgfr_record.activity_samples_ring a
-            JOIN nearest_sample ns ON ns.slot_id = a.slot_id
-        ) combined
+            count(*) FILTER (WHERE a.state = 'active') AS active_sessions,
+            count(*) FILTER (WHERE a.wait_event IS NOT NULL) AS waiting_sessions,
+            count(*) FILTER (WHERE a.state = 'idle in transaction') AS idle_in_transaction
+        FROM pgfr_record.activity_samples a
+        JOIN nearest_sample ns ON a.sample_ts = ns.sample_ts
     ),
     sample_locks AS (
         SELECT
-            count(DISTINCT blocked_pid) AS blocked_pids,
-            max(blocked_duration) AS longest_blocked
-        FROM (
-            -- v2
-            SELECT ls.blocked_pid,
-                   ls.blocked_duration_s * interval '1 second' AS blocked_duration
-            FROM pgfr_record.lock_samples ls
-            JOIN nearest_sample ns ON ls.sample_ts = ns.sample_ts
-            UNION ALL
-            -- legacy
-            SELECT l.blocked_pid, l.blocked_duration
-            FROM pgfr_record.lock_samples_ring l
-            JOIN nearest_sample ns ON ns.slot_id = l.slot_id
-        ) combined
+            count(DISTINCT ls.blocked_pid) AS blocked_pids,
+            max(ls.blocked_duration_s * interval '1 second') AS longest_blocked
+        FROM pgfr_record.lock_samples ls
+        JOIN nearest_sample ns ON ls.sample_ts = ns.sample_ts
     ),
     sample_progress AS (
         SELECT 0 AS vacuums, 0 AS copies, 0 AS indexes, 0 AS analyzes

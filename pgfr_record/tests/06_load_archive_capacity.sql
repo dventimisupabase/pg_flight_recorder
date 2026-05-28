@@ -23,7 +23,7 @@ UPDATE pgfr_record.config SET value = 'false' WHERE key = 'load_shedding_enabled
 DELETE FROM pgfr_record.collection_stats;
 
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 SELECT ok(
@@ -39,7 +39,7 @@ UPDATE pgfr_record.config SET value = '0' WHERE key = 'load_shedding_active_pct'
 DELETE FROM pgfr_record.collection_stats;
 
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 -- Check if collection was attempted and skipped (if active connections > 0%)
@@ -60,7 +60,7 @@ UPDATE pgfr_record.config SET value = '100' WHERE key = 'load_shedding_active_pc
 DELETE FROM pgfr_record.collection_stats;
 
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 -- With 100% threshold, load shedding should not trigger (unless exactly at 100% connections)
@@ -77,7 +77,7 @@ UPDATE pgfr_record.config SET value = '0' WHERE key = 'load_shedding_active_pct'
 DELETE FROM pgfr_record.collection_stats;
 
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 SELECT ok(
@@ -116,7 +116,7 @@ DELETE FROM pgfr_record.collection_stats;
 
 -- First sample should skip
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 -- Change to normal threshold
@@ -124,7 +124,7 @@ UPDATE pgfr_record.config SET value = '70' WHERE key = 'load_shedding_active_pct
 
 -- Second sample should succeed
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 SELECT ok(
@@ -137,7 +137,7 @@ UPDATE pgfr_record.config SET value = '0' WHERE key = 'load_shedding_active_pct'
 DELETE FROM pgfr_record.collection_stats;
 
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 SELECT ok(
@@ -155,7 +155,7 @@ DELETE FROM pgfr_record.collection_stats;
 
 -- Should use 60% threshold from profile
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 SELECT ok(
@@ -172,9 +172,9 @@ DELETE FROM pgfr_record.collection_stats;
 
 -- Generate 3 skipped collections
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
-    PERFORM pgfr_record.sample();
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
+    PERFORM pgfr_record.sample_ring();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 SELECT ok(
@@ -194,7 +194,7 @@ UPDATE pgfr_record.config SET value = 'false' WHERE key = 'circuit_breaker_enabl
 DELETE FROM pgfr_record.collection_stats;
 
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 SELECT ok(
@@ -366,7 +366,7 @@ SELECT lives_ok(
 
 -- Test 4: Archive captures data after sample collection
 -- First, capture some samples
-SELECT pgfr_record.sample();
+SELECT pgfr_record.sample_ring();
 
 -- Manually call archive (normally scheduled via cron)
 SELECT pgfr_record.archive_ring_samples();

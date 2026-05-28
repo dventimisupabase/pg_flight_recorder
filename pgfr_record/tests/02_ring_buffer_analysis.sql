@@ -15,17 +15,17 @@ SELECT plan(25);
 
 -- Test ring buffer slot initialization (120 slots, 0-119)
 SELECT ok(
-    (SELECT count(*) FROM pgfr_record.samples_ring) = 120,
+    (SELECT count(*) FROM pgfr_record.samples_ring_legacy) = 120,
     'Ring buffer should have exactly 120 slots initialized'
 );
 
 SELECT ok(
-    (SELECT min(slot_id) FROM pgfr_record.samples_ring) = 0,
+    (SELECT min(slot_id) FROM pgfr_record.samples_ring_legacy) = 0,
     'Ring buffer min slot_id should be 0'
 );
 
 SELECT ok(
-    (SELECT max(slot_id) FROM pgfr_record.samples_ring) = 119,
+    (SELECT max(slot_id) FROM pgfr_record.samples_ring_legacy) = 119,
     'Ring buffer max slot_id should be 119'
 );
 
@@ -36,9 +36,9 @@ SELECT lives_ok(
 );
 
 -- Capture multiple samples to ensure we have data to aggregate
-SELECT pgfr_record.sample();
-SELECT pgfr_record.sample();
-SELECT pgfr_record.sample();
+SELECT pgfr_record.sample_ring();
+SELECT pgfr_record.sample_ring();
+SELECT pgfr_record.sample_ring();
 
 -- Flush again to ensure aggregates are created
 SELECT pgfr_record.flush_ring_to_aggregates();
@@ -94,7 +94,7 @@ SELECT ok(
 -- Capture a second snapshot and sample for time-based queries
 SELECT pg_sleep(0.1);
 SELECT pgfr_record.snapshot();
-SELECT pgfr_record.sample();
+SELECT pgfr_record.sample_ring();
 
 -- Get time range for queries
 DO $$
@@ -102,8 +102,8 @@ DECLARE
     v_start_time TIMESTAMPTZ;
     v_end_time TIMESTAMPTZ;
 BEGIN
-    SELECT min(captured_at) INTO v_start_time FROM pgfr_record.samples_ring;
-    SELECT max(captured_at) INTO v_end_time FROM pgfr_record.samples_ring;
+    SELECT min(captured_at) INTO v_start_time FROM pgfr_record.samples_ring_legacy;
+    SELECT max(captured_at) INTO v_end_time FROM pgfr_record.samples_ring_legacy;
 
     -- Store for later tests
     CREATE TEMP TABLE test_times (start_time TIMESTAMPTZ, end_time TIMESTAMPTZ);

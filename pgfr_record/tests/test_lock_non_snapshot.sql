@@ -20,7 +20,7 @@ select plan(3);
 INSERT INTO pgfr_record.config (key, value, updated_at) VALUES ('snapshot_based_collection', 'false', now()) ON CONFLICT (key) DO UPDATE SET value = 'false', updated_at = now();
 
 select lives_ok(
-    $$SELECT pgfr_record.sample()$$,
+    $$SELECT pgfr_record.sample_ring()$$,
     'sample() executes without error when snapshot_based_collection = false'
 );
 
@@ -35,7 +35,7 @@ declare
     v_ts timestamptz;
     v_stat record;
 begin
-    v_ts := pgfr_record.sample();
+    v_ts := pgfr_record.sample_ring();
 
     -- Get the most recent collection_stats entry
     select sections_total, sections_succeeded, success, error_message
@@ -70,7 +70,7 @@ declare
     v_ts timestamptz;
     v_stat record;
 begin
-    v_ts := pgfr_record.sample();
+    v_ts := pgfr_record.sample_ring();
 
     select sections_total, sections_succeeded
     into v_stat

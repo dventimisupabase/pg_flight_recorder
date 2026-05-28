@@ -74,7 +74,7 @@ SELECT ok(
 
 -- Test collection stats are recorded for sample()
 SELECT lives_ok(
-    $$SELECT pgfr_record.sample()$$,
+    $$SELECT pgfr_record.sample_ring()$$,
     'P0 Safety: sample() with stats tracking should execute without error'
 );
 

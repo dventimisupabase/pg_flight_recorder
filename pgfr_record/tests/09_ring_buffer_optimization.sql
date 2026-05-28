@@ -174,14 +174,14 @@ SELECT ok(
 
 -- Test samples_ring has correct row count (120)
 SELECT is(
-    (SELECT count(*) FROM pgfr_record.samples_ring),
+    (SELECT count(*) FROM pgfr_record.samples_ring_legacy),
     120::bigint,
     'samples_ring should have 120 rows'
 );
 
 -- Test wait_samples_ring has correct row count (120 * 100)
 SELECT is(
-    (SELECT count(*) FROM pgfr_record.wait_samples_ring),
+    (SELECT count(*) FROM pgfr_record.wait_samples_ring_legacy),
     12000::bigint,
     'wait_samples_ring should have 12000 rows (120 slots x 100 rows)'
 );
@@ -194,7 +194,7 @@ SELECT ok(
 
 -- Verify resize worked
 SELECT is(
-    (SELECT count(*) FROM pgfr_record.samples_ring),
+    (SELECT count(*) FROM pgfr_record.samples_ring_legacy),
     72::bigint,
     'samples_ring should have 72 rows after rebuild'
 );
@@ -215,14 +215,14 @@ SELECT throws_ok(
 
 -- Test sample() works with default slots
 SELECT lives_ok(
-    $$SELECT pgfr_record.sample()$$,
+    $$SELECT pgfr_record.sample_ring()$$,
     'sample() should work with default 120 slots'
 );
 
 -- Test that sample() populates ring buffer
 SELECT ok(
     EXISTS (
-        SELECT 1 FROM pgfr_record.samples_ring
+        SELECT 1 FROM pgfr_record.samples_ring_legacy
         WHERE epoch_seconds > 0
     ),
     'sample() should populate ring buffer with current epoch'
@@ -231,7 +231,7 @@ SELECT ok(
 -- Test sample() respects slot range
 SELECT ok(
     NOT EXISTS (
-        SELECT 1 FROM pgfr_record.samples_ring
+        SELECT 1 FROM pgfr_record.samples_ring_legacy
         WHERE slot_id >= pgfr_record._get_ring_buffer_slots()
           AND epoch_seconds > 0
     ),

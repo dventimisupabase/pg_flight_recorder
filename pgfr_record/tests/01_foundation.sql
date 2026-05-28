@@ -21,10 +21,10 @@ SELECT has_table('pgfr_record', 'snapshots', 'Table pgfr_record.snapshots should
 SELECT has_table('pgfr_record', 'replication_snapshots', 'Table pgfr_record.replication_snapshots should exist');
 SELECT has_table('pgfr_record', 'statement_snapshots', 'Table pgfr_record.statement_snapshots should exist');
 -- Ring buffers (UNLOGGED)
-SELECT has_table('pgfr_record', 'samples_ring', 'Ring buffer: Table pgfr_record.samples_ring should exist');
-SELECT has_table('pgfr_record', 'wait_samples_ring', 'Ring buffer: Table pgfr_record.wait_samples_ring should exist');
-SELECT has_table('pgfr_record', 'activity_samples_ring', 'Ring buffer: Table pgfr_record.activity_samples_ring should exist');
-SELECT has_table('pgfr_record', 'lock_samples_ring', 'Ring buffer: Table pgfr_record.lock_samples_ring should exist');
+SELECT has_table('pgfr_record', 'samples_ring_legacy', 'Ring buffer: Table pgfr_record.samples_ring_legacy should exist');
+SELECT has_table('pgfr_record', 'wait_samples_ring_legacy', 'Ring buffer: Table pgfr_record.wait_samples_ring_legacy should exist');
+SELECT has_table('pgfr_record', 'activity_samples_ring_legacy', 'Ring buffer: Table pgfr_record.activity_samples_ring_legacy should exist');
+SELECT has_table('pgfr_record', 'lock_samples_ring_legacy', 'Ring buffer: Table pgfr_record.lock_samples_ring_legacy should exist');
 -- Aggregates (REGULAR/durable)
 SELECT has_table('pgfr_record', 'wait_event_aggregates', 'Aggregates: Table pgfr_record.wait_event_aggregates should exist');
 SELECT has_table('pgfr_record', 'lock_aggregates', 'Aggregates: Table pgfr_record.lock_aggregates should exist');
@@ -41,8 +41,8 @@ SELECT has_table('pgfr_record', 'collection_stats', 'P0 Safety: Table pgfr_recor
 SELECT ok(
     EXISTS (
         SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'pgfr_record.wait_samples_ring'::regclass
-          AND confrelid = 'pgfr_record.samples_ring'::regclass
+        WHERE conrelid = 'pgfr_record.wait_samples_ring_legacy'::regclass
+          AND confrelid = 'pgfr_record.samples_ring_legacy'::regclass
           AND contype = 'f'
     ),
     'wait_samples_ring should have FK to samples_ring'
@@ -51,8 +51,8 @@ SELECT ok(
 SELECT ok(
     EXISTS (
         SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'pgfr_record.activity_samples_ring'::regclass
-          AND confrelid = 'pgfr_record.samples_ring'::regclass
+        WHERE conrelid = 'pgfr_record.activity_samples_ring_legacy'::regclass
+          AND confrelid = 'pgfr_record.samples_ring_legacy'::regclass
           AND contype = 'f'
     ),
     'activity_samples_ring should have FK to samples_ring'
@@ -61,8 +61,8 @@ SELECT ok(
 SELECT ok(
     EXISTS (
         SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'pgfr_record.lock_samples_ring'::regclass
-          AND confrelid = 'pgfr_record.samples_ring'::regclass
+        WHERE conrelid = 'pgfr_record.lock_samples_ring_legacy'::regclass
+          AND confrelid = 'pgfr_record.samples_ring_legacy'::regclass
           AND contype = 'f'
     ),
     'lock_samples_ring should have FK to samples_ring'
@@ -115,25 +115,25 @@ SELECT ok(
 
 -- Test sample() function works
 SELECT lives_ok(
-    $$SELECT pgfr_record.sample()$$,
+    $$SELECT pgfr_record.sample_ring()$$,
     'sample() function should execute without error'
 );
 
 -- Verify sample was captured in ring buffer
 SELECT ok(
-    (SELECT count(*) FROM pgfr_record.samples_ring WHERE captured_at > '2020-01-01') >= 1,
+    (SELECT count(*) FROM pgfr_record.samples_ring_legacy WHERE captured_at > '2020-01-01') >= 1,
     'At least one sample should be captured in ring buffer'
 );
 
 -- Test wait_samples_ring captured
 SELECT ok(
-    (SELECT count(*) FROM pgfr_record.wait_samples_ring) >= 1,
+    (SELECT count(*) FROM pgfr_record.wait_samples_ring_legacy) >= 1,
     'Wait samples should be captured'
 );
 
 -- Test activity_samples_ring captured
 SELECT ok(
-    (SELECT count(*) FROM pgfr_record.activity_samples_ring) >= 0,
+    (SELECT count(*) FROM pgfr_record.activity_samples_ring_legacy) >= 0,
     'Activity samples table should be queryable (may be empty)'
 );
 

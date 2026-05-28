@@ -46,7 +46,7 @@ BEGIN
     PERFORM pg_advisory_lock(12345);
 
     -- Capture the state while lock is held
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 
     -- Try to acquire the same lock in a non-blocking way (simulates a blocked session)
     -- This will fail immediately and return false, but the attempt is logged
@@ -59,7 +59,7 @@ $$;
 
 -- Test that sample() continues to work after lock operations
 SELECT lives_ok(
-    $$SELECT pgfr_record.sample()$$,
+    $$SELECT pgfr_record.sample_ring()$$,
     'LOCK PATHOLOGY: sample() should execute after lock contention scenario'
 );
 
@@ -67,7 +67,7 @@ SELECT lives_ok(
 -- Note: Lock samples may be empty if no actual blocking occurred
 -- (advisory locks don't create blocked sessions in single transaction)
 SELECT ok(
-    (SELECT count(*) FROM pgfr_record.lock_samples_ring) >= 0,
+    (SELECT count(*) FROM pgfr_record.lock_samples_ring_legacy) >= 0,
     'LOCK PATHOLOGY: lock_samples_ring should be queryable'
 );
 
@@ -328,7 +328,7 @@ SELECT ok(
 DO $$
 BEGIN
     -- Capture activity before slow operation
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 
     -- Simulate slow query (short sleep to not slow down tests too much)
     PERFORM pg_sleep(0.5);
@@ -337,13 +337,13 @@ BEGIN
     PERFORM count(*) FROM test_slow_realtime;
 
     -- Capture activity after slow operation
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 END;
 $$;
 
 -- Test that sample() captured activity
 SELECT ok(
-    (SELECT count(*) FROM pgfr_record.activity_samples_ring) >= 0,
+    (SELECT count(*) FROM pgfr_record.activity_samples_ring_legacy) >= 0,
     'SLOW REALTIME PATHOLOGY: activity_samples_ring should be queryable'
 );
 

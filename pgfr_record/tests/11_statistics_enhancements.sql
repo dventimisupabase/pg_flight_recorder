@@ -13,12 +13,12 @@ SELECT plan(23);
 -- =============================================================================
 
 SELECT has_column(
-    'pgfr_record', 'activity_samples_ring', 'backend_start',
+    'pgfr_record', 'activity_samples_ring_legacy', 'backend_start',
     'activity_samples_ring should have backend_start column'
 );
 
 SELECT has_column(
-    'pgfr_record', 'activity_samples_ring', 'xact_start',
+    'pgfr_record', 'activity_samples_ring_legacy', 'xact_start',
     'activity_samples_ring should have xact_start column'
 );
 
@@ -90,17 +90,17 @@ SELECT has_column(
 -- =============================================================================
 
 -- Take a sample to populate data
-SELECT pgfr_record.sample();
+SELECT pgfr_record.sample_ring();
 
 -- Verify backend_start is populated for active sessions
 -- Note: May be NULL if no sessions were active at sample time
 SELECT lives_ok(
-    $$SELECT backend_start FROM pgfr_record.activity_samples_ring LIMIT 1$$,
+    $$SELECT backend_start FROM pgfr_record.activity_samples_ring_legacy LIMIT 1$$,
     'backend_start column should be queryable in activity_samples_ring'
 );
 
 SELECT lives_ok(
-    $$SELECT xact_start FROM pgfr_record.activity_samples_ring LIMIT 1$$,
+    $$SELECT xact_start FROM pgfr_record.activity_samples_ring_legacy LIMIT 1$$,
     'xact_start column should be queryable in activity_samples_ring'
 );
 

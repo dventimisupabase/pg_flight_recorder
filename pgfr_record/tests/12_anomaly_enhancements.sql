@@ -155,7 +155,7 @@ SELECT results_eq(
 -- =============================================================================
 
 -- Take a sample to populate activity data
-SELECT pgfr_record.sample();
+SELECT pgfr_record.sample_ring();
 
 -- Verify activity_samples_archive has required columns for anomaly detection
 SELECT has_column(
