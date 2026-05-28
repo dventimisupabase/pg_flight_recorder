@@ -68,6 +68,15 @@ jobs:
           mv pgfr_analyze/extension.control pgfr_analyze/pgfr_analyze.control
           sed -i "s/^default_version = .*/default_version = '${VER}'/" pgfr_analyze/pgfr_analyze.control
 
+          # Strip `requires = 'pgfr_record'` for the dbdev build only. The
+          # dbdev API rejects user-published packages that declare requires
+          # against other user packages with error P0001 -- "`requires` in
+          # the control file can't have `pgfr_record` in it". The source
+          # control file keeps the declaration so that direct
+          # `CREATE EXTENSION pgfr_analyze` users still get a clean
+          # dependency error if pgfr_record is absent.
+          sed -i '/^requires[[:space:]]*=/d' pgfr_analyze/pgfr_analyze.control
+
           # Safety: verify dbdev size limit
           SIZE=$(wc -c < "pgfr_analyze/pgfr_analyze--${VER}.sql")
           echo "Reporting package size: ${SIZE} chars"
