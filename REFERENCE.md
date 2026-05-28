@@ -28,7 +28,6 @@ Complete reference for [pg_flight_recorder](README.md). For installation and get
 | `pgfr_record.sample_ring()` | `timestamptz` | Sampled activity: wait events, active sessions, locks into the v2 ring (TRUNCATE-rotated partitions) |
 | `pgfr_record.rotate_ring()` | `void` | Advance the v2 ring buffer by one slot (TRUNCATE the slot two steps ahead) |
 | `pgfr_record.cleanup()` | `record` | Remove expired data based on retention settings |
-| `pgfr_record.cleanup_aggregates()` | `void` | Remove old aggregate and archive data |
 
 ### Profile management
 
@@ -215,63 +214,6 @@ Decode `data` via `pgfr_record.wait_event_map` to get `(state, type, event)` per
 The v2 ring drops the legacy per-row `usename`/`app_name`/`query_preview` for
 lock samples — only `pid` and lookup ids are stored. Use `pgfr_analyze.recent_locks_current()`
 for a column-compatible reader (lost columns return NULL).
-
-### Archives (durable, 7-day default retention)
-
-Archives preserve raw ring buffer samples at full resolution for forensic analysis. Archived every 15 minutes by default.
-
-- **`pgfr_record.wait_samples_archive`** -- Durable wait sample archive
-- **`pgfr_record.activity_samples_archive`** -- Durable activity sample archive
-- **`pgfr_record.lock_samples_archive`** -- Durable lock sample archive
-
-### Aggregates (durable, 7-day default retention)
-
-Aggregates summarize ring buffer data into 5-minute windows.
-
-**`pgfr_record.wait_event_aggregates`**
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | bigserial | Row ID |
-| `start_time` | timestamptz | Window start |
-| `end_time` | timestamptz | Window end |
-| `backend_type` | text | Backend type |
-| `wait_event_type` | text | Wait event category |
-| `wait_event` | text | Specific wait event |
-| `state` | text | Backend state |
-| `sample_count` | int | Samples in window |
-| `total_waiters` | bigint | Total waiters across samples |
-| `avg_waiters` | numeric | Average waiters per sample |
-| `max_waiters` | int | Peak waiters in window |
-| `pct_of_samples` | numeric | Percentage of samples with this event |
-
-**`pgfr_record.lock_aggregates`**
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | bigserial | Row ID |
-| `start_time` | timestamptz | Window start |
-| `end_time` | timestamptz | Window end |
-| `blocked_user` | text | Blocked user |
-| `blocking_user` | text | Blocking user |
-| `lock_type` | text | Lock type |
-| `locked_relation_oid` | oid | Locked relation OID |
-| `occurrence_count` | int | Occurrences in window |
-| `max_duration` | interval | Longest block duration |
-| `avg_duration` | interval | Average block duration |
-| `sample_query` | text | Sample blocked query |
-
-**`pgfr_record.activity_aggregates`**
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | bigserial | Row ID |
-| `start_time` | timestamptz | Window start |
-| `end_time` | timestamptz | Window end |
-| `query_preview` | text | Truncated query |
-| `occurrence_count` | int | Occurrences in window |
-| `max_duration` | interval | Longest query duration |
-| `avg_duration` | interval | Average query duration |
 
 ### Snapshots (durable, 30-day default retention)
 
@@ -544,16 +486,9 @@ UPDATE pgfr_record.config SET value = '300' WHERE key = 'sample_interval_seconds
 | `sample_interval_seconds` | `60` | Seconds between ring buffer samples |
 | `ring_buffer_slots` | `120` | Ring buffer slot count (72-2880) |
 | `retention_snapshots_days` | `30` | Snapshot retention (days) |
-| `retention_samples_days` | `7` | Archive/aggregate retention (days) |
+| `retention_archive_days` | `7` | Archive-tier partition retention (days). No active subscribers after the archive retirement, but kept as a placeholder for future archive-tier tables. |
 | `retention_statements_days` | `30` | Statement snapshot retention (days) |
 | `retention_collection_stats_days` | `30` | Collection stats retention (days) |
-| `aggregate_retention_days` | `7` | Aggregate retention (days) |
-| `archive_samples_enabled` | `true` | Enable raw sample archiving |
-| `archive_sample_frequency_minutes` | `15` | How often to archive ring buffer samples |
-| `archive_retention_days` | `7` | Archive retention (days) |
-| `archive_activity_samples` | `true` | Archive activity samples |
-| `archive_lock_samples` | `true` | Archive lock samples |
-| `archive_wait_samples` | `true` | Archive wait samples |
 
 ### Safety thresholds
 
