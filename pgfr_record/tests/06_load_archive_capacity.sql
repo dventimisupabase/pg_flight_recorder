@@ -7,7 +7,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(97);
+SELECT plan(85);
 
 -- =============================================================================
 -- 15. LOAD SHEDDING & CIRCUIT BREAKER (30 tests) - Phase 5
@@ -23,7 +23,7 @@ UPDATE pgfr_record.config SET value = 'false' WHERE key = 'load_shedding_enabled
 DELETE FROM pgfr_record.collection_stats;
 
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 SELECT ok(
@@ -39,7 +39,7 @@ UPDATE pgfr_record.config SET value = '0' WHERE key = 'load_shedding_active_pct'
 DELETE FROM pgfr_record.collection_stats;
 
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 -- Check if collection was attempted and skipped (if active connections > 0%)
@@ -60,7 +60,7 @@ UPDATE pgfr_record.config SET value = '100' WHERE key = 'load_shedding_active_pc
 DELETE FROM pgfr_record.collection_stats;
 
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 -- With 100% threshold, load shedding should not trigger (unless exactly at 100% connections)
@@ -77,7 +77,7 @@ UPDATE pgfr_record.config SET value = '0' WHERE key = 'load_shedding_active_pct'
 DELETE FROM pgfr_record.collection_stats;
 
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 SELECT ok(
@@ -116,7 +116,7 @@ DELETE FROM pgfr_record.collection_stats;
 
 -- First sample should skip
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 -- Change to normal threshold
@@ -124,7 +124,7 @@ UPDATE pgfr_record.config SET value = '70' WHERE key = 'load_shedding_active_pct
 
 -- Second sample should succeed
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 SELECT ok(
@@ -137,7 +137,7 @@ UPDATE pgfr_record.config SET value = '0' WHERE key = 'load_shedding_active_pct'
 DELETE FROM pgfr_record.collection_stats;
 
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 SELECT ok(
@@ -155,7 +155,7 @@ DELETE FROM pgfr_record.collection_stats;
 
 -- Should use 60% threshold from profile
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 SELECT ok(
@@ -172,9 +172,9 @@ DELETE FROM pgfr_record.collection_stats;
 
 -- Generate 3 skipped collections
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
-    PERFORM pgfr_record.sample();
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
+    PERFORM pgfr_record.sample_ring();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 SELECT ok(
@@ -194,7 +194,7 @@ UPDATE pgfr_record.config SET value = 'false' WHERE key = 'circuit_breaker_enabl
 DELETE FROM pgfr_record.collection_stats;
 
 DO $$ BEGIN
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 SELECT ok(
@@ -310,114 +310,13 @@ SELECT ok(
 UPDATE pgfr_record.config SET value = '1000' WHERE key = 'circuit_breaker_threshold_ms';
 
 -- =============================================================================
--- 6. ARCHIVE FUNCTIONALITY (12 tests)
+-- 6. ARCHIVE FUNCTIONALITY (retired — tests dropped)
 -- =============================================================================
-
--- Clear any archive data that may have been created by background cron jobs
-TRUNCATE pgfr_record.activity_samples_archive;
-TRUNCATE pgfr_record.lock_samples_archive;
-TRUNCATE pgfr_record.wait_samples_archive;
-
--- Test 1: Archive configuration exists
-SELECT ok(
-    EXISTS (SELECT 1 FROM pgfr_record.config WHERE key = 'archive_samples_enabled'),
-    'Archive: Config key archive_samples_enabled should exist'
-);
-
-SELECT ok(
-    EXISTS (SELECT 1 FROM pgfr_record.config WHERE key = 'archive_sample_frequency_minutes'),
-    'Archive: Config key archive_sample_frequency_minutes should exist'
-);
-
-SELECT ok(
-    EXISTS (SELECT 1 FROM pgfr_record.config WHERE key = 'archive_retention_days'),
-    'Archive: Config key archive_retention_days should exist'
-);
-
-SELECT ok(
-    EXISTS (SELECT 1 FROM pgfr_record.config WHERE key = 'archive_wait_samples'),
-    'Archive: Config key archive_wait_samples should exist'
-);
-
--- Test 2: Archive tables are empty initially
-SELECT is(
-    (SELECT count(*)::integer FROM pgfr_record.activity_samples_archive),
-    0,
-    'Archive: activity_samples_archive should be empty initially'
-);
-
-SELECT is(
-    (SELECT count(*)::integer FROM pgfr_record.lock_samples_archive),
-    0,
-    'Archive: lock_samples_archive should be empty initially'
-);
-
-SELECT is(
-    (SELECT count(*)::integer FROM pgfr_record.wait_samples_archive),
-    0,
-    'Archive: wait_samples_archive should be empty initially'
-);
-
--- Test 3: Archive function can be called
-SELECT lives_ok(
-    'SELECT pgfr_record.archive_ring_samples()',
-    'Archive: archive_ring_samples() should execute without error'
-);
-
--- Test 4: Archive captures data after sample collection
--- First, capture some samples
-SELECT pgfr_record.sample();
-
--- Manually call archive (normally scheduled via cron)
-SELECT pgfr_record.archive_ring_samples();
-
--- Verify data was archived
-SELECT ok(
-    (SELECT count(*) FROM pgfr_record.activity_samples_archive) >= 0,
-    'Archive: activity_samples_archive should contain data after archival'
-);
-
--- Test 5: Cleanup removes old archived data
--- Insert old archive data
-INSERT INTO pgfr_record.activity_samples_archive (sample_id, captured_at, pid, usename)
-VALUES (1, now() - interval '10 days', 12345, 'test_user');
-
-INSERT INTO pgfr_record.lock_samples_archive (sample_id, captured_at, blocked_pid)
-VALUES (1, now() - interval '10 days', 67890);
-
-INSERT INTO pgfr_record.wait_samples_archive (sample_id, captured_at, backend_type, wait_event_type, wait_event, count)
-VALUES (1, now() - interval '10 days', 'client backend', 'Lock', 'relation', 5);
-
--- Set retention to 7 days for test
-UPDATE pgfr_record.config SET value = '7' WHERE key = 'archive_retention_days';
-
--- Run cleanup
-SELECT pgfr_record.cleanup_aggregates();
-
--- Verify old data was removed (assuming default retention of 7 days)
-SELECT ok(
-    NOT EXISTS (
-        SELECT 1 FROM pgfr_record.activity_samples_archive
-        WHERE captured_at < now() - interval '7 days'
-    ),
-    'Archive: cleanup should remove old activity archive data'
-);
-
-SELECT ok(
-    NOT EXISTS (
-        SELECT 1 FROM pgfr_record.lock_samples_archive
-        WHERE captured_at < now() - interval '7 days'
-    ),
-    'Archive: cleanup should remove old lock archive data'
-);
-
-SELECT ok(
-    NOT EXISTS (
-        SELECT 1 FROM pgfr_record.wait_samples_archive
-        WHERE captured_at < now() - interval '7 days'
-    ),
-    'Archive: cleanup should remove old wait archive data'
-);
+-- 11 archive-tier assertions dropped along with the archive tables, the
+-- archive_ring_samples() writer, and the cleanup_aggregates() reaper.
+-- Includes: 4 config-key existence checks, 3 empty-table initial states,
+-- 1 archive_ring_samples() lives_ok, 1 post-archival row-count check, and
+-- 3 cleanup-removes-old-rows assertions.
 
 -- =============================================================================
 -- CAPACITY PLANNING TESTS (33 tests) - Phase 1 MVP

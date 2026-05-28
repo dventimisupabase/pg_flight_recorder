@@ -242,8 +242,8 @@ begin
     --     tables: statement_snapshots_v2, table_snapshots_v2, index_snapshots_v2,
     --             snapshots_v2, replication_snapshots_v2, vacuum_progress_snapshots_v2
     --   archive tier: retention_archive_days (default 7)
-    --     tables: activity_samples_archive_v2, lock_samples_archive_v2,
-    --             wait_samples_archive_v2
+    --     tables: (none active; the *_archive_v2 tables were retired in
+    --      wave 13. The tier is preserved for future archive-tier tables.)
     -- -------------------------------------------------------------------------
     v_retention_days := coalesce(
         pgfr_record._get_config('retention_snapshots_days', '30')::int,
@@ -491,14 +491,17 @@ comment on view pgfr_record.partition_gc_health is
 -- End Phase 1: Core Partition Infrastructure
 -- =============================================================================
 
-SELECT pgfr_record.snapshot();
-SELECT pgfr_record.sample();
+-- The install-time SELECT pgfr_record.snapshot() lives at the end of
+-- install.sql now, after every collector is defined. Running it here
+-- emitted spurious WARNINGs for v2 collectors that hadn't loaded yet
+-- (sparse statement/table/index collectors, _ensure_partition on
+-- snapshots_v2/table_snapshots_v2/index_snapshots_v2).
 DO $$
 DECLARE
     v_sample_schedule TEXT;
 BEGIN
     SELECT schedule INTO v_sample_schedule
-    FROM cron.job WHERE jobname = 'pgfr_sample';
+    FROM cron.job WHERE jobname = 'pgfr_sample_ring';
     RAISE NOTICE '';
     RAISE NOTICE 'Flight Recorder installed successfully.';
     RAISE NOTICE '';

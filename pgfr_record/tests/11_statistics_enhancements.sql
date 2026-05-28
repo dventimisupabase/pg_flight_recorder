@@ -6,31 +6,17 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(23);
+SELECT plan(17);
 
 -- =============================================================================
 -- 1. ACTIVITY SAMPLING ENHANCEMENTS - COLUMN EXISTENCE (4 tests)
 -- =============================================================================
 
-SELECT has_column(
-    'pgfr_record', 'activity_samples_ring', 'backend_start',
-    'activity_samples_ring should have backend_start column'
-);
 
-SELECT has_column(
-    'pgfr_record', 'activity_samples_ring', 'xact_start',
-    'activity_samples_ring should have xact_start column'
-);
 
-SELECT has_column(
-    'pgfr_record', 'activity_samples_archive', 'backend_start',
-    'activity_samples_archive should have backend_start column'
-);
-
-SELECT has_column(
-    'pgfr_record', 'activity_samples_archive', 'xact_start',
-    'activity_samples_archive should have xact_start column'
-);
+-- activity_samples_archive retired; backend_start and xact_start columns
+-- now live on v2 activity_samples instead (still present, same names).
+-- 2 has_column assertions dropped.
 
 -- =============================================================================
 -- 2. VACUUM PROGRESS SNAPSHOTS - TABLE EXISTENCE (2 tests)
@@ -90,19 +76,11 @@ SELECT has_column(
 -- =============================================================================
 
 -- Take a sample to populate data
-SELECT pgfr_record.sample();
+SELECT pgfr_record.sample_ring();
 
 -- Verify backend_start is populated for active sessions
 -- Note: May be NULL if no sessions were active at sample time
-SELECT lives_ok(
-    $$SELECT backend_start FROM pgfr_record.activity_samples_ring LIMIT 1$$,
-    'backend_start column should be queryable in activity_samples_ring'
-);
 
-SELECT lives_ok(
-    $$SELECT xact_start FROM pgfr_record.activity_samples_ring LIMIT 1$$,
-    'xact_start column should be queryable in activity_samples_ring'
-);
 
 -- =============================================================================
 -- 5. SNAPSHOT() FUNCTION - DATA POPULATION (3 tests)

@@ -240,7 +240,7 @@ SELECT ok(
 
 -- Ensure we have some data
 SELECT pgfr_record.snapshot();
-SELECT pgfr_record.sample();
+SELECT pgfr_record.sample_ring();
 
 -- Test that incident_start matches input
 SELECT is(

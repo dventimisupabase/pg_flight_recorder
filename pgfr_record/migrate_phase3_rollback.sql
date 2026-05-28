@@ -17,21 +17,15 @@ set client_min_messages to notice;
 
 begin;
 
--- Drop backwards-compat views
+-- Drop backwards-compat views. Archive views (activity_samples_archive,
+-- lock_samples_archive, wait_samples_archive) and their INSTEAD OF trigger
+-- functions were retired alongside the archive tables themselves.
 drop view if exists pgfr_record.snapshots;
 drop view if exists pgfr_record.replication_snapshots;
 drop view if exists pgfr_record.vacuum_progress_snapshots;
 drop view if exists pgfr_record.statement_snapshots;
-drop view if exists pgfr_record.activity_samples_archive;
-drop view if exists pgfr_record.lock_samples_archive;
-drop view if exists pgfr_record.wait_samples_archive;
 drop view if exists pgfr_record.table_snapshots;
 drop view if exists pgfr_record.index_snapshots;
-
--- Drop orphan INSTEAD OF trigger functions (triggers gone with the views)
-drop function if exists pgfr_record._activity_samples_archive_insert();
-drop function if exists pgfr_record._lock_samples_archive_insert();
-drop function if exists pgfr_record._wait_samples_archive_insert();
 
 do $$ begin raise notice 'rollback: views dropped'; end $$;
 
@@ -45,10 +39,8 @@ declare
         'vacuum_progress_snapshots',
         'statement_snapshots',
         'table_snapshots',
-        'index_snapshots',
-        'activity_samples_archive',
-        'lock_samples_archive',
-        'wait_samples_archive'
+        'index_snapshots'
+        -- archive_legacy renames retired alongside the archive tables.
     ];
 begin
     foreach v_tbl in array v_tables loop

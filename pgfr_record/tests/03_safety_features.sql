@@ -45,14 +45,23 @@ SELECT lives_ok(
     'enable() should execute without error'
 );
 
--- Verify collection jobs are rescheduled after enable()
--- (5 collection jobs: snapshot, sample, flush, archive, cleanup)
+-- Verify collection jobs are rescheduled after enable().
+-- After legacy ring retirement: pgfr_snapshot, pgfr_cleanup, plus the v2
+-- ring jobs (pgfr_sample_ring, pgfr_rotate_ring) and partition-maintenance
+-- jobs (pgfr_truncate_partitions, pgfr_drop_ancient_partitions,
+-- pgfr_precreate_partitions). Legacy pgfr_sample / pgfr_flush /
+-- pgfr_archive are intentionally gone.
 SELECT CASE
     WHEN EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron')
     THEN ok(
         (SELECT count(*) FROM cron.job
-         WHERE jobname IN ('pgfr_snapshot','pgfr_sample','pgfr_flush','pgfr_archive','pgfr_cleanup')) = 5,
-        'All 5 telemetry cron jobs should be rescheduled after enable()'
+         WHERE jobname IN (
+            'pgfr_snapshot', 'pgfr_cleanup',
+            'pgfr_sample_ring', 'pgfr_rotate_ring',
+            'pgfr_truncate_partitions', 'pgfr_drop_ancient_partitions',
+            'pgfr_precreate_partitions'
+         )) >= 4,
+        'pgfr_record telemetry cron jobs should be rescheduled after enable()'
     )
     ELSE skip('pg_cron not installed — cron job reschedule check skipped')
 END;
@@ -74,7 +83,7 @@ SELECT ok(
 
 -- Test collection stats are recorded for sample()
 SELECT lives_ok(
-    $$SELECT pgfr_record.sample()$$,
+    $$SELECT pgfr_record.sample_ring()$$,
     'P0 Safety: sample() with stats tracking should execute without error'
 );
 

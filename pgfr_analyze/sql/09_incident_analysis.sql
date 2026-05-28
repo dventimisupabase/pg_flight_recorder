@@ -49,10 +49,12 @@ DECLARE
     v_snap_after RECORD;
     v_snap_gap_secs NUMERIC;
 
-    -- Sample data
-    v_sample_before RECORD;
-    v_sample_after RECORD;
-    v_sample_gap_secs NUMERIC;
+    -- Sample data (v2 ring; legacy samples_ring path retired)
+    v_sample_ts_before    int4;
+    v_sample_ts_after     int4;
+    v_captured_before     timestamptz;
+    v_captured_after      timestamptz;
+    v_sample_gap_secs     NUMERIC;
 
     -- Interpolated values
     v_est_active NUMERIC;
@@ -86,11 +88,6 @@ DECLARE
     v_window_start TIMESTAMPTZ;
     v_window_end TIMESTAMPTZ;
 
-    -- v2 ring fallback (used when legacy samples_ring is empty)
-    v_v2_sample_ts_before int4;
-    v_v2_sample_ts_after  int4;
-    v_v2_captured_before  timestamptz;
-    v_v2_captured_after   timestamptz;
 BEGIN
     -- Calculate window bounds
     v_window_start := p_timestamp - p_context_window;
@@ -117,48 +114,26 @@ BEGIN
     END IF;
 
     -- ==========================================================================
-    -- STEP 2: Find surrounding samples (from ring buffer)
+    -- STEP 2: Find surrounding samples from the v2 ring (activity_samples).
     -- ==========================================================================
-    SELECT sr.* INTO v_sample_before
-    FROM pgfr_record.samples_ring sr
-    WHERE sr.captured_at <= p_timestamp
-      AND sr.captured_at > '1970-01-01'::timestamptz
-    ORDER BY sr.captured_at DESC
+    SELECT sample_ts,
+           pgfr_record.epoch() + sample_ts * interval '1 second'
+    INTO   v_sample_ts_before, v_captured_before
+    FROM   pgfr_record.activity_samples
+    WHERE  pgfr_record.epoch() + sample_ts * interval '1 second' <= p_timestamp
+    ORDER BY sample_ts DESC
     LIMIT 1;
 
-    SELECT sr.* INTO v_sample_after
-    FROM pgfr_record.samples_ring sr
-    WHERE sr.captured_at >= p_timestamp
-      AND sr.captured_at > '1970-01-01'::timestamptz
-    ORDER BY sr.captured_at ASC
+    SELECT sample_ts,
+           pgfr_record.epoch() + sample_ts * interval '1 second'
+    INTO   v_sample_ts_after, v_captured_after
+    FROM   pgfr_record.activity_samples
+    WHERE  pgfr_record.epoch() + sample_ts * interval '1 second' >= p_timestamp
+    ORDER BY sample_ts ASC
     LIMIT 1;
 
-    -- Calculate sample gap
-    IF v_sample_before IS NOT NULL AND v_sample_after IS NOT NULL THEN
-        v_sample_gap_secs := EXTRACT(EPOCH FROM (v_sample_after.captured_at - v_sample_before.captured_at));
-    END IF;
-
-    -- v2 ring fallback: if legacy samples_ring is empty, use activity_samples
-    IF v_sample_before IS NULL THEN
-        SELECT sample_ts,
-               pgfr_record.epoch() + sample_ts * interval '1 second'
-        INTO   v_v2_sample_ts_before, v_v2_captured_before
-        FROM   pgfr_record.activity_samples
-        WHERE  pgfr_record.epoch() + sample_ts * interval '1 second' <= p_timestamp
-        ORDER BY sample_ts DESC
-        LIMIT 1;
-    END IF;
-    IF v_sample_after IS NULL THEN
-        SELECT sample_ts,
-               pgfr_record.epoch() + sample_ts * interval '1 second'
-        INTO   v_v2_sample_ts_after, v_v2_captured_after
-        FROM   pgfr_record.activity_samples
-        WHERE  pgfr_record.epoch() + sample_ts * interval '1 second' >= p_timestamp
-        ORDER BY sample_ts ASC
-        LIMIT 1;
-    END IF;
-    IF v_v2_sample_ts_before IS NOT NULL AND v_v2_sample_ts_after IS NOT NULL AND v_sample_gap_secs IS NULL THEN
-        v_sample_gap_secs := v_v2_sample_ts_after - v_v2_sample_ts_before;
+    IF v_sample_ts_before IS NOT NULL AND v_sample_ts_after IS NOT NULL THEN
+        v_sample_gap_secs := v_sample_ts_after - v_sample_ts_before;
     END IF;
 
     -- ==========================================================================
@@ -262,83 +237,25 @@ BEGIN
     END IF;
 
     -- ==========================================================================
-    -- STEP 5: Analyze activity from samples ring buffer (legacy) or v2
+    -- STEP 5: Analyze activity from the v2 ring (activity_samples)
     -- ==========================================================================
-    IF v_sample_before IS NOT NULL THEN
-        -- Count active sessions
-        SELECT COUNT(*), COUNT(*) FILTER (WHERE a.state = 'active')
-        INTO v_sessions, v_sessions
-        FROM pgfr_record.activity_samples_ring a
-        WHERE a.slot_id = v_sample_before.slot_id
-          AND a.pid IS NOT NULL;
-
-        -- Find long-running queries (> 60 seconds at sample time)
-        SELECT COUNT(*), MAX(EXTRACT(EPOCH FROM (v_sample_before.captured_at - a.query_start)))
-        INTO v_long_running, v_longest_secs
-        FROM pgfr_record.activity_samples_ring a
-        WHERE a.slot_id = v_sample_before.slot_id
-          AND a.pid IS NOT NULL
-          AND a.state = 'active'
-          AND a.query_start IS NOT NULL
-          AND a.query_start < v_sample_before.captured_at - interval '60 seconds';
-
-        -- Collect query start events within window
-        FOR v_event IN
-            SELECT jsonb_build_object(
-                'type', 'query_started',
-                'time', a.query_start,
-                'offset_secs', EXTRACT(EPOCH FROM (a.query_start - p_timestamp))::INTEGER,
-                'pid', a.pid,
-                'user', a.usename,
-                'query_preview', a.query_preview
-            )
-            FROM pgfr_record.activity_samples_ring a
-            WHERE a.slot_id = v_sample_before.slot_id
-              AND a.pid IS NOT NULL
-              AND a.query_start BETWEEN v_window_start AND v_window_end
-            ORDER BY a.query_start
-            LIMIT 10
-        LOOP
-            v_events := v_events || v_event;
-        END LOOP;
-
-        -- Collect transaction start events within window
-        FOR v_event IN
-            SELECT jsonb_build_object(
-                'type', 'transaction_started',
-                'time', a.xact_start,
-                'offset_secs', EXTRACT(EPOCH FROM (a.xact_start - p_timestamp))::INTEGER,
-                'pid', a.pid,
-                'user', a.usename
-            )
-            FROM pgfr_record.activity_samples_ring a
-            WHERE a.slot_id = v_sample_before.slot_id
-              AND a.pid IS NOT NULL
-              AND a.xact_start BETWEEN v_window_start AND v_window_end
-              AND a.xact_start != a.query_start  -- Avoid duplicates
-            ORDER BY a.xact_start
-            LIMIT 10
-        LOOP
-            v_events := v_events || v_event;
-        END LOOP;
-    ELSIF v_v2_sample_ts_before IS NOT NULL THEN
-        -- v2 fallback: activity_samples
+    IF v_sample_ts_before IS NOT NULL THEN
         SELECT count(*) FILTER (WHERE a.state = 'active'),
                count(*) FILTER (WHERE a.state = 'active')
         INTO v_sessions, v_sessions
         FROM pgfr_record.activity_samples a
-        WHERE a.sample_ts = v_v2_sample_ts_before
+        WHERE a.sample_ts = v_sample_ts_before
           AND a.pid IS NOT NULL;
 
         SELECT count(*),
-               max(extract(epoch from (v_v2_captured_before - a.query_start)))
+               max(extract(epoch from (v_captured_before - a.query_start)))
         INTO v_long_running, v_longest_secs
         FROM pgfr_record.activity_samples a
-        WHERE a.sample_ts = v_v2_sample_ts_before
+        WHERE a.sample_ts = v_sample_ts_before
           AND a.pid IS NOT NULL
           AND a.state = 'active'
           AND a.query_start IS NOT NULL
-          AND a.query_start < v_v2_captured_before - interval '60 seconds';
+          AND a.query_start < v_captured_before - interval '60 seconds';
 
         FOR v_event IN
             SELECT jsonb_build_object(
@@ -350,7 +267,7 @@ BEGIN
                 'query_preview', a.query_preview
             )
             FROM pgfr_record.activity_samples a
-            WHERE a.sample_ts = v_v2_sample_ts_before
+            WHERE a.sample_ts = v_sample_ts_before
               AND a.pid IS NOT NULL
               AND a.query_start BETWEEN v_window_start AND v_window_end
             ORDER BY a.query_start
@@ -368,7 +285,7 @@ BEGIN
                 'user', a.usename
             )
             FROM pgfr_record.activity_samples a
-            WHERE a.sample_ts = v_v2_sample_ts_before
+            WHERE a.sample_ts = v_sample_ts_before
               AND a.pid IS NOT NULL
               AND a.xact_start BETWEEN v_window_start AND v_window_end
               AND a.xact_start IS DISTINCT FROM a.query_start
@@ -380,23 +297,13 @@ BEGIN
     END IF;
 
     -- ==========================================================================
-    -- STEP 6: Analyze lock contention
+    -- STEP 6: Analyze lock contention from the v2 ring
     -- ==========================================================================
-    IF v_sample_before IS NOT NULL THEN
-        SELECT COUNT(*) > 0, COUNT(*)
-        INTO v_lock_detected, v_blocked
-        FROM pgfr_record.lock_samples_ring l
-        WHERE l.slot_id = v_sample_before.slot_id
-          AND l.blocked_pid IS NOT NULL;
-
-        IF v_blocked > 0 THEN
-            v_recs := array_append(v_recs, format('Investigate %s blocked sessions', v_blocked));
-        END IF;
-    ELSIF v_v2_sample_ts_before IS NOT NULL THEN
+    IF v_sample_ts_before IS NOT NULL THEN
         SELECT count(*) > 0, count(*)
         INTO v_lock_detected, v_blocked
         FROM pgfr_record.lock_samples ls
-        WHERE ls.sample_ts = v_v2_sample_ts_before
+        WHERE ls.sample_ts = v_sample_ts_before
           AND ls.blocked_pid IS NOT NULL;
 
         IF v_blocked > 0 THEN
@@ -405,25 +312,9 @@ BEGIN
     END IF;
 
     -- ==========================================================================
-    -- STEP 7: Analyze wait events
+    -- STEP 7: Analyze wait events from the v2 ring (decode via wait_event_map)
     -- ==========================================================================
-    IF v_sample_before IS NOT NULL THEN
-        SELECT jsonb_agg(w ORDER BY w->>'count' DESC)
-        INTO v_waits
-        FROM (
-            SELECT jsonb_build_object(
-                'wait_event_type', ws.wait_event_type,
-                'wait_event', ws.wait_event,
-                'count', ws.count
-            ) AS w
-            FROM pgfr_record.wait_samples_ring ws
-            WHERE ws.slot_id = v_sample_before.slot_id
-              AND ws.wait_event IS NOT NULL
-            ORDER BY ws.count DESC NULLS LAST
-            LIMIT 5
-        ) sub;
-    ELSIF v_v2_sample_ts_before IS NOT NULL THEN
-        -- v2: decode integer array via wait_event_map
+    IF v_sample_ts_before IS NOT NULL THEN
         SELECT jsonb_agg(w ORDER BY w->>'count' DESC)
         INTO v_waits
         FROM (
@@ -433,10 +324,10 @@ BEGIN
                 'count', abs(ws.data[i + 1])
             ) AS w
             FROM pgfr_record.wait_samples ws
-            cross join generate_subscripts(ws.data, 1) AS i
-            join pgfr_record.wait_event_map wem ON wem.id = abs(ws.data[i])::smallint
+            CROSS JOIN generate_subscripts(ws.data, 1) AS i
+            JOIN pgfr_record.wait_event_map wem ON wem.id = abs(ws.data[i])::smallint
             WHERE ws.data[i] < 0
-              AND ws.sample_ts = v_v2_sample_ts_before
+              AND ws.sample_ts = v_sample_ts_before
             ORDER BY abs(ws.data[i + 1]) DESC NULLS LAST
             LIMIT 5
         ) sub;
@@ -470,13 +361,13 @@ BEGIN
     END IF;
 
     -- Bonus for target close to sample
-    IF v_sample_before IS NOT NULL OR v_v2_sample_ts_before IS NOT NULL THEN
+    IF v_sample_ts_before IS NOT NULL THEN
         DECLARE
             v_closest_gap NUMERIC;
         BEGIN
             v_closest_gap := LEAST(
-                ABS(EXTRACT(EPOCH FROM (p_timestamp - coalesce(v_sample_before.captured_at, v_v2_captured_before)))),
-                COALESCE(ABS(EXTRACT(EPOCH FROM (p_timestamp - coalesce(v_sample_after.captured_at, v_v2_captured_after)))), 999999)
+                ABS(EXTRACT(EPOCH FROM (p_timestamp - v_captured_before))),
+                COALESCE(ABS(EXTRACT(EPOCH FROM (p_timestamp - v_captured_after))), 999999)
             );
             IF v_closest_gap < 30 THEN
                 v_confidence_score := LEAST(1.0, v_confidence_score + 0.05);
@@ -525,8 +416,8 @@ BEGIN
     -- ==========================================================================
     RETURN QUERY SELECT
         p_timestamp,
-        coalesce(v_sample_before.captured_at, v_v2_captured_before),
-        coalesce(v_sample_after.captured_at,  v_v2_captured_after),
+        v_captured_before,
+        v_captured_after,
         v_snap_before.captured_at,
         v_snap_after.captured_at,
         v_est_active,
@@ -616,25 +507,6 @@ BEGIN
         UNION ALL
 
         -- Query start events from legacy ring buffer
-        SELECT
-            a.query_start AS event_time,
-            'query_started'::TEXT AS event_type,
-            format('Query started by %s (pid %s)', COALESCE(a.usename, 'unknown'), a.pid) AS description,
-            jsonb_build_object(
-                'pid', a.pid,
-                'user', a.usename,
-                'application', a.application_name,
-                'client_addr', a.client_addr::TEXT,
-                'query_preview', a.query_preview
-            ) AS details
-        FROM pgfr_record.activity_samples_ring a
-        JOIN pgfr_record.samples_ring sr ON sr.slot_id = a.slot_id
-        WHERE a.query_start BETWEEN p_start_time AND p_end_time
-          AND a.query_start IS NOT NULL
-          AND a.pid IS NOT NULL
-          AND sr.captured_at > '1970-01-01'::timestamptz
-
-        UNION ALL
 
         -- Query start events from v2 ring
         SELECT
@@ -656,24 +528,6 @@ BEGIN
         UNION ALL
 
         -- Transaction start events from legacy ring buffer
-        SELECT
-            a.xact_start AS event_time,
-            'transaction_started'::TEXT AS event_type,
-            format('Transaction started by %s (pid %s)', COALESCE(a.usename, 'unknown'), a.pid) AS description,
-            jsonb_build_object(
-                'pid', a.pid,
-                'user', a.usename,
-                'application', a.application_name
-            ) AS details
-        FROM pgfr_record.activity_samples_ring a
-        JOIN pgfr_record.samples_ring sr ON sr.slot_id = a.slot_id
-        WHERE a.xact_start BETWEEN p_start_time AND p_end_time
-          AND a.xact_start IS NOT NULL
-          AND a.pid IS NOT NULL
-          AND sr.captured_at > '1970-01-01'::timestamptz
-          AND (a.xact_start != a.query_start OR a.query_start IS NULL)
-
-        UNION ALL
 
         -- Transaction start events from v2 ring
         SELECT
@@ -694,26 +548,6 @@ BEGIN
         UNION ALL
 
         -- Backend start events (new connections) from legacy ring
-        SELECT
-            a.backend_start AS event_time,
-            'connection_opened'::TEXT AS event_type,
-            format('Connection opened by %s from %s', COALESCE(a.usename, 'unknown'),
-                   COALESCE(a.client_addr::TEXT, 'local')) AS description,
-            jsonb_build_object(
-                'pid', a.pid,
-                'user', a.usename,
-                'application', a.application_name,
-                'client_addr', a.client_addr::TEXT,
-                'backend_type', a.backend_type
-            ) AS details
-        FROM pgfr_record.activity_samples_ring a
-        JOIN pgfr_record.samples_ring sr ON sr.slot_id = a.slot_id
-        WHERE a.backend_start BETWEEN p_start_time AND p_end_time
-          AND a.backend_start IS NOT NULL
-          AND a.pid IS NOT NULL
-          AND sr.captured_at > '1970-01-01'::timestamptz
-
-        UNION ALL
 
         -- Backend start events from v2 ring
         SELECT
@@ -736,28 +570,6 @@ BEGIN
         UNION ALL
 
         -- Lock contention events from legacy ring
-        SELECT
-            sr.captured_at AS event_time,
-            'lock_contention'::TEXT AS event_type,
-            format('Session %s blocked by %s on %s lock',
-                   l.blocked_pid, l.blocking_pid, l.lock_type) AS description,
-            jsonb_build_object(
-                'blocked_pid', l.blocked_pid,
-                'blocked_user', l.blocked_user,
-                'blocked_query', l.blocked_query_preview,
-                'blocking_pid', l.blocking_pid,
-                'blocking_user', l.blocking_user,
-                'blocking_query', l.blocking_query_preview,
-                'lock_type', l.lock_type,
-                'duration', l.blocked_duration::TEXT
-            ) AS details
-        FROM pgfr_record.lock_samples_ring l
-        JOIN pgfr_record.samples_ring sr ON sr.slot_id = l.slot_id
-        WHERE sr.captured_at BETWEEN p_start_time AND p_end_time
-          AND l.blocked_pid IS NOT NULL
-          AND sr.captured_at > '1970-01-01'::timestamptz
-
-        UNION ALL
 
         -- Lock contention events from v2 ring
         SELECT
@@ -780,22 +592,27 @@ BEGIN
 
         UNION ALL
 
-        -- Wait event spikes from aggregates
+        -- Wait event spikes (v2): one row per (database, wait group) per tick
+        -- in wait_samples; we surface samples where waiter_count >= 3.
+        -- wait_event identity comes from wait_event_map.
         SELECT
-            wa.start_time AS event_time,
+            pgfr_record.epoch() + ws.sample_ts * interval '1 second' AS event_time,
             'wait_spike'::TEXT AS event_type,
-            format('Wait spike: %s/%s (max %s concurrent)',
-                   wa.wait_event_type, wa.wait_event, wa.max_waiters) AS description,
+            format('Wait spike: %s/%s (%s concurrent)',
+                   wem.type, wem.event, abs(ws.data[i + 1])) AS description,
             jsonb_build_object(
-                'wait_event_type', wa.wait_event_type,
-                'wait_event', wa.wait_event,
-                'max_concurrent', wa.max_waiters,
-                'avg_concurrent', round(wa.avg_waiters, 1),
-                'sample_count', wa.sample_count
+                'wait_event_type', wem.type,
+                'wait_event',      wem.event,
+                'max_concurrent',  abs(ws.data[i + 1]),
+                'active_count',    ws.active_count
             ) AS details
-        FROM pgfr_record.wait_event_aggregates wa
-        WHERE wa.start_time BETWEEN p_start_time AND p_end_time
-          AND wa.max_waiters >= 3  -- Only show significant waits
+        FROM pgfr_record.wait_samples ws
+        CROSS JOIN generate_subscripts(ws.data, 1) AS i
+        JOIN pgfr_record.wait_event_map wem ON wem.id = abs(ws.data[i])::smallint
+        WHERE ws.data[i] < 0
+          AND pgfr_record.epoch() + ws.sample_ts * interval '1 second'
+              BETWEEN p_start_time AND p_end_time
+          AND abs(ws.data[i + 1]) >= 3  -- Only show significant waits
 
         UNION ALL
 
@@ -934,83 +751,45 @@ BEGIN
     -- Lock Impact Analysis
     -- =========================================================================
 
-    -- Total blocked sessions and durations from ring buffer
+    -- Total blocked sessions and durations from v2 ring
     SELECT
-        COUNT(DISTINCT blocked_pid),
-        MAX(blocked_duration),
-        AVG(blocked_duration)
+        COUNT(DISTINCT ls.blocked_pid),
+        MAX(ls.blocked_duration_s * interval '1 second'),
+        AVG(ls.blocked_duration_s * interval '1 second')
     INTO v_blocked_total, v_max_block_duration, v_avg_block_duration
+    FROM pgfr_record.lock_samples ls
+    WHERE pgfr_record.epoch() + ls.sample_ts * interval '1 second'
+          BETWEEN p_start_time AND p_end_time
+      AND ls.blocked_pid IS NOT NULL;
+
+    -- (Legacy lock_samples_archive fallback retired alongside the archive
+    -- tables; v2 lock_samples is the single source of truth.)
+
+    v_blocked_total := COALESCE(v_blocked_total, 0);
+
+    -- Max concurrent blocked sessions (per sample) from v2 ring
+    SELECT COALESCE(MAX(blocked_count), 0)
+    INTO v_blocked_max_concurrent
     FROM (
-        SELECT l.blocked_pid, l.blocked_duration
-        FROM pgfr_record.lock_samples_ring l
-        JOIN pgfr_record.samples_ring sr ON sr.slot_id = l.slot_id
-        WHERE sr.captured_at BETWEEN p_start_time AND p_end_time
-          AND l.blocked_pid IS NOT NULL
-        UNION ALL
-        SELECT ls.blocked_pid,
-               ls.blocked_duration_s * interval '1 second'
+        SELECT ls.sample_ts, COUNT(DISTINCT ls.blocked_pid) AS blocked_count
         FROM pgfr_record.lock_samples ls
         WHERE pgfr_record.epoch() + ls.sample_ts * interval '1 second'
               BETWEEN p_start_time AND p_end_time
           AND ls.blocked_pid IS NOT NULL
-    ) combined;
-
-    -- Also check archive for longer incidents
-    IF v_blocked_total = 0 OR v_blocked_total IS NULL THEN
-        SELECT
-            COUNT(DISTINCT blocked_pid),
-            MAX(blocked_duration),
-            AVG(blocked_duration)
-        INTO v_blocked_total, v_max_block_duration, v_avg_block_duration
-        FROM pgfr_record.lock_samples_archive
-        WHERE captured_at BETWEEN p_start_time AND p_end_time
-          AND blocked_pid IS NOT NULL;
-    END IF;
-
-    v_blocked_total := COALESCE(v_blocked_total, 0);
-
-    -- Max concurrent blocked sessions (per sample)
-    SELECT COALESCE(MAX(blocked_count), 0)
-    INTO v_blocked_max_concurrent
-    FROM (
-        SELECT sample_key, COUNT(DISTINCT blocked_pid) AS blocked_count
-        FROM (
-            SELECT sr.slot_id::text AS sample_key, l.blocked_pid
-            FROM pgfr_record.lock_samples_ring l
-            JOIN pgfr_record.samples_ring sr ON sr.slot_id = l.slot_id
-            WHERE sr.captured_at BETWEEN p_start_time AND p_end_time
-              AND l.blocked_pid IS NOT NULL
-            UNION ALL
-            SELECT ls.sample_ts::text AS sample_key, ls.blocked_pid
-            FROM pgfr_record.lock_samples ls
-            WHERE pgfr_record.epoch() + ls.sample_ts * interval '1 second'
-                  BETWEEN p_start_time AND p_end_time
-              AND ls.blocked_pid IS NOT NULL
-        ) combined
-        GROUP BY sample_key
+        GROUP BY ls.sample_ts
     ) per_sample;
 
-    -- Lock types breakdown
+    -- Lock types breakdown from v2 ring (decoded via lock_type_map)
     SELECT COALESCE(jsonb_agg(jsonb_build_object('type', lock_type, 'count', cnt) ORDER BY cnt DESC), '[]'::jsonb)
     INTO v_lock_types
     FROM (
-        SELECT lock_type, COUNT(*) AS cnt
-        FROM (
-            SELECT l.lock_type
-            FROM pgfr_record.lock_samples_ring l
-            JOIN pgfr_record.samples_ring sr ON sr.slot_id = l.slot_id
-            WHERE sr.captured_at BETWEEN p_start_time AND p_end_time
-              AND l.blocked_pid IS NOT NULL
-              AND l.lock_type IS NOT NULL
-            UNION ALL
-            SELECT coalesce(ltm.lock_type, ls.lock_type::text) AS lock_type
-            FROM pgfr_record.lock_samples ls
-            LEFT JOIN pgfr_record.lock_type_map ltm ON ltm.id = ls.lock_type
-            WHERE pgfr_record.epoch() + ls.sample_ts * interval '1 second'
-                  BETWEEN p_start_time AND p_end_time
-              AND ls.blocked_pid IS NOT NULL
-        ) combined
-        GROUP BY lock_type
+        SELECT coalesce(ltm.lock_type, ls.lock_type::text) AS lock_type, COUNT(*) AS cnt
+        FROM pgfr_record.lock_samples ls
+        LEFT JOIN pgfr_record.lock_type_map ltm ON ltm.id = ls.lock_type
+        WHERE pgfr_record.epoch() + ls.sample_ts * interval '1 second'
+              BETWEEN p_start_time AND p_end_time
+          AND ls.blocked_pid IS NOT NULL
+        GROUP BY coalesce(ltm.lock_type, ls.lock_type::text)
         ORDER BY cnt DESC
         LIMIT 10
     ) lt;
@@ -1098,6 +877,7 @@ BEGIN
     -- Application Impact Analysis
     -- =========================================================================
 
+    -- v2 lock_samples doesn't store the blocked_app field; surface as 'unknown'.
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
         'app_name', app,
         'blocked_count', blocked_count,
@@ -1106,27 +886,14 @@ BEGIN
     INTO v_affected_apps
     FROM (
         SELECT
-            app,
-            COUNT(DISTINCT blocked_pid) AS blocked_count,
-            MAX(blocked_duration) AS max_wait
-        FROM (
-            SELECT COALESCE(l.blocked_app, 'unknown') AS app,
-                   l.blocked_pid,
-                   l.blocked_duration
-            FROM pgfr_record.lock_samples_ring l
-            JOIN pgfr_record.samples_ring sr ON sr.slot_id = l.slot_id
-            WHERE sr.captured_at BETWEEN p_start_time AND p_end_time
-              AND l.blocked_pid IS NOT NULL
-            UNION ALL
-            SELECT 'unknown' AS app,
-                   ls.blocked_pid,
-                   ls.blocked_duration_s * interval '1 second'
-            FROM pgfr_record.lock_samples ls
-            WHERE pgfr_record.epoch() + ls.sample_ts * interval '1 second'
-                  BETWEEN p_start_time AND p_end_time
-              AND ls.blocked_pid IS NOT NULL
-        ) combined
-        GROUP BY app
+            'unknown' AS app,
+            COUNT(DISTINCT ls.blocked_pid) AS blocked_count,
+            MAX(ls.blocked_duration_s * interval '1 second') AS max_wait
+        FROM pgfr_record.lock_samples ls
+        WHERE pgfr_record.epoch() + ls.sample_ts * interval '1 second'
+              BETWEEN p_start_time AND p_end_time
+          AND ls.blocked_pid IS NOT NULL
+        GROUP BY 1
         ORDER BY blocked_count DESC
         LIMIT 10
     ) apps;
@@ -1139,12 +906,6 @@ BEGIN
         SELECT wait_event_type, wait_event, SUM(total_count) AS total_count
         FROM (
             -- legacy ring
-            SELECT w.wait_event_type, w.wait_event, w.count::bigint AS total_count
-            FROM pgfr_record.wait_samples_ring w
-            JOIN pgfr_record.samples_ring sr ON sr.slot_id = w.slot_id
-            WHERE sr.captured_at BETWEEN v_baseline_start AND v_baseline_end
-              AND w.wait_event IS NOT NULL
-            UNION ALL
             -- v2 ring: decode integer array
             SELECT wem.type AS wait_event_type, wem.event AS wait_event,
                    abs(ws.data[i + 1])::bigint AS total_count
@@ -1161,12 +922,6 @@ BEGIN
         SELECT wait_event_type, wait_event, SUM(total_count) AS total_count
         FROM (
             -- legacy ring
-            SELECT w.wait_event_type, w.wait_event, w.count::bigint AS total_count
-            FROM pgfr_record.wait_samples_ring w
-            JOIN pgfr_record.samples_ring sr ON sr.slot_id = w.slot_id
-            WHERE sr.captured_at BETWEEN p_start_time AND p_end_time
-              AND w.wait_event IS NOT NULL
-            UNION ALL
             -- v2 ring: decode integer array
             SELECT wem.type AS wait_event_type, wem.event AS wait_event,
                    abs(ws.data[i + 1])::bigint AS total_count

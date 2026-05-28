@@ -7,7 +7,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(50);
+SELECT plan(32);
 
 -- =============================================================================
 -- 1. INSTALLATION VERIFICATION (19 tests)
@@ -20,53 +20,17 @@ SELECT has_schema('pgfr_record', 'Schema pgfr_record should exist');
 SELECT has_table('pgfr_record', 'snapshots', 'Table pgfr_record.snapshots should exist');
 SELECT has_table('pgfr_record', 'replication_snapshots', 'Table pgfr_record.replication_snapshots should exist');
 SELECT has_table('pgfr_record', 'statement_snapshots', 'Table pgfr_record.statement_snapshots should exist');
--- Ring buffers (UNLOGGED)
-SELECT has_table('pgfr_record', 'samples_ring', 'Ring buffer: Table pgfr_record.samples_ring should exist');
-SELECT has_table('pgfr_record', 'wait_samples_ring', 'Ring buffer: Table pgfr_record.wait_samples_ring should exist');
-SELECT has_table('pgfr_record', 'activity_samples_ring', 'Ring buffer: Table pgfr_record.activity_samples_ring should exist');
-SELECT has_table('pgfr_record', 'lock_samples_ring', 'Ring buffer: Table pgfr_record.lock_samples_ring should exist');
--- Aggregates (REGULAR/durable)
-SELECT has_table('pgfr_record', 'wait_event_aggregates', 'Aggregates: Table pgfr_record.wait_event_aggregates should exist');
-SELECT has_table('pgfr_record', 'lock_aggregates', 'Aggregates: Table pgfr_record.lock_aggregates should exist');
-SELECT has_table('pgfr_record', 'activity_aggregates', 'Aggregates: Table pgfr_record.activity_aggregates should exist');
--- Raw archives (REGULAR/durable)
-SELECT has_table('pgfr_record', 'activity_samples_archive', 'Raw archives: Table pgfr_record.activity_samples_archive should exist');
-SELECT has_table('pgfr_record', 'lock_samples_archive', 'Raw archives: Table pgfr_record.lock_samples_archive should exist');
-SELECT has_table('pgfr_record', 'wait_samples_archive', 'Raw archives: Table pgfr_record.wait_samples_archive should exist');
+-- Aggregates + archives retired alongside the legacy ring (6 has_table
+-- assertions dropped for wait_event_aggregates, lock_aggregates,
+-- activity_aggregates, activity_samples_archive, lock_samples_archive,
+-- wait_samples_archive).
 -- Config and monitoring
 SELECT has_table('pgfr_record', 'config', 'Table pgfr_record.config should exist');
 SELECT has_table('pgfr_record', 'collection_stats', 'P0 Safety: Table pgfr_record.collection_stats should exist');
 
 -- Test Foreign Keys (Ring buffer child tables reference master samples_ring)
-SELECT ok(
-    EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'pgfr_record.wait_samples_ring'::regclass
-          AND confrelid = 'pgfr_record.samples_ring'::regclass
-          AND contype = 'f'
-    ),
-    'wait_samples_ring should have FK to samples_ring'
-);
 
-SELECT ok(
-    EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'pgfr_record.activity_samples_ring'::regclass
-          AND confrelid = 'pgfr_record.samples_ring'::regclass
-          AND contype = 'f'
-    ),
-    'activity_samples_ring should have FK to samples_ring'
-);
 
-SELECT ok(
-    EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'pgfr_record.lock_samples_ring'::regclass
-          AND confrelid = 'pgfr_record.samples_ring'::regclass
-          AND contype = 'f'
-    ),
-    'lock_samples_ring should have FK to samples_ring'
-);
 
 -- Test all 6 views exist
 SELECT has_view('pgfr_record', 'deltas', 'View pgfr_record.deltas should exist');
@@ -86,16 +50,14 @@ SELECT has_function('pgfr_record', '_record_collection_end', 'P0 Safety: Functio
 SELECT has_function('pgfr_record', '_record_collection_skip', 'P0 Safety: Function pgfr_record._record_collection_skip should exist');
 SELECT has_function('pgfr_record', '_check_schema_size', 'P1 Safety: Function pgfr_record._check_schema_size should exist');
 SELECT has_function('pgfr_record', 'snapshot', 'Function pgfr_record.snapshot should exist');
-SELECT has_function('pgfr_record', 'sample', 'Function pgfr_record.sample should exist');
+SELECT has_function('pgfr_record', 'sample_ring', 'Function pgfr_record.sample_ring should exist');
 SELECT has_function('pgfr_analyze', 'anomaly_report', 'Function pgfr_analyze.anomaly_report should exist');
 SELECT has_function('pgfr_analyze', 'summary_report', 'Function pgfr_analyze.summary_report should exist');
 SELECT has_function('pgfr_record', 'get_mode', 'Function pgfr_record.get_mode should exist');
 SELECT has_function('pgfr_record', 'set_mode', 'Function pgfr_record.set_mode should exist');
 SELECT has_function('pgfr_record', 'cleanup', 'Function pgfr_record.cleanup should exist');
--- Ring buffer functions
-SELECT has_function('pgfr_record', 'flush_ring_to_aggregates', 'Aggregates: Function pgfr_record.flush_ring_to_aggregates should exist');
-SELECT has_function('pgfr_record', 'archive_ring_samples', 'Raw archives: Function pgfr_record.archive_ring_samples should exist');
-SELECT has_function('pgfr_record', 'cleanup_aggregates', 'Cleanup: Function pgfr_record.cleanup_aggregates should exist');
+-- flush_ring_to_aggregates, archive_ring_samples, cleanup_aggregates retired
+-- alongside the aggregates + archive tables (3 has_function assertions dropped).
 
 -- =============================================================================
 -- 3. CORE FUNCTIONALITY (10 tests)
@@ -115,27 +77,21 @@ SELECT ok(
 
 -- Test sample() function works
 SELECT lives_ok(
-    $$SELECT pgfr_record.sample()$$,
+    $$SELECT pgfr_record.sample_ring()$$,
     'sample() function should execute without error'
 );
 
--- Verify sample was captured in ring buffer
-SELECT ok(
-    (SELECT count(*) FROM pgfr_record.samples_ring WHERE captured_at > '2020-01-01') >= 1,
-    'At least one sample should be captured in ring buffer'
+-- Verify the v2 ring is queryable. We can't assert that sample_ring()
+-- wrote rows because in a single-backend test container all other
+-- backends are filtered out (sample_ring excludes pg_backend_pid()).
+SELECT lives_ok(
+    $$SELECT 1 FROM pgfr_record.wait_samples LIMIT 1$$,
+    'v2 ring (wait_samples) should be queryable after sample_ring()'
 );
 
 -- Test wait_samples_ring captured
-SELECT ok(
-    (SELECT count(*) FROM pgfr_record.wait_samples_ring) >= 1,
-    'Wait samples should be captured'
-);
 
 -- Test activity_samples_ring captured
-SELECT ok(
-    (SELECT count(*) FROM pgfr_record.activity_samples_ring) >= 0,
-    'Activity samples table should be queryable (may be empty)'
-);
 
 -- Test version detection works
 SELECT ok(

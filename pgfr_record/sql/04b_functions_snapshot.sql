@@ -1044,83 +1044,9 @@ LANGUAGE sql STABLE AS $$
     ))::text || ' seconds')::interval;
 $$;
 
-CREATE OR REPLACE VIEW pgfr_record.recent_waits AS
-SELECT
-    sr.captured_at,
-    w.backend_type,
-    w.wait_event_type,
-    w.wait_event,
-    w.state,
-    w.count
-FROM pgfr_record.samples_ring sr
-JOIN pgfr_record.wait_samples_ring w ON w.slot_id = sr.slot_id
-WHERE sr.captured_at > now() - pgfr_record._get_ring_retention_interval()
-  AND w.backend_type IS NOT NULL
-ORDER BY sr.captured_at DESC, w.count DESC;
-CREATE OR REPLACE VIEW pgfr_record.recent_activity AS
-SELECT
-    sr.captured_at,
-    a.pid,
-    a.usename,
-    a.application_name,
-    a.client_addr,
-    a.backend_type,
-    a.state,
-    a.wait_event_type,
-    a.wait_event,
-    a.backend_start,
-    a.xact_start,
-    a.query_start,
-    sr.captured_at - a.backend_start AS session_age,
-    sr.captured_at - a.xact_start AS xact_age,
-    sr.captured_at - a.query_start AS running_for,
-    a.query_preview
-FROM pgfr_record.samples_ring sr
-JOIN pgfr_record.activity_samples_ring a ON a.slot_id = sr.slot_id
-WHERE sr.captured_at > now() - pgfr_record._get_ring_retention_interval()
-  AND a.pid IS NOT NULL
-ORDER BY sr.captured_at DESC, a.query_start ASC;
-CREATE OR REPLACE VIEW pgfr_record.recent_locks AS
-SELECT
-    sr.captured_at,
-    l.blocked_pid,
-    l.blocked_user,
-    l.blocked_app,
-    l.blocked_duration,
-    l.blocking_pid,
-    l.blocking_user,
-    l.blocking_app,
-    l.lock_type,
-    COALESCE(l.locked_relation_oid::regclass::text, 'OID:' || l.locked_relation_oid::text) AS locked_relation,
-    l.blocked_query_preview,
-    l.blocking_query_preview
-FROM pgfr_record.samples_ring sr
-JOIN pgfr_record.lock_samples_ring l ON l.slot_id = sr.slot_id
-WHERE sr.captured_at > now() - pgfr_record._get_ring_retention_interval()
-  AND l.blocked_pid IS NOT NULL
-ORDER BY sr.captured_at DESC, l.blocked_duration DESC;
-
--- Shows sessions currently idle in transaction, ordered by how long they have been idle
--- Used for quick visibility into problem sessions that may be blocking vacuum or holding locks
-CREATE OR REPLACE VIEW pgfr_record.recent_idle_in_transaction AS
-SELECT
-    sr.captured_at,
-    a.pid,
-    a.usename,
-    a.application_name,
-    a.client_addr,
-    a.xact_start,
-    sr.captured_at - a.xact_start AS idle_duration,
-    a.query_preview
-FROM pgfr_record.samples_ring sr
-JOIN pgfr_record.activity_samples_ring a ON a.slot_id = sr.slot_id
-WHERE sr.captured_at > now() - pgfr_record._get_ring_retention_interval()
-  AND a.pid IS NOT NULL
-  AND a.state = 'idle in transaction'
-ORDER BY a.xact_start ASC NULLS LAST;
-
-COMMENT ON VIEW pgfr_record.recent_idle_in_transaction IS
-'Sessions currently idle in transaction, ordered by how long they have been idle';
+-- recent_waits / recent_activity / recent_locks / recent_idle_in_transaction
+-- are now defined at the end of 08_ring_buffer_v2.sql alongside the v2
+-- tables they read from.
 
 CREATE OR REPLACE VIEW pgfr_record.recent_replication AS
 SELECT
@@ -1409,9 +1335,14 @@ BEGIN
     v_old_interval := pgfr_record._get_config('sample_interval_seconds', '60');
     v_old_archive := pgfr_record._get_config('archive_sample_frequency_minutes', '15');
 
-    -- Check if rebuild will be needed
-    SELECT COUNT(*) INTO v_current_slots FROM pgfr_record.samples_ring;
-    IF v_current_slots != v_profile.slots THEN
+    -- Check if rebuild will be needed. v2 ring slot count lives in
+    -- pgfr_record.ring_config.num_slots (set at install from
+    -- ring_buffer_partitions config), not in a pre-allocated row count
+    -- as the retired legacy ring did.
+    SELECT num_slots INTO v_current_slots
+      FROM pgfr_record.ring_config
+     WHERE singleton;
+    IF v_current_slots IS DISTINCT FROM v_profile.slots THEN
         v_rebuild_needed := true;
     END IF;
 
@@ -1448,15 +1379,17 @@ BEGIN
         v_profile.archive_frequency_min::text,
         (v_old_archive IS DISTINCT FROM v_profile.archive_frequency_min::text);
 
-    -- Warn if rebuild is needed
+    -- Ring buffer slot count change is now a config-only signal; the v2
+    -- ring uses TRUNCATE-rotated LIST-partitioned tables and is resized
+    -- via partition management, not a rebuild call.
     IF v_rebuild_needed THEN
-        RAISE WARNING 'Ring buffer slot count changed. Run pgfr_record.rebuild_ring_buffers() to resize. Data in ring buffers will be lost.';
+        RAISE NOTICE 'ring_buffer_slots config changed; v2 ring partitions are managed by partition-maintenance cron jobs.';
     END IF;
 
     RAISE NOTICE 'Applied optimization profile: % (%)', p_profile, v_profile.description;
 END;
 $$;
-COMMENT ON FUNCTION pgfr_record.apply_optimization_profile(TEXT) IS 'Applies a ring buffer optimization profile. Updates ring_buffer_slots, sample_interval_seconds, and archive_sample_frequency_minutes. Call rebuild_ring_buffers() after if slot count changed.';
+COMMENT ON FUNCTION pgfr_record.apply_optimization_profile(TEXT) IS 'Applies a ring buffer optimization profile. Updates ring_buffer_slots, sample_interval_seconds, and archive_sample_frequency_minutes config keys. Partition management for the v2 ring is handled by the partition-maintenance cron jobs.';
 
 -- Preview the configuration changes from applying a specified profile
 -- Compares current settings against profile values to show impact before applying

@@ -18,7 +18,7 @@ select pgfr_record.snapshot();
 \i /tmp/migrate_phase3.sql
 
 begin;
-select plan(9);
+select plan(6);
 
 -- T1: snapshots view is now a UNION ALL view (not a base table)
 select ok(
@@ -73,47 +73,10 @@ begin
 end $$;
 select ok(true, 'T6: bare INSERT INTO snapshots (captured_at) works, RETURNING id non-null');
 
--- T7: activity_samples_archive INSTEAD OF INSERT routes to _v2
-do $$
-begin
-    insert into pgfr_record.activity_samples_archive (captured_at, pid, state)
-    values (now(), 12345, 'active');
-end $$;
-select ok(
-    exists (
-        select 1 from pgfr_record.activity_samples_archive_v2
-        where pid = 12345 and state = 'active'
-    ),
-    'T7: INSERT INTO activity_samples_archive routes to activity_samples_archive_v2'
-);
-
--- T8: lock_samples_archive INSTEAD OF INSERT routes to _v2
-do $$
-begin
-    insert into pgfr_record.lock_samples_archive (captured_at, blocked_pid, blocking_pid)
-    values (now(), 22222, 33333);
-end $$;
-select ok(
-    exists (
-        select 1 from pgfr_record.lock_samples_archive_v2
-        where blocked_pid = 22222 and blocking_pid = 33333
-    ),
-    'T8: INSERT INTO lock_samples_archive routes to lock_samples_archive_v2'
-);
-
--- T9: wait_samples_archive INSTEAD OF INSERT routes to _v2
-do $$
-begin
-    insert into pgfr_record.wait_samples_archive (captured_at, wait_event_type, wait_event, count)
-    values (now(), 'Lock', 'relation', 7);
-end $$;
-select ok(
-    exists (
-        select 1 from pgfr_record.wait_samples_archive_v2
-        where wait_event_type = 'Lock' and wait_event = 'relation' and count = 7
-    ),
-    'T9: INSERT INTO wait_samples_archive routes to wait_samples_archive_v2'
-);
+-- T7/T8/T9 (archive INSTEAD OF INSERT dual-write triggers) retired alongside
+-- the legacy + v2 archive tables. All three archive surfaces are gone, so the
+-- routing they tested is moot. The snapshots-side migration triggers (T1-T6)
+-- remain in place and are still exercised above.
 
 select * from finish();
 rollback;

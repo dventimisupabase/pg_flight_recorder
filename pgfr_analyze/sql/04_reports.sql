@@ -227,7 +227,7 @@ BEGIN
     DECLARE
         v_last_sample TIMESTAMPTZ;
     BEGIN
-        SELECT max(captured_at) INTO v_last_sample FROM pgfr_record.samples_ring;
+        SELECT pgfr_record.epoch() + max(sample_ts) * interval '1 second' INTO v_last_sample FROM pgfr_record.wait_samples;
         IF v_last_sample IS NULL OR v_last_sample < now() - interval '15 minutes' THEN
             RETURN QUERY SELECT
                 'STALE_DATA'::text,
@@ -427,23 +427,34 @@ BEGIN
 
     -- ==========================================================================
     -- Lock Contention Section
+    -- (Migrated from legacy lock_samples_archive to v2 lock_samples; lock_type
+    -- decoded via lock_type_map. v2 doesn't retain blocked_query_preview, so
+    -- that column is omitted from the report.)
     -- ==========================================================================
     v_result := v_result || '## Lock Contention' || E'\n\n';
 
     SELECT count(*) INTO v_count
-    FROM pgfr_record.lock_samples_archive
-    WHERE captured_at BETWEEN p_start_time AND p_end_time;
+    FROM pgfr_record.lock_samples ls
+    WHERE pgfr_record.epoch() + ls.sample_ts * interval '1 second'
+          BETWEEN p_start_time AND p_end_time;
 
     IF v_count = 0 THEN
         v_result := v_result || '(no lock contention recorded)' || E'\n\n';
     ELSE
-        v_result := v_result || '| Time | Blocked PID | Blocking PID | Lock Type | Duration | Blocked Query |' || E'\n';
-        v_result := v_result || '|------|-------------|--------------|-----------|----------|---------------|' || E'\n';
+        v_result := v_result || '| Time | Blocked PID | Blocking PID | Lock Type | Duration | Relation |' || E'\n';
+        v_result := v_result || '|------|-------------|--------------|-----------|----------|----------|' || E'\n';
         FOR v_row IN
-            SELECT *
-            FROM pgfr_record.lock_samples_archive
-            WHERE captured_at BETWEEN p_start_time AND p_end_time
-            ORDER BY captured_at DESC
+            SELECT pgfr_record.epoch() + ls.sample_ts * interval '1 second' AS captured_at,
+                   ls.blocked_pid,
+                   ls.blocking_pid,
+                   coalesce(ltm.lock_type, ls.lock_type::text) AS lock_type,
+                   ls.blocked_duration_s * interval '1 second' AS blocked_duration,
+                   ls.locked_relation_oid::regclass::text AS locked_relation
+            FROM pgfr_record.lock_samples ls
+            LEFT JOIN pgfr_record.lock_type_map ltm ON ltm.id = ls.lock_type
+            WHERE pgfr_record.epoch() + ls.sample_ts * interval '1 second'
+                  BETWEEN p_start_time AND p_end_time
+            ORDER BY ls.sample_ts DESC
             LIMIT 50
         LOOP
             v_result := v_result || '| ' ||
@@ -452,21 +463,24 @@ BEGIN
                 COALESCE(v_row.blocking_pid::TEXT, '-') || ' | ' ||
                 COALESCE(v_row.lock_type, '-') || ' | ' ||
                 COALESCE(v_row.blocked_duration::TEXT, '-') || ' | ' ||
-                COALESCE(left(v_row.blocked_query_preview, 40), '-') || ' |' || E'\n';
+                COALESCE(v_row.locked_relation, '-') || ' |' || E'\n';
         END LOOP;
         v_result := v_result || E'\n';
     END IF;
 
     -- ==========================================================================
     -- Long-Running Transactions Section
+    -- (Migrated from legacy activity_samples_archive to v2 activity_samples.)
     -- ==========================================================================
     v_result := v_result || '## Long-Running Transactions' || E'\n\n';
 
     SELECT count(*) INTO v_count
-    FROM pgfr_record.activity_samples_archive
-    WHERE captured_at BETWEEN p_start_time AND p_end_time
-      AND xact_start IS NOT NULL
-      AND captured_at - xact_start > interval '5 minutes';
+    FROM pgfr_record.activity_samples a
+    WHERE pgfr_record.epoch() + a.sample_ts * interval '1 second'
+          BETWEEN p_start_time AND p_end_time
+      AND a.xact_start IS NOT NULL
+      AND (pgfr_record.epoch() + a.sample_ts * interval '1 second') - a.xact_start
+          > interval '5 minutes';
 
     IF v_count = 0 THEN
         v_result := v_result || '(no long-running transactions detected)' || E'\n\n';
@@ -474,19 +488,21 @@ BEGIN
         v_result := v_result || '| Time | PID | User | App | Transaction Age | State | Query Preview |' || E'\n';
         v_result := v_result || '|------|-----|------|-----|-----------------|-------|---------------|' || E'\n';
         FOR v_row IN
-            SELECT DISTINCT ON (pid, xact_start)
-                captured_at,
-                pid,
-                usename,
-                application_name,
-                captured_at - xact_start AS xact_age,
-                state,
-                query_preview
-            FROM pgfr_record.activity_samples_archive
-            WHERE captured_at BETWEEN p_start_time AND p_end_time
-              AND xact_start IS NOT NULL
-              AND captured_at - xact_start > interval '5 minutes'
-            ORDER BY pid, xact_start, captured_at DESC
+            SELECT DISTINCT ON (a.pid, a.xact_start)
+                pgfr_record.epoch() + a.sample_ts * interval '1 second' AS captured_at,
+                a.pid,
+                a.usename,
+                a.application_name,
+                (pgfr_record.epoch() + a.sample_ts * interval '1 second') - a.xact_start AS xact_age,
+                a.state,
+                a.query_preview
+            FROM pgfr_record.activity_samples a
+            WHERE pgfr_record.epoch() + a.sample_ts * interval '1 second'
+                  BETWEEN p_start_time AND p_end_time
+              AND a.xact_start IS NOT NULL
+              AND (pgfr_record.epoch() + a.sample_ts * interval '1 second') - a.xact_start
+                  > interval '5 minutes'
+            ORDER BY a.pid, a.xact_start, a.sample_ts DESC
             LIMIT 25
         LOOP
             v_result := v_result || '| ' ||
@@ -885,7 +901,7 @@ BEGIN
             'Collections are slower than expected. Consider: (1) switching to light mode, (2) increasing sample_interval_seconds to 300, or (3) checking for system bottlenecks.'::text;
     END IF;
     SELECT schema_size_mb INTO v_schema_size_mb FROM pgfr_record._check_schema_size();
-    SELECT count(*) INTO v_sample_count FROM pgfr_record.samples_ring;
+    SELECT count(*) INTO v_sample_count FROM pgfr_record.wait_samples;
     IF v_schema_size_mb < 3000 THEN
         RETURN QUERY SELECT
             '2. Storage Consumption'::text,
@@ -953,7 +969,7 @@ BEGIN
             format('%s trips in 90 days', v_circuit_breaker_trips),
             'Frequent circuit breaker trips indicate system stress. Consider switching to light mode permanently.'::text;
     END IF;
-    SELECT max(captured_at) INTO v_last_sample FROM pgfr_record.samples_ring;
+    SELECT pgfr_record.epoch() + max(sample_ts) * interval '1 second' INTO v_last_sample FROM pgfr_record.wait_samples;
     SELECT max(captured_at) INTO v_last_snapshot FROM pgfr_record.snapshots;
     IF v_last_sample > now() - interval '10 minutes' AND v_last_snapshot > now() - interval '15 minutes' THEN
         RETURN QUERY SELECT

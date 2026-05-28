@@ -599,7 +599,7 @@ $$;
 comment on table pgfr_record.activity_samples is
 'Ring buffer v2: flat per-backend activity samples. One row per active session per tick. '
 'Top 25 sessions by query age. Partitioned by LIST(slot); TRUNCATE on rotation. '
-'Feeds archive_ring_samples() and flush_ring_to_aggregates(). Never DELETEd.';
+'Never DELETEd.';
 
 --------------------------------------------------------------------------------
 -- 12. lock_type_map: compact int → text mapping for lock_samples.lock_type
@@ -643,8 +643,59 @@ declare
     v_active_count      smallint;
     v_seen_waits        text[] := '{}';
     v_rows_inserted     int    := 0;
+    -- collection_stats instrumentation (replaces the legacy sample()'s
+    -- observability; uses collection_type='sample' to stay compatible with
+    -- existing safety dashboards and tests).
+    v_stat_id           int;
+    v_load_shedding_enabled bool;
+    v_load_threshold_pct int;
+    v_max_connections   int;
+    v_active_clients    int;
+    v_active_pct        numeric;
 begin
     v_captured_at := clock_timestamp();
+
+    -- Circuit breaker: skip if recent runs averaged over the threshold.
+    if pgfr_record._check_circuit_breaker('sample') then
+        perform pgfr_record._record_collection_skip(
+            'sample',
+            'Circuit breaker tripped - recent runs exceeded threshold');
+        return v_captured_at;
+    end if;
+
+    -- Load shedding: skip if active client connections are above the configured
+    -- percentage of max_connections. Read config before opening the stats row
+    -- so a skip doesn't create an orphan started_at row.
+    v_load_shedding_enabled := coalesce(
+        pgfr_record._get_config('load_shedding_enabled', 'true')::bool,
+        true
+    );
+    if v_load_shedding_enabled then
+        v_load_threshold_pct := coalesce(
+            pgfr_record._get_config('load_shedding_active_pct', '70')::int,
+            70
+        );
+        select setting::int into v_max_connections
+        from pg_settings where name = 'max_connections';
+        select count(*) into v_active_clients
+        from pg_stat_activity
+        where state = 'active' and backend_type = 'client backend';
+        v_active_pct := (v_active_clients::numeric / nullif(v_max_connections, 0)) * 100;
+        if v_active_pct >= v_load_threshold_pct then
+            perform pgfr_record._record_collection_skip(
+                'sample',
+                format(
+                    'Load shedding: high load (%s active / %s max = %s%% >= %s%% threshold)',
+                    v_active_clients, v_max_connections, round(v_active_pct, 1),
+                    v_load_threshold_pct
+                )
+            );
+            return v_captured_at;
+        end if;
+    end if;
+
+    v_stat_id := pgfr_record._record_collection_start('sample', 3);
+
     v_sample_ts   := extract(epoch from (v_captured_at - pgfr_record.epoch()))::int4;
     v_slot        := pgfr_record.ring_current_slot();
 
@@ -821,6 +872,12 @@ begin
         raise warning 'pgfr_record.sample_ring: activity_samples insert failed [%]: %', sqlstate, sqlerrm;
     end;
 
+    -- Mark collection as successful. We get here even if a section's
+    -- EXCEPTION handler fired -- those sections only emit a WARNING and
+    -- don't abort the rest of the sample. Counting partial-success runs
+    -- as 'success = true' matches the legacy sample()'s contract.
+    perform pgfr_record._record_collection_end(v_stat_id, true);
+
     return v_captured_at;
 end;
 $$;
@@ -838,307 +895,152 @@ comment on function pgfr_record.sample_ring() is
 -- with reads from wait_samples, lock_samples, activity_samples (v2).
 -- Decodes wait_samples integer[] via wait_event_map.
 -- Uses ring_config to know the current slot; reads all slots (full ring window).
---------------------------------------------------------------------------------
+-- Orphan dead code retired alongside the legacy ring:
+--   flush_ring_to_aggregates() / archive_ring_samples() v2 versions.
+-- Their cron schedules (pgfr_flush, pgfr_archive) were dropped in wave 1;
+-- no callers remain. Tables they wrote to (aggregates, archives) are
+-- dropped in 02_tables.sql.
 
-create or replace function pgfr_record.flush_ring_to_aggregates()
-returns void
-language plpgsql
-as $$
-declare
-    v_start_ts      int4;
-    v_end_ts        int4;
-    v_start_time    timestamptz;
-    v_end_time      timestamptz;
-    v_total_samples bigint;
-    v_last_flush_ts int4;
-begin
-    -- determine window: all data in ring since last flush
-    select coalesce(
-        extract(epoch from max(end_time) - pgfr_record.epoch())::int4,
-        0
-    )
-    into v_last_flush_ts
-    from pgfr_record.wait_event_aggregates;
-
-    select min(sample_ts), max(sample_ts), count(distinct sample_ts)
-    into v_start_ts, v_end_ts, v_total_samples
-    from pgfr_record.wait_samples
-    where sample_ts > v_last_flush_ts;
-
-    if v_start_ts is null or v_total_samples = 0 then
-        return;
-    end if;
-
-    v_start_time := pgfr_record.epoch() + v_start_ts * interval '1 second';
-    v_end_time   := pgfr_record.epoch() + v_end_ts   * interval '1 second';
-
-    -- -------------------------------------------------------------------------
-    -- wait event aggregates: decode integer[] via wait_event_map
-    -- one group per (wait_event_map entry) per flush window
-    -- -------------------------------------------------------------------------
-    insert into pgfr_record.wait_event_aggregates (
-        start_time, end_time, backend_type, wait_event_type, wait_event, state,
-        sample_count, total_waiters, avg_waiters, max_waiters, pct_of_samples
-    )
-    with decoded as (
-        -- extract (wait_id, count) pairs from each integer[] row
-        -- format: [-wid, cnt, qmap_id, ...] repeated per wait group
-        select
-            ws.sample_ts,
-            abs(ws.data[idx.i])::smallint             as wait_id,
-            ws.data[idx.i + 1]::int                   as waiter_count
-        from pgfr_record.wait_samples ws
-        cross join lateral (
-            select i
-            from generate_subscripts(ws.data, 1) as i
-            where ws.data[i] < 0          -- marker: negative = wait_event_map id
-        ) idx
-        where ws.sample_ts > v_last_flush_ts
-    ),
-    grouped as (
-        select
-            d.wait_id,
-            count(distinct d.sample_ts)                    as sample_count,
-            sum(d.waiter_count)                            as total_waiters,
-            round(avg(d.waiter_count), 2)                  as avg_waiters,
-            max(d.waiter_count)                            as max_waiters
-        from decoded d
-        group by d.wait_id
-    )
-    select
-        v_start_time,
-        v_end_time,
-        wem.state        as backend_type,   -- state doubles as backend_type proxy
-        wem.type         as wait_event_type,
-        wem.event        as wait_event,
-        wem.state        as state,
-        g.sample_count,
-        g.total_waiters,
-        g.avg_waiters,
-        g.max_waiters,
-        round(100.0 * g.sample_count / nullif(v_total_samples, 0), 1) as pct_of_samples
-    from grouped g
-    join pgfr_record.wait_event_map wem on wem.id = g.wait_id;
-
-    -- -------------------------------------------------------------------------
-    -- lock aggregates: decode lock_samples using lock_type_map
-    -- -------------------------------------------------------------------------
-    insert into pgfr_record.lock_aggregates (
-        start_time, end_time, blocked_user, blocking_user, lock_type,
-        locked_relation_oid, occurrence_count, max_duration, avg_duration, sample_query
-    )
-    select
-        v_start_time,
-        v_end_time,
-        null as blocked_user,       -- lock_samples v2 stores pids not usernames
-        null as blocking_user,
-        ltm.lock_type,
-        ls.locked_relation_oid,
-        count(*)                    as occurrence_count,
-        (max(ls.blocked_duration_s) * interval '1 second') as max_duration,
-        (avg(ls.blocked_duration_s) * interval '1 second') as avg_duration,
-        null as sample_query
-    from pgfr_record.lock_samples ls
-    left join pgfr_record.lock_type_map ltm on ltm.id = ls.lock_type
-    where ls.sample_ts > v_last_flush_ts
-    group by ltm.lock_type, ls.locked_relation_oid;
-
-    -- -------------------------------------------------------------------------
-    -- activity aggregates: from activity_samples (flat rows)
-    -- -------------------------------------------------------------------------
-    insert into pgfr_record.activity_aggregates (
-        start_time, end_time, query_preview, occurrence_count, max_duration, avg_duration
-    )
-    select
-        v_start_time,
-        v_end_time,
-        as2.query_preview,
-        count(*)                                               as occurrence_count,
-        max(v_end_time - as2.query_start)                     as max_duration,
-        avg(v_end_time - as2.query_start)                     as avg_duration
-    from pgfr_record.activity_samples as2
-    where as2.sample_ts > v_last_flush_ts
-      and as2.query_start is not null
-    group by as2.query_preview;
-
-    raise notice 'pgfr_record: Flushed ring buffer (% to %, % samples)',
-        v_start_time, v_end_time, v_total_samples;
-end;
-$$;
-
-comment on function pgfr_record.flush_ring_to_aggregates() is
-'Ring buffer v2: flush wait_samples, lock_samples, activity_samples to durable aggregates. '
-'Decodes wait_samples integer[] via wait_event_map. '
-'Reads all ring slots since last flush (not slot-bounded). '
-'Called every 5 minutes via pg_cron (pgfr_flush job).';
-
---------------------------------------------------------------------------------
--- 15. archive_ring_samples() v2: reads new ring tables
--- Drains wait_samples, lock_samples, activity_samples into archive tables.
--- Decodes lock_type via lock_type_map; wait events via wait_event_map.
--- Archive tables retain full-resolution data for forensic analysis.
---------------------------------------------------------------------------------
-
-create or replace function pgfr_record.archive_ring_samples()
-returns void
-language plpgsql
-as $$
-declare
-    v_enabled             bool;
-    v_archive_activity    bool;
-    v_archive_locks       bool;
-    v_archive_waits       bool;
-    v_frequency_minutes   int;
-    v_last_archive_ts     int4;
-    v_next_archive_ts     int4;
-    v_now_ts              int4;
-    v_samples_to_archive  bigint;
-    v_activity_rows       int := 0;
-    v_lock_rows           int := 0;
-    v_wait_rows           int := 0;
-begin
-    v_enabled := coalesce(
-        (select value::boolean from pgfr_record.config where key = 'archive_samples_enabled'),
-        true
-    );
-    if not v_enabled then
-        return;
-    end if;
-
-    v_archive_activity  := coalesce(
-        (select value::boolean from pgfr_record.config where key = 'archive_activity_samples'), true);
-    v_archive_locks     := coalesce(
-        (select value::boolean from pgfr_record.config where key = 'archive_lock_samples'), true);
-    v_archive_waits     := coalesce(
-        (select value::boolean from pgfr_record.config where key = 'archive_wait_samples'), true);
-    v_frequency_minutes := coalesce(
-        (select value::int from pgfr_record.config where key = 'archive_sample_frequency_minutes'), 15);
-
-    v_now_ts := extract(epoch from now() - pgfr_record.epoch())::int4;
-
-    -- last archive watermark: max sample_ts already archived across all three tables
-    select coalesce(greatest(
-        (select extract(epoch from max(captured_at) - pgfr_record.epoch())::int4
-         from pgfr_record.activity_samples_archive),
-        (select extract(epoch from max(captured_at) - pgfr_record.epoch())::int4
-         from pgfr_record.lock_samples_archive),
-        (select extract(epoch from max(captured_at) - pgfr_record.epoch())::int4
-         from pgfr_record.wait_samples_archive)
-    ), 0)
-    into v_last_archive_ts;
-
-    v_next_archive_ts := v_last_archive_ts + v_frequency_minutes * 60;
-
-    if v_now_ts < v_next_archive_ts then
-        return;
-    end if;
-
-    select count(distinct sample_ts)
-    into v_samples_to_archive
-    from pgfr_record.wait_samples
-    where sample_ts > v_last_archive_ts;
-
-    if v_samples_to_archive = 0 then
-        return;
-    end if;
-
-    if v_archive_activity then
-        insert into pgfr_record.activity_samples_archive (
-            sample_id, captured_at, pid, usename, application_name, client_addr,
-            backend_type, state, wait_event_type, wait_event,
-            backend_start, xact_start, query_start, state_change, query_preview
-        )
-        select
-            as2.sample_ts                                                 as sample_id,
-            pgfr_record.epoch() + as2.sample_ts * interval '1 second'    as captured_at,
-            as2.pid,
-            as2.usename,
-            as2.application_name,
-            as2.client_addr,
-            as2.backend_type,
-            as2.state,
-            as2.wait_event_type,
-            as2.wait_event,
-            as2.backend_start,
-            as2.xact_start,
-            as2.query_start,
-            as2.state_change,
-            as2.query_preview
-        from pgfr_record.activity_samples as2
-        where as2.sample_ts > v_last_archive_ts;
-        get diagnostics v_activity_rows = row_count;
-    end if;
-
-    if v_archive_locks then
-        insert into pgfr_record.lock_samples_archive (
-            sample_id, captured_at, blocked_pid, blocked_user, blocked_app,
-            blocked_query_preview, blocked_duration, blocking_pid, blocking_user,
-            blocking_app, blocking_query_preview, lock_type, locked_relation_oid
-        )
-        select
-            ls.sample_ts                                                  as sample_id,
-            pgfr_record.epoch() + ls.sample_ts * interval '1 second'     as captured_at,
-            ls.blocked_pid,
-            null                                                          as blocked_user,
-            null                                                          as blocked_app,
-            null                                                          as blocked_query_preview,
-            ls.blocked_duration_s * interval '1 second'                  as blocked_duration,
-            ls.blocking_pid,
-            null                                                          as blocking_user,
-            null                                                          as blocking_app,
-            null                                                          as blocking_query_preview,
-            ltm.lock_type,
-            ls.locked_relation_oid
-        from pgfr_record.lock_samples ls
-        left join pgfr_record.lock_type_map ltm on ltm.id = ls.lock_type
-        where ls.sample_ts > v_last_archive_ts;
-        get diagnostics v_lock_rows = row_count;
-    end if;
-
-    if v_archive_waits then
-        -- decode integer[] into one row per (sample_ts, wait_event)
-        insert into pgfr_record.wait_samples_archive (
-            sample_id, captured_at, backend_type, wait_event_type, wait_event, state, count
-        )
-        with decoded as (
-            select
-                ws.sample_ts,
-                abs(ws.data[idx.i])::smallint    as wait_id,
-                ws.data[idx.i + 1]::int          as waiter_count
-            from pgfr_record.wait_samples ws
-            cross join lateral (
-                select i
-                from generate_subscripts(ws.data, 1) as i
-                where ws.data[i] < 0
-            ) idx
-            where ws.sample_ts > v_last_archive_ts
-        )
-        select
-            d.sample_ts                                                   as sample_id,
-            pgfr_record.epoch() + d.sample_ts * interval '1 second'      as captured_at,
-            wem.state                                                     as backend_type,
-            wem.type                                                      as wait_event_type,
-            wem.event                                                     as wait_event,
-            wem.state                                                     as state,
-            d.waiter_count                                                as count
-        from decoded d
-        join pgfr_record.wait_event_map wem on wem.id = d.wait_id;
-        get diagnostics v_wait_rows = row_count;
-    end if;
-
-    raise notice 'pgfr_record: Archived raw samples (% samples, % activity rows, % lock rows, % wait rows)',
-        v_samples_to_archive, v_activity_rows, v_lock_rows, v_wait_rows;
-end;
-$$;
-
-comment on function pgfr_record.archive_ring_samples() is
-'Ring buffer v2: archive wait_samples, lock_samples, activity_samples to persistent archive tables. '
-'Decodes wait_samples integer[] via wait_event_map. '
-'Decodes lock_samples.lock_type via lock_type_map. '
-'Archive cadence controlled by archive_sample_frequency_minutes config (default 15). '
-'Called every 15 minutes via pg_cron (pgfr_archive job).';
+DROP FUNCTION IF EXISTS pgfr_record.flush_ring_to_aggregates();
+DROP FUNCTION IF EXISTS pgfr_record.archive_ring_samples();
 
 --------------------------------------------------------------------------------
 -- End of ring buffer v2 section
 --------------------------------------------------------------------------------
+
+
+-- recent_waits / recent_activity / recent_locks / recent_idle_in_transaction
+-- views migrated to v2 storage as part of the legacy-ring retirement.
+-- Column shape preserved where v2 stores the data; NULL where v2 dropped
+-- columns by design (see comments on each).
+
+DROP VIEW IF EXISTS pgfr_record.recent_waits;
+CREATE VIEW pgfr_record.recent_waits AS
+WITH retention_cutoff AS (
+    SELECT pgfr_record.epoch()
+         + (
+             extract(epoch FROM now() - pgfr_record.epoch())::int4
+             - (num_slots * extract(epoch FROM rotation_period)::int4)
+           ) * interval '1 second' AS cutoff
+    FROM pgfr_record.ring_config WHERE singleton
+),
+decoded AS (
+    SELECT
+        pgfr_record.epoch() + ws.sample_ts * interval '1 second' AS captured_at,
+        abs(ws.data[i])::smallint                                AS wait_id,
+        ws.data[i + 1]::integer                                  AS waiter_count
+    FROM pgfr_record.wait_samples ws,
+         retention_cutoff rc,
+         generate_subscripts(ws.data, 1) AS i
+    WHERE ws.data[i] < 0
+      AND (pgfr_record.epoch() + ws.sample_ts * interval '1 second') > rc.cutoff
+)
+-- backend_type is not stored in v2 wait_samples (the v2 row carries datid +
+-- encoded wait groups; per-backend type is no longer kept). Surfaced as NULL.
+SELECT
+    d.captured_at,
+    NULL::text       AS backend_type,
+    wem.type         AS wait_event_type,
+    wem.event        AS wait_event,
+    wem.state        AS state,
+    d.waiter_count   AS count
+FROM decoded d
+JOIN pgfr_record.wait_event_map wem ON wem.id = d.wait_id
+ORDER BY d.captured_at DESC, d.waiter_count DESC;
+
+DROP VIEW IF EXISTS pgfr_record.recent_activity;
+CREATE VIEW pgfr_record.recent_activity AS
+WITH retention_cutoff AS (
+    SELECT pgfr_record.epoch()
+         + (
+             extract(epoch FROM now() - pgfr_record.epoch())::int4
+             - (num_slots * extract(epoch FROM rotation_period)::int4)
+           ) * interval '1 second' AS cutoff
+    FROM pgfr_record.ring_config WHERE singleton
+)
+-- client_addr, backend_start are not stored in v2 activity_samples (v2 drops
+-- them as per-backend fields not material to ring-buffer analysis). NULL.
+SELECT
+    pgfr_record.epoch() + as2.sample_ts * interval '1 second' AS captured_at,
+    as2.pid,
+    as2.usename,
+    as2.application_name,
+    NULL::inet                                                AS client_addr,
+    as2.backend_type,
+    as2.state,
+    as2.wait_event_type,
+    as2.wait_event,
+    NULL::timestamptz                                         AS backend_start,
+    as2.xact_start,
+    as2.query_start,
+    NULL::interval                                            AS session_age,
+    (pgfr_record.epoch() + as2.sample_ts * interval '1 second') - as2.xact_start AS xact_age,
+    (pgfr_record.epoch() + as2.sample_ts * interval '1 second') - as2.query_start AS running_for,
+    as2.query_preview
+FROM pgfr_record.activity_samples as2,
+     retention_cutoff rc
+WHERE (pgfr_record.epoch() + as2.sample_ts * interval '1 second') > rc.cutoff
+  AND as2.pid IS NOT NULL
+ORDER BY as2.sample_ts DESC, as2.query_start ASC;
+
+DROP VIEW IF EXISTS pgfr_record.recent_locks;
+CREATE VIEW pgfr_record.recent_locks AS
+WITH retention_cutoff AS (
+    SELECT pgfr_record.epoch()
+         + (
+             extract(epoch FROM now() - pgfr_record.epoch())::int4
+             - (num_slots * extract(epoch FROM rotation_period)::int4)
+           ) * interval '1 second' AS cutoff
+    FROM pgfr_record.ring_config WHERE singleton
+)
+-- v2 lock_samples stores pids and a coded lock_type only. blocked_user,
+-- blocked_app, blocking_user, blocking_app, and the two query previews are
+-- not retained in v2 — surfaced as NULL.
+SELECT
+    pgfr_record.epoch() + ls.sample_ts * interval '1 second'   AS captured_at,
+    ls.blocked_pid,
+    NULL::text                                                  AS blocked_user,
+    NULL::text                                                  AS blocked_app,
+    ls.blocked_duration_s * interval '1 second'                AS blocked_duration,
+    ls.blocking_pid,
+    NULL::text                                                  AS blocking_user,
+    NULL::text                                                  AS blocking_app,
+    coalesce(ltm.lock_type, ls.lock_type::text)                AS lock_type,
+    coalesce(
+        (ls.locked_relation_oid::regclass)::text,
+        'OID:' || ls.locked_relation_oid::text
+    )                                                           AS locked_relation,
+    NULL::text                                                  AS blocked_query_preview,
+    NULL::text                                                  AS blocking_query_preview
+FROM pgfr_record.lock_samples ls
+CROSS JOIN retention_cutoff rc
+LEFT JOIN pgfr_record.lock_type_map ltm ON ltm.id = ls.lock_type
+WHERE (pgfr_record.epoch() + ls.sample_ts * interval '1 second') > rc.cutoff
+ORDER BY ls.sample_ts DESC, ls.blocked_duration_s DESC NULLS LAST;
+
+DROP VIEW IF EXISTS pgfr_record.recent_idle_in_transaction;
+CREATE VIEW pgfr_record.recent_idle_in_transaction AS
+WITH retention_cutoff AS (
+    SELECT pgfr_record.epoch()
+         + (
+             extract(epoch FROM now() - pgfr_record.epoch())::int4
+             - (num_slots * extract(epoch FROM rotation_period)::int4)
+           ) * interval '1 second' AS cutoff
+    FROM pgfr_record.ring_config WHERE singleton
+)
+SELECT
+    pgfr_record.epoch() + as2.sample_ts * interval '1 second' AS captured_at,
+    as2.pid,
+    as2.usename,
+    as2.application_name,
+    NULL::inet                                                AS client_addr,
+    as2.xact_start,
+    (pgfr_record.epoch() + as2.sample_ts * interval '1 second') - as2.xact_start AS idle_duration,
+    as2.query_preview
+FROM pgfr_record.activity_samples as2,
+     retention_cutoff rc
+WHERE (pgfr_record.epoch() + as2.sample_ts * interval '1 second') > rc.cutoff
+  AND as2.pid IS NOT NULL
+  AND as2.state = 'idle in transaction'
+ORDER BY as2.xact_start ASC NULLS LAST;
 

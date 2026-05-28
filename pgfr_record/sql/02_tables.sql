@@ -157,9 +157,12 @@ CREATE TABLE IF NOT EXISTS pgfr_record.statement_snapshots (
 CREATE INDEX IF NOT EXISTS statement_snapshots_queryid_idx
     ON pgfr_record.statement_snapshots(queryid);
 
--- Add delta columns to existing installations (additive-only upgrade)
+-- Add delta columns to existing installations (additive-only upgrade).
+-- set local client_min_messages = warning silences the "column already exists,
+-- skipping" notices on fresh installs (the columns were created above).
 DO $$
 BEGIN
+    SET LOCAL client_min_messages = warning;
     ALTER TABLE pgfr_record.statement_snapshots ADD COLUMN IF NOT EXISTS calls_delta BIGINT;
     ALTER TABLE pgfr_record.statement_snapshots ADD COLUMN IF NOT EXISTS total_exec_time_delta DOUBLE PRECISION;
     ALTER TABLE pgfr_record.statement_snapshots ADD COLUMN IF NOT EXISTS rows_delta BIGINT;
@@ -199,6 +202,7 @@ END $$;
 -- monitoring" and blueprints/XMIN_HORIZON.md.
 DO $$
 BEGIN
+    SET LOCAL client_min_messages = warning;
     ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS activity_xmin XID;
     ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS activity_xmin_age BIGINT;
     ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS slot_xmin XID;
@@ -220,233 +224,50 @@ END $$;
 -- by the collector so it's genuinely binary, never three-valued.
 DO $$
 BEGIN
+    SET LOCAL client_min_messages = warning;
     ALTER TABLE pgfr_record.replication_snapshots ADD COLUMN IF NOT EXISTS backend_xmin XID;
     ALTER TABLE pgfr_record.replication_snapshots ADD COLUMN IF NOT EXISTS backend_xmin_age BIGINT;
     ALTER TABLE pgfr_record.replication_snapshots ADD COLUMN IF NOT EXISTS slot_name TEXT;
     ALTER TABLE pgfr_record.replication_snapshots ADD COLUMN IF NOT EXISTS is_logical_walsender BOOLEAN NOT NULL DEFAULT false;
 END $$;
 
-CREATE UNLOGGED TABLE IF NOT EXISTS pgfr_record.samples_ring (
-    slot_id             INTEGER PRIMARY KEY CHECK (slot_id >= 0 AND slot_id < 2880),
-    captured_at         TIMESTAMPTZ NOT NULL,
-    epoch_seconds       BIGINT NOT NULL
-) WITH (fillfactor = 70);
-COMMENT ON TABLE pgfr_record.samples_ring IS 'Ring buffer: Master slot tracker (configurable slots via ring_buffer_slots, default 120). Supports up to 2880 slots for extended retention or fine-grained sampling. Fillfactor 70 enables HOT updates. Use configure_ring_autovacuum(false) to disable autovacuum if desired.';
-
-CREATE UNLOGGED TABLE IF NOT EXISTS pgfr_record.wait_samples_ring (
-    slot_id             INTEGER REFERENCES pgfr_record.samples_ring(slot_id) ON DELETE CASCADE,
-    row_num             INTEGER NOT NULL CHECK (row_num >= 0 AND row_num < 100),
-    backend_type        TEXT,
-    wait_event_type     TEXT,
-    wait_event          TEXT,
-    state               TEXT,
-    count               INTEGER,
-    PRIMARY KEY (slot_id, row_num)
-) WITH (fillfactor = 90);
-COMMENT ON TABLE pgfr_record.wait_samples_ring IS 'Ring buffer: Wait events (UPDATE-only pattern). Pre-populated rows (slots × 100 rows, default 12,000). Fillfactor 90 enables HOT updates. Use configure_ring_autovacuum(false) to disable autovacuum if desired. NULLs indicate unused slots.';
-
-CREATE UNLOGGED TABLE IF NOT EXISTS pgfr_record.activity_samples_ring (
-    slot_id             INTEGER REFERENCES pgfr_record.samples_ring(slot_id) ON DELETE CASCADE,
-    row_num             INTEGER NOT NULL CHECK (row_num >= 0 AND row_num < 25),
-    pid                 INTEGER,
-    usename             TEXT,
-    application_name    TEXT,
-    client_addr         INET,
-    backend_type        TEXT,
-    state               TEXT,
-    wait_event_type     TEXT,
-    wait_event          TEXT,
-    backend_start       TIMESTAMPTZ,
-    xact_start          TIMESTAMPTZ,
-    query_start         TIMESTAMPTZ,
-    state_change        TIMESTAMPTZ,
-    query_preview       TEXT,
-    PRIMARY KEY (slot_id, row_num)
-) WITH (fillfactor = 90);
-COMMENT ON TABLE pgfr_record.activity_samples_ring IS 'Ring buffer: Active sessions (UPDATE-only pattern). Pre-populated rows (slots × 25 rows, default 3,000). Top 25 active sessions per sample. Fillfactor 90 enables HOT updates. Use configure_ring_autovacuum(false) to disable autovacuum if desired. NULLs indicate unused slots.';
-
-CREATE UNLOGGED TABLE IF NOT EXISTS pgfr_record.lock_samples_ring (
-    slot_id                 INTEGER REFERENCES pgfr_record.samples_ring(slot_id) ON DELETE CASCADE,
-    row_num                 INTEGER NOT NULL CHECK (row_num >= 0 AND row_num < 100),
-    blocked_pid             INTEGER,
-    blocked_user            TEXT,
-    blocked_app             TEXT,
-    blocked_query_preview   TEXT,
-    blocked_duration        INTERVAL,
-    blocking_pid            INTEGER,
-    blocking_user           TEXT,
-    blocking_app            TEXT,
-    blocking_query_preview  TEXT,
-    lock_type               TEXT,
-    locked_relation_oid     OID,
-    PRIMARY KEY (slot_id, row_num)
-) WITH (fillfactor = 90);
-COMMENT ON TABLE pgfr_record.lock_samples_ring IS 'Ring buffer: Lock contention (UPDATE-only pattern). Pre-populated rows (slots × 100 rows, default 12,000). Max 100 blocked/blocking pairs per sample. Fillfactor 90 enables HOT updates. Use configure_ring_autovacuum(false) to disable autovacuum if desired. NULLs indicate unused slots.';
-
-INSERT INTO pgfr_record.samples_ring (slot_id, captured_at, epoch_seconds)
-SELECT
-    generate_series AS slot_id,
-    '1970-01-01'::timestamptz,
-    0
-FROM generate_series(0, 119)
-ON CONFLICT (slot_id) DO NOTHING;
-INSERT INTO pgfr_record.wait_samples_ring (slot_id, row_num)
-SELECT s.slot_id, r.row_num
-FROM generate_series(0, 119) s(slot_id)
-CROSS JOIN generate_series(0, 99) r(row_num)
-ON CONFLICT (slot_id, row_num) DO NOTHING;
-INSERT INTO pgfr_record.activity_samples_ring (slot_id, row_num)
-SELECT s.slot_id, r.row_num
-FROM generate_series(0, 119) s(slot_id)
-CROSS JOIN generate_series(0, 24) r(row_num)
-ON CONFLICT (slot_id, row_num) DO NOTHING;
-INSERT INTO pgfr_record.lock_samples_ring (slot_id, row_num)
-SELECT s.slot_id, r.row_num
-FROM generate_series(0, 119) s(slot_id)
-CROSS JOIN generate_series(0, 99) r(row_num)
-ON CONFLICT (slot_id, row_num) DO NOTHING;
--- Aggregates wait event statistics over 5-minute windows, enabling analysis of wait event patterns
--- Stores metrics like average/max concurrent waiters per event type, state, and backend type
--- Aggregates: durable and survives crashes, with indexes for efficient time-range and event-type queries
-CREATE TABLE IF NOT EXISTS pgfr_record.wait_event_aggregates (
-    id              BIGSERIAL PRIMARY KEY,
-    start_time      TIMESTAMPTZ NOT NULL,
-    end_time        TIMESTAMPTZ NOT NULL,
-    backend_type    TEXT NOT NULL,
-    wait_event_type TEXT NOT NULL,
-    wait_event      TEXT NOT NULL,
-    state           TEXT NOT NULL,
-    sample_count    INTEGER NOT NULL,
-    total_waiters   BIGINT NOT NULL,
-    avg_waiters     NUMERIC NOT NULL,
-    max_waiters     INTEGER NOT NULL,
-    pct_of_samples  NUMERIC
-);
-CREATE INDEX IF NOT EXISTS wait_aggregates_time_idx
-    ON pgfr_record.wait_event_aggregates(start_time, end_time);
-CREATE INDEX IF NOT EXISTS wait_aggregates_event_idx
-    ON pgfr_record.wait_event_aggregates(wait_event_type, wait_event);
-COMMENT ON TABLE pgfr_record.wait_event_aggregates IS 'Aggregates: Durable wait event summaries (5-min windows, survives crashes)';
-
-
--- Stores aggregated lock contention patterns within time windows
--- Tracks which sessions block others, including lock type, affected relation, and duration statistics
--- Enables forensic analysis of lock conflicts and performance bottlenecks across restarts
-CREATE TABLE IF NOT EXISTS pgfr_record.lock_aggregates (
-    id                  BIGSERIAL PRIMARY KEY,
-    start_time          TIMESTAMPTZ NOT NULL,
-    end_time            TIMESTAMPTZ NOT NULL,
-    blocked_user        TEXT,
-    blocking_user       TEXT,
-    lock_type           TEXT,
-    locked_relation_oid OID,
-    occurrence_count    INTEGER NOT NULL,
-    max_duration        INTERVAL,
-    avg_duration        INTERVAL,
-    sample_query        TEXT
-);
-CREATE INDEX IF NOT EXISTS lock_aggregates_time_idx
-    ON pgfr_record.lock_aggregates(start_time, end_time);
-COMMENT ON TABLE pgfr_record.lock_aggregates IS 'Aggregates: Durable lock pattern summaries (5-min windows, survives crashes)';
-
-
--- Aggregates activity samples within 5-minute time windows
--- Stores query preview, occurrence count, and duration metrics (max/avg)
--- Provides durable activity summaries that survive database crashes
-CREATE TABLE IF NOT EXISTS pgfr_record.activity_aggregates (
-    id                  BIGSERIAL PRIMARY KEY,
-    start_time          TIMESTAMPTZ NOT NULL,
-    end_time            TIMESTAMPTZ NOT NULL,
-    query_preview       TEXT,
-    occurrence_count    INTEGER NOT NULL,
-    max_duration        INTERVAL,
-    avg_duration        INTERVAL
-);
-CREATE INDEX IF NOT EXISTS activity_aggregates_time_idx
-    ON pgfr_record.activity_aggregates(start_time, end_time);
-COMMENT ON TABLE pgfr_record.activity_aggregates IS 'Aggregates: Durable activity summaries (5-min windows, survives crashes)';
-
-
--- Stores snapshot samples of PostgreSQL backend activity for forensic analysis
--- Captures session details, query state, and wait events at regular intervals (15-min cadence)
--- Indexed by timestamp, sample group, and process ID for efficient historical queries
-CREATE TABLE IF NOT EXISTS pgfr_record.activity_samples_archive (
-    id                  BIGSERIAL PRIMARY KEY,
-    sample_id           BIGINT NOT NULL,
-    captured_at         TIMESTAMPTZ NOT NULL,
-    pid                 INTEGER,
-    usename             TEXT,
-    application_name    TEXT,
-    client_addr         INET,
-    backend_type        TEXT,
-    state               TEXT,
-    wait_event_type     TEXT,
-    wait_event          TEXT,
-    backend_start       TIMESTAMPTZ,
-    xact_start          TIMESTAMPTZ,
-    query_start         TIMESTAMPTZ,
-    state_change        TIMESTAMPTZ,
-    query_preview       TEXT
-);
-CREATE INDEX IF NOT EXISTS activity_archive_captured_at_idx
-    ON pgfr_record.activity_samples_archive(captured_at);
-CREATE INDEX IF NOT EXISTS activity_archive_sample_id_idx
-    ON pgfr_record.activity_samples_archive(sample_id);
-CREATE INDEX IF NOT EXISTS activity_archive_pid_idx
-    ON pgfr_record.activity_samples_archive(pid, captured_at);
-COMMENT ON TABLE pgfr_record.activity_samples_archive IS 'Raw archives: Activity samples for forensic analysis (15-min cadence, full resolution)';
-
-
--- Archives lock contention incidents with complete blocking chains (blocked and blocking process details)
--- Captures at 15-minute intervals for forensic analysis of lock conflicts and deadlock relationships
--- Stores query previews, process info (PID, user, application), lock types, and relation OIDs
-CREATE TABLE IF NOT EXISTS pgfr_record.lock_samples_archive (
-    id                      BIGSERIAL PRIMARY KEY,
-    sample_id               BIGINT NOT NULL,
-    captured_at             TIMESTAMPTZ NOT NULL,
-    blocked_pid             INTEGER,
-    blocked_user            TEXT,
-    blocked_app             TEXT,
-    blocked_query_preview   TEXT,
-    blocked_duration        INTERVAL,
-    blocking_pid            INTEGER,
-    blocking_user           TEXT,
-    blocking_app            TEXT,
-    blocking_query_preview  TEXT,
-    lock_type               TEXT,
-    locked_relation_oid     OID
-);
-CREATE INDEX IF NOT EXISTS lock_archive_captured_at_idx
-    ON pgfr_record.lock_samples_archive(captured_at);
-CREATE INDEX IF NOT EXISTS lock_archive_sample_id_idx
-    ON pgfr_record.lock_samples_archive(sample_id);
-CREATE INDEX IF NOT EXISTS lock_archive_blocked_pid_idx
-    ON pgfr_record.lock_samples_archive(blocked_pid, captured_at);
-CREATE INDEX IF NOT EXISTS lock_archive_blocking_pid_idx
-    ON pgfr_record.lock_samples_archive(blocking_pid, captured_at);
-COMMENT ON TABLE pgfr_record.lock_samples_archive IS 'Raw archives: Lock samples for forensic analysis (15-min cadence, full blocking chains)';
-
-
--- Archives raw wait event samples at full resolution for forensic analysis
--- Captures backend type, wait event type/name, and state to enable detailed investigation
--- Linked to parent samples via sample_id; indexed for efficient time-series queries
-CREATE TABLE IF NOT EXISTS pgfr_record.wait_samples_archive (
-    id                  BIGSERIAL PRIMARY KEY,
-    sample_id           BIGINT NOT NULL,
-    captured_at         TIMESTAMPTZ NOT NULL,
-    backend_type        TEXT,
-    wait_event_type     TEXT,
-    wait_event          TEXT,
-    state               TEXT,
-    count               INTEGER
-);
-CREATE INDEX IF NOT EXISTS wait_archive_captured_at_idx
-    ON pgfr_record.wait_samples_archive(captured_at);
-CREATE INDEX IF NOT EXISTS wait_archive_sample_id_idx
-    ON pgfr_record.wait_samples_archive(sample_id);
-CREATE INDEX IF NOT EXISTS wait_archive_wait_event_idx
-    ON pgfr_record.wait_samples_archive(wait_event_type, wait_event, captured_at);
-COMMENT ON TABLE pgfr_record.wait_samples_archive IS 'Raw archives: Wait event samples for forensic analysis (15-min cadence, full resolution)';
+-- Legacy 120-slot ring buffer tables (samples_ring + 3 child tables)
+-- retired. Their writers, readers, and ring-infra functions were removed
+-- in the legacy-ring retirement; the v2 path in 08_ring_buffer_v2.sql is
+-- the canonical sampler now. DROP at install time covers existing
+-- installs being upgraded; set local silences the "table does not exist,
+-- skipping" notices on fresh installs.
+DO $$
+BEGIN
+    SET LOCAL client_min_messages = warning;
+    DROP TABLE IF EXISTS pgfr_record.wait_samples_ring_legacy     CASCADE;
+    DROP TABLE IF EXISTS pgfr_record.activity_samples_ring_legacy CASCADE;
+    DROP TABLE IF EXISTS pgfr_record.lock_samples_ring_legacy     CASCADE;
+    DROP TABLE IF EXISTS pgfr_record.samples_ring_legacy          CASCADE;
+    DROP TABLE IF EXISTS pgfr_record.wait_samples_ring     CASCADE;
+    DROP TABLE IF EXISTS pgfr_record.activity_samples_ring CASCADE;
+    DROP TABLE IF EXISTS pgfr_record.lock_samples_ring     CASCADE;
+    DROP TABLE IF EXISTS pgfr_record.samples_ring          CASCADE;
+END $$;
+-- (The DROPs above also cover the original pre-rename names — an installation
+-- that ran a pre-rename pgfr_record had samples_ring etc. without the
+-- _legacy suffix.)
+-- Aggregate + archive tables retired alongside their writers
+-- (flush_ring_to_aggregates(), archive_ring_samples()) and their reader
+-- (cleanup_aggregates()). These tables had no writers after wave 1
+-- removed the pgfr_flush / pgfr_archive cron jobs and no readers in
+-- source code. DROP at install covers existing installs being upgraded;
+-- SET LOCAL silences the "does not exist, skipping" notice on fresh.
+DO $$
+BEGIN
+    SET LOCAL client_min_messages = warning;
+    DROP TABLE IF EXISTS pgfr_record.wait_event_aggregates       CASCADE;
+    DROP TABLE IF EXISTS pgfr_record.lock_aggregates             CASCADE;
+    DROP TABLE IF EXISTS pgfr_record.activity_aggregates         CASCADE;
+    DROP TABLE IF EXISTS pgfr_record.activity_samples_archive    CASCADE;
+    DROP TABLE IF EXISTS pgfr_record.lock_samples_archive        CASCADE;
+    DROP TABLE IF EXISTS pgfr_record.wait_samples_archive        CASCADE;
+END $$;
 
 
 -- Captures table-level statistics from pg_stat_user_tables for hotspot tracking

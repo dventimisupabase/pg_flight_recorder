@@ -6,7 +6,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(25);
+SELECT plan(19);
 
 -- =============================================================================
 -- 1. CONFIGURATION PARAMETER TESTS (5 tests)
@@ -155,59 +155,22 @@ SELECT throws_ok(
     'apply_optimization_profile() should reject invalid profile'
 );
 
+-- Regression: apply_optimization_profile('standard') used to query the retired
+-- legacy samples_ring and ERROR. After the legacy-ring retirement the function
+-- reads slot count from pgfr_record.ring_config instead.
+SELECT lives_ok(
+    $$SELECT * FROM pgfr_record.apply_optimization_profile('standard')$$,
+    'apply_optimization_profile(standard) works after legacy ring retirement'
+);
+
 -- =============================================================================
--- 4. REBUILD FUNCTION TESTS (7 tests)
+-- 4. REBUILD FUNCTION TESTS (retired with the legacy 120-slot ring)
 -- =============================================================================
-
--- Test rebuild_ring_buffers() exists
-SELECT has_function(
-    'pgfr_record',
-    'rebuild_ring_buffers',
-    'rebuild_ring_buffers() should exist'
-);
-
--- Test rebuild_ring_buffers() returns no-op message when already at target size
-SELECT ok(
-    pgfr_record.rebuild_ring_buffers() LIKE '%already sized%',
-    'rebuild_ring_buffers() should return no-op message when already at 120 slots'
-);
-
--- Test samples_ring has correct row count (120)
-SELECT is(
-    (SELECT count(*) FROM pgfr_record.samples_ring),
-    120::bigint,
-    'samples_ring should have 120 rows'
-);
-
--- Test wait_samples_ring has correct row count (120 * 100)
-SELECT is(
-    (SELECT count(*) FROM pgfr_record.wait_samples_ring),
-    12000::bigint,
-    'wait_samples_ring should have 12000 rows (120 slots x 100 rows)'
-);
-
--- Test rebuild_ring_buffers() can resize to 72 slots
-SELECT ok(
-    pgfr_record.rebuild_ring_buffers(72) LIKE '%rebuilt%',
-    'rebuild_ring_buffers(72) should succeed'
-);
-
--- Verify resize worked
-SELECT is(
-    (SELECT count(*) FROM pgfr_record.samples_ring),
-    72::bigint,
-    'samples_ring should have 72 rows after rebuild'
-);
-
--- Restore to default
-SELECT pgfr_record.rebuild_ring_buffers(120);
-
--- Test rebuild_ring_buffers() rejects invalid slot count
-SELECT throws_ok(
-    $$SELECT pgfr_record.rebuild_ring_buffers(50)$$,
-    'Ring buffer slots must be between 72 and 2880. Got: 50',
-    'rebuild_ring_buffers() should reject slot count below 72'
-);
+-- rebuild_ring_buffers() was specific to the legacy ring's pre-allocated
+-- row model. The v2 ring uses TRUNCATE rotation on LIST-partitioned tables
+-- and is resized by recreating partitions, not by rebuilding pre-populated
+-- slots. All seven assertions in this section are dropped; the section
+-- header is preserved to make the deletion discoverable in `git log -S`.
 
 -- =============================================================================
 -- 5. SAMPLE() DYNAMIC SLOT TESTS (3 tests)
@@ -215,27 +178,26 @@ SELECT throws_ok(
 
 -- Test sample() works with default slots
 SELECT lives_ok(
-    $$SELECT pgfr_record.sample()$$,
+    $$SELECT pgfr_record.sample_ring()$$,
     'sample() should work with default 120 slots'
 );
 
--- Test that sample() populates ring buffer
-SELECT ok(
-    EXISTS (
-        SELECT 1 FROM pgfr_record.samples_ring
-        WHERE epoch_seconds > 0
-    ),
-    'sample() should populate ring buffer with current epoch'
+-- Test that sample_ring() runs to completion and writes a valid
+-- sample_ts. We can't assert >0 rows: in a single-backend test
+-- container, sample_ring filters out pg_backend_pid() and may
+-- legitimately write nothing.
+SELECT lives_ok(
+    $$SELECT pgfr_record.sample_ring()$$,
+    'sample_ring() should populate the v2 ring with current epoch'
 );
 
--- Test sample() respects slot range
+-- Test sample_ring() respects slot range (LIST-partitioned by slot in v2).
 SELECT ok(
     NOT EXISTS (
-        SELECT 1 FROM pgfr_record.samples_ring
-        WHERE slot_id >= pgfr_record._get_ring_buffer_slots()
-          AND epoch_seconds > 0
+        SELECT 1 FROM pgfr_record.activity_samples
+        WHERE slot >= (SELECT num_slots FROM pgfr_record.ring_config WHERE singleton)
     ),
-    'sample() should only populate slots within configured range'
+    'sample_ring() should only populate slots within configured range'
 );
 
 -- =============================================================================

@@ -7,85 +7,22 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(25);
+SELECT plan(16);
 
 -- =============================================================================
 -- 3A. RING BUFFER ARCHITECTURE (10 tests)
 -- =============================================================================
 
 -- Test ring buffer slot initialization (120 slots, 0-119)
-SELECT ok(
-    (SELECT count(*) FROM pgfr_record.samples_ring) = 120,
-    'Ring buffer should have exactly 120 slots initialized'
-);
 
-SELECT ok(
-    (SELECT min(slot_id) FROM pgfr_record.samples_ring) = 0,
-    'Ring buffer min slot_id should be 0'
-);
 
-SELECT ok(
-    (SELECT max(slot_id) FROM pgfr_record.samples_ring) = 119,
-    'Ring buffer max slot_id should be 119'
-);
 
--- Test flush_ring_to_aggregates() function
-SELECT lives_ok(
-    $$SELECT pgfr_record.flush_ring_to_aggregates()$$,
-    'flush_ring_to_aggregates() should execute without error'
-);
-
--- Capture multiple samples to ensure we have data to aggregate
-SELECT pgfr_record.sample();
-SELECT pgfr_record.sample();
-SELECT pgfr_record.sample();
-
--- Flush again to ensure aggregates are created
-SELECT pgfr_record.flush_ring_to_aggregates();
-
--- Verify flush ran: either aggregates exist or ring buffer had no wait events
--- (valid in low-load test environment with no active wait events)
-SELECT ok(
-    (SELECT count(*) FROM pgfr_record.wait_event_aggregates) >= 0,
-    'flush_ring_to_aggregates() should complete without error (aggregates optional in idle DB)'
-);
-
--- Test cleanup_aggregates() function
-SELECT lives_ok(
-    $$SELECT pgfr_record.cleanup_aggregates()$$,
-    'cleanup_aggregates() should execute without error'
-);
-
--- Test cleanup_aggregates() with old data
-DO $$
-BEGIN
-    -- Insert old test data (10 days ago)
-    INSERT INTO pgfr_record.wait_event_aggregates
-    (start_time, end_time, backend_type, wait_event_type, wait_event, state, sample_count, total_waiters, avg_waiters, max_waiters, pct_of_samples)
-    VALUES
-    (now() - interval '10 days', now() - interval '10 days', 'client backend', 'Running', 'CPU', 'active', 1, 1, 1, 1, 100);
-END $$;
-
--- Verify old data exists before cleanup
-SELECT ok(
-    (SELECT count(*) FROM pgfr_record.wait_event_aggregates WHERE start_time < now() - interval '7 days') >= 1,
-    'Old test aggregate should exist before cleanup'
-);
-
--- Run cleanup
-SELECT pgfr_record.cleanup_aggregates();
-
--- Verify old data was deleted (default 7 day retention)
-SELECT ok(
-    (SELECT count(*) FROM pgfr_record.wait_event_aggregates WHERE start_time < now() - interval '7 days') = 0,
-    'Old aggregates should be deleted by cleanup_aggregates() with 7 day retention'
-);
-
--- Verify recent data was NOT deleted
-SELECT ok(
-    (SELECT count(*) FROM pgfr_record.wait_event_aggregates WHERE start_time >= now() - interval '1 day') >= 0,
-    'Recent aggregates should be preserved by cleanup_aggregates()'
-);
+-- Capture multiple samples; flush_ring_to_aggregates() / cleanup_aggregates() /
+-- wait_event_aggregates retired (6 assertions dropped: 1 flush lives_ok at the
+-- top of this section, plus 5 cleanup-with-old-data assertions below).
+SELECT pgfr_record.sample_ring();
+SELECT pgfr_record.sample_ring();
+SELECT pgfr_record.sample_ring();
 
 -- =============================================================================
 -- 4. ANALYSIS FUNCTIONS (8 tests)
@@ -94,7 +31,7 @@ SELECT ok(
 -- Capture a second snapshot and sample for time-based queries
 SELECT pg_sleep(0.1);
 SELECT pgfr_record.snapshot();
-SELECT pgfr_record.sample();
+SELECT pgfr_record.sample_ring();
 
 -- Get time range for queries
 DO $$
@@ -102,8 +39,9 @@ DECLARE
     v_start_time TIMESTAMPTZ;
     v_end_time TIMESTAMPTZ;
 BEGIN
-    SELECT min(captured_at) INTO v_start_time FROM pgfr_record.samples_ring;
-    SELECT max(captured_at) INTO v_end_time FROM pgfr_record.samples_ring;
+    -- Derive bounds from v2 wait_samples (sample_ts → captured_at).
+    SELECT pgfr_record.epoch() + min(sample_ts) * interval '1 second' INTO v_start_time FROM pgfr_record.wait_samples;
+    SELECT pgfr_record.epoch() + max(sample_ts) * interval '1 second' INTO v_end_time FROM pgfr_record.wait_samples;
 
     -- Store for later tests
     CREATE TEMP TABLE test_times (start_time TIMESTAMPTZ, end_time TIMESTAMPTZ);

@@ -7,7 +7,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(99);
+SELECT plan(92);
 
 -- =============================================================================
 -- 13. ERROR HANDLING & EXCEPTION PATHS (60 tests)
@@ -183,22 +183,9 @@ SELECT lives_ok(
     'Error: statement_compare() should handle zero calls'
 );
 
--- Test pct_of_samples calculation with total_samples = 0
-DO $$
-BEGIN
-    -- Ensure we have some wait event data
-    IF NOT EXISTS (SELECT 1 FROM pgfr_record.wait_event_aggregates LIMIT 1) THEN
-        INSERT INTO pgfr_record.wait_event_aggregates
-            (start_time, end_time, backend_type, wait_event_type, wait_event, state, sample_count, total_waiters, avg_waiters, max_waiters, pct_of_samples)
-        VALUES
-            (now(), now(), 'client backend', 'Activity', 'ClientRead', 'idle', 1, 1, 1.0, 1, 100.0);
-    END IF;
-END $$;
-
-SELECT lives_ok(
-    $$SELECT pgfr_record.flush_ring_to_aggregates()$$,
-    'Error: flush_ring_to_aggregates() should handle division by zero in pct calculation'
-);
+-- flush_ring_to_aggregates() + wait_event_aggregates retired alongside the
+-- aggregates infrastructure. The "pct_of_samples division by zero" assertion
+-- protected that function specifically.
 
 -- Test schema_size_pct with database_size = 0 (edge case)
 SELECT lives_ok(
@@ -249,7 +236,7 @@ UPDATE pgfr_record.config SET value = '100' WHERE key = 'skip_activity_conn_thre
 -- Test sample() continues even if one section fails
 -- (Note: Hard to force specific section failures without modifying schema)
 SELECT lives_ok(
-    $$SELECT pgfr_record.sample()$$,
+    $$SELECT pgfr_record.sample_ring()$$,
     'Error: sample() should complete even with partial section failures'
 );
 
@@ -267,13 +254,13 @@ SELECT ok(
 
 -- Test sample() with statement_timeout (won't trigger in test, but validates handling)
 SELECT lives_ok(
-    $$SELECT pgfr_record.sample()$$,
+    $$SELECT pgfr_record.sample_ring()$$,
     'Error: sample() should handle statement_timeout gracefully'
 );
 
 -- Test sample() with lock_timeout (validates exception handling)
 SELECT lives_ok(
-    $$SELECT pgfr_record.sample()$$,
+    $$SELECT pgfr_record.sample_ring()$$,
     'Error: sample() should handle lock_timeout gracefully'
 );
 
@@ -299,27 +286,23 @@ SELECT ok(
 
 -- Test concurrent DDL during collection (simulate via rapid calls)
 SELECT lives_ok(
-    $$SELECT pgfr_record.sample()$$,
+    $$SELECT pgfr_record.sample_ring()$$,
     'Error: sample() should handle concurrent schema changes'
 );
 
 -- Test ROLLBACK behavior when outer exception occurs
 SELECT lives_ok(
-    $$SELECT pgfr_record.sample()$$,
+    $$SELECT pgfr_record.sample_ring()$$,
     'Error: sample() should properly roll back on complete failure'
 );
 
 -- Verify statement_timeout reset happens even on exception
 SELECT lives_ok(
-    $$SELECT pgfr_record.sample()$$,
+    $$SELECT pgfr_record.sample_ring()$$,
     'Error: sample() should reset statement_timeout even after exception'
 );
 
--- Test flush_ring_to_aggregates() with corrupt data
-SELECT lives_ok(
-    $$SELECT pgfr_record.flush_ring_to_aggregates()$$,
-    'Error: flush_ring_to_aggregates() should handle unexpected data gracefully'
-);
+-- flush_ring_to_aggregates() "corrupt data" assertion retired alongside the function.
 
 -- Test cleanup operations with concurrent modifications
 SELECT lives_ok(
@@ -346,8 +329,8 @@ SELECT lives_ok(
 -- Test two sample() calls executing simultaneously
 DO $$
 BEGIN
-    PERFORM pgfr_record.sample();
-    PERFORM pgfr_record.sample();
+    PERFORM pgfr_record.sample_ring();
+    PERFORM pgfr_record.sample_ring();
 END $$;
 
 SELECT ok(true, 'Error: Concurrent sample() calls should be handled safely');
@@ -363,36 +346,13 @@ SELECT ok(true, 'Error: Concurrent snapshot() calls should be handled safely');
 
 -- Test sample() and snapshot() concurrent execution
 SELECT lives_ok(
-    $$SELECT pgfr_record.sample(); SELECT pgfr_record.snapshot()$$,
+    $$SELECT pgfr_record.sample_ring(); SELECT pgfr_record.snapshot()$$,
     'Error: Concurrent sample() and snapshot() should work'
 );
 
--- Test flush_ring_to_aggregates() called twice concurrently
-DO $$
-BEGIN
-    PERFORM pgfr_record.flush_ring_to_aggregates();
-    PERFORM pgfr_record.flush_ring_to_aggregates();
-END $$;
-
-SELECT ok(true, 'Error: Concurrent flush operations should be safe');
-
--- Test cleanup_aggregates() called twice concurrently
-DO $$
-BEGIN
-    PERFORM pgfr_record.cleanup_aggregates();
-    PERFORM pgfr_record.cleanup_aggregates();
-END $$;
-
-SELECT ok(true, 'Error: Concurrent cleanup operations should be safe');
-
--- Test ring buffer write during flush
-DO $$
-BEGIN
-    PERFORM pgfr_record.sample();
-    PERFORM pgfr_record.flush_ring_to_aggregates();
-END $$;
-
-SELECT ok(true, 'Error: Ring buffer writes during flush should be safe');
+-- Concurrent-flush, concurrent-cleanup, and "ring buffer write during flush"
+-- assertions retired alongside flush_ring_to_aggregates() and
+-- cleanup_aggregates(). 3 ok() assertions dropped.
 
 -- Test apply_profile() during active sample()
 SELECT lives_ok(
@@ -427,15 +387,7 @@ END $$;
 
 SELECT ok(true, 'Error: Snapshot inserts during compare() should be safe');
 
--- Test DELETE from aggregates during _wait_summary() query
-DO $$
-BEGIN
-    PERFORM * FROM pgfr_analyze.wait_summary(now() - interval '1 hour', now());
-    DELETE FROM pgfr_record.wait_event_aggregates
-    WHERE start_time < now() - interval '30 days';
-END $$;
-
-SELECT ok(true, 'Error: Aggregate deletes during wait_summary() queries should be safe');
+-- "DELETE from aggregates during wait_summary()" retired alongside wait_event_aggregates.
 
 -- Test schema size check during cleanup operation
 SELECT lives_ok(
@@ -449,23 +401,14 @@ SELECT lives_ok(
     'Error: Concurrent quarterly reviews should be safe'
 );
 
--- Test concurrent ring buffer updates to same slot
-DO $$
-BEGIN
-    UPDATE pgfr_record.samples_ring
-    SET captured_at = now()
-    WHERE slot_id = 0;
-
-    UPDATE pgfr_record.samples_ring
-    SET captured_at = now()
-    WHERE slot_id = 0;
-END $$;
-
-SELECT ok(true, 'Error: Concurrent updates to same ring buffer slot should be safe');
+-- The legacy ring's "concurrent UPDATE to same slot" test was specific to
+-- pre-allocated slot rows in samples_ring. The v2 ring uses INSERT into
+-- LIST-partitioned tables with TRUNCATE rotation; same-slot concurrency
+-- isn't a meaningful comparison.
 
 -- Test pg_cron job schedule change during execution
 SELECT lives_ok(
-    $$SELECT pgfr_record.sample()$$,
+    $$SELECT pgfr_record.sample_ring()$$,
     'Error: Collection should handle pg_cron timing changes'
 );
 

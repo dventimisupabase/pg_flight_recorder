@@ -63,9 +63,9 @@ SELECT * FROM pgfr_record.deltas;
 | View                              | Description                      |
 |-----------------------------------|----------------------------------|
 | `pgfr_record.deltas`                     | Snapshot-over-snapshot changes   |
-| `pgfr_record.recent_waits`               | Wait events from ring buffer     |
-| `pgfr_record.recent_activity`            | Active sessions from ring buffer |
-| `pgfr_record.recent_locks`               | Lock contention from ring buffer |
+| `pgfr_record.recent_waits`               | Wait events from the v2 ring     |
+| `pgfr_record.recent_activity`            | Active sessions from the v2 ring |
+| `pgfr_record.recent_locks`               | Lock contention from the v2 ring |
 | `pgfr_record.recent_idle_in_transaction` | Idle-in-transaction sessions     |
 | `pgfr_record.recent_replication`         | Replication status               |
 | `pgfr_record.recent_vacuum_progress`     | Vacuum operations in progress    |
@@ -81,7 +81,7 @@ SELECT * FROM pgfr_record.deltas;
 | `pgfr_record.set_mode(mode)`           | Set collection mode           |
 | `pgfr_record.apply_profile(name)`      | Apply a configuration profile |
 | `pgfr_record.list_profiles()`          | List available profiles       |
-| `pgfr_record.ring_buffer_health()`     | Ring buffer status            |
+| `pgfr_record.sample_ring()`            | One-shot v2 ring sample       |
 | `pgfr_record.cleanup()`                | Manual retention cleanup      |
 
 ## Profiles

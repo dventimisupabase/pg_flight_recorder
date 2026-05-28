@@ -10,7 +10,7 @@
 --
 -- Files:
 --   01_schema.sql            extension check, schema, search_path
---   02_tables_legacy.sql     legacy heap tables (snapshots, *_ring, aggregates, archives)
+--   02_tables.sql            heap tables: snapshots, aggregates, archives, legacy-ring DROPs
 --   03_functions_util.sql    helpers: _pg_version, epoch, _get_config, circuit breakers
 --   04a_functions_sample.sql wait/lock/activity ring samplers (old UPDATE pattern)
 --   04b_functions_snapshot.sql snapshot(), _collect_* collectors
@@ -21,7 +21,7 @@
 --   09_phase3_snapshots_v2.sql snapshots_v2 partitioned tables + dual-write trigger
 
 \ir sql/01_schema.sql
-\ir sql/02_tables_legacy.sql
+\ir sql/02_tables.sql
 \ir sql/03_functions_util.sql
 \ir sql/04a_functions_sample.sql
 \ir sql/04b_functions_snapshot.sql
@@ -34,6 +34,11 @@
 -- Post-install: migrate deprecated config key aliases to canonical names.
 -- Idempotent; safe on fresh install (keys won't exist yet) and upgrades.
 select old_key, new_key, action from pgfr_record.migrate_config_keys();
+
+-- One-shot snapshot to seed the durable tables and the v2 partitions.
+-- Lives here (rather than at the end of 06_partition_infra.sql) so every
+-- collector defined in 07/08/09 is in place before snapshot() runs.
+select pgfr_record.snapshot();
 
 -- Schedule all pg_cron jobs via the single source of truth (enable()).
 -- pg_cron's cron.schedule() replaces same-named jobs, so this is idempotent
