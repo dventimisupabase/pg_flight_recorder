@@ -453,12 +453,18 @@ BEGIN
         v_missing_jobs TEXT[];
         v_inactive_jobs TEXT[];
     BEGIN
+        -- Core jobs after the legacy-ring retirement: pgfr_snapshot,
+        -- pgfr_cleanup, pgfr_sample_ring (v2 sampler), pgfr_rotate_ring
+        -- (v2 ring rotation). Partition-maintenance jobs
+        -- (pgfr_truncate_partitions / pgfr_drop_ancient_partitions /
+        -- pgfr_precreate_partitions) run on slower cadences and are
+        -- considered optional for health-check purposes.
         WITH required_jobs AS (
             SELECT unnest(ARRAY[
-                'pgfr_sample',
                 'pgfr_snapshot',
-                'pgfr_flush',
-                'pgfr_cleanup'
+                'pgfr_cleanup',
+                'pgfr_sample_ring',
+                'pgfr_rotate_ring'
             ]) AS job_name
         )
         SELECT

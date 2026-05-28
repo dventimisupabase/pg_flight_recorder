@@ -10,7 +10,7 @@
 --
 -- Files:
 --   01_schema.sql            extension check, schema, search_path
---   02_tables_legacy.sql     legacy heap tables (snapshots, *_ring, aggregates, archives)
+--   02_tables.sql            heap tables: snapshots, aggregates, archives, legacy-ring DROPs
 --   03_functions_util.sql    helpers: _pg_version, epoch, _get_config, circuit breakers
 --   04a_functions_sample.sql wait/lock/activity ring samplers (old UPDATE pattern)
 --   04b_functions_snapshot.sql snapshot(), _collect_* collectors
@@ -21,7 +21,7 @@
 --   09_phase3_snapshots_v2.sql snapshots_v2 partitioned tables + dual-write trigger
 
 \ir sql/01_schema.sql
-\ir sql/02_tables_legacy.sql
+\ir sql/02_tables.sql
 \ir sql/03_functions_util.sql
 \ir sql/04a_functions_sample.sql
 \ir sql/04b_functions_snapshot.sql
