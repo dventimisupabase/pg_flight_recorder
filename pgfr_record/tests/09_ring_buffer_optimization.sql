@@ -219,23 +219,24 @@ SELECT lives_ok(
     'sample() should work with default 120 slots'
 );
 
--- Test that sample() populates ring buffer
+-- Test that sample_ring() populates the v2 ring (activity_samples is
+-- the broadest v2 surface; wait_samples can be empty on a quiet test
+-- DB if no backends are in wait states).
 SELECT ok(
     EXISTS (
-        SELECT 1 FROM pgfr_record.samples_ring_legacy
-        WHERE epoch_seconds > 0
+        SELECT 1 FROM pgfr_record.activity_samples
+        WHERE sample_ts > 0
     ),
-    'sample() should populate ring buffer with current epoch'
+    'sample_ring() should populate the v2 ring with current epoch'
 );
 
--- Test sample() respects slot range
+-- Test sample_ring() respects slot range (LIST-partitioned by slot in v2).
 SELECT ok(
     NOT EXISTS (
-        SELECT 1 FROM pgfr_record.samples_ring_legacy
-        WHERE slot_id >= pgfr_record._get_ring_buffer_slots()
-          AND epoch_seconds > 0
+        SELECT 1 FROM pgfr_record.activity_samples
+        WHERE slot >= (SELECT num_slots FROM pgfr_record.ring_config WHERE singleton)
     ),
-    'sample() should only populate slots within configured range'
+    'sample_ring() should only populate slots within configured range'
 );
 
 -- =============================================================================

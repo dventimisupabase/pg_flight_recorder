@@ -86,7 +86,7 @@ SELECT has_function('pgfr_record', '_record_collection_end', 'P0 Safety: Functio
 SELECT has_function('pgfr_record', '_record_collection_skip', 'P0 Safety: Function pgfr_record._record_collection_skip should exist');
 SELECT has_function('pgfr_record', '_check_schema_size', 'P1 Safety: Function pgfr_record._check_schema_size should exist');
 SELECT has_function('pgfr_record', 'snapshot', 'Function pgfr_record.snapshot should exist');
-SELECT has_function('pgfr_record', 'sample', 'Function pgfr_record.sample should exist');
+SELECT has_function('pgfr_record', 'sample_ring', 'Function pgfr_record.sample_ring should exist');
 SELECT has_function('pgfr_analyze', 'anomaly_report', 'Function pgfr_analyze.anomaly_report should exist');
 SELECT has_function('pgfr_analyze', 'summary_report', 'Function pgfr_analyze.summary_report should exist');
 SELECT has_function('pgfr_record', 'get_mode', 'Function pgfr_record.get_mode should exist');
@@ -119,9 +119,9 @@ SELECT lives_ok(
     'sample() function should execute without error'
 );
 
--- Verify sample was captured in ring buffer
+-- Verify a sample was captured in the v2 ring (wait_samples).
 SELECT ok(
-    (SELECT count(*) FROM pgfr_record.samples_ring_legacy WHERE captured_at > '2020-01-01') >= 1,
+    (SELECT count(*) FROM pgfr_record.wait_samples) >= 1,
     'At least one sample should be captured in ring buffer'
 );
 
