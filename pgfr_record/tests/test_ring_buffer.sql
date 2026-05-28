@@ -85,6 +85,25 @@ select has_table('pgfr_record', 'query_map_0',
 select has_view('pgfr_record', 'query_map_all',
     'query_map_all view exists');
 
+-- Drain rows that pg_cron's sample_ring() job may have inserted between
+-- install (which schedules the job) and this assertion. Slot count is
+-- config-driven, so truncate every query_map_* partition dynamically.
+do $$
+declare
+    v_tables text;
+begin
+    select string_agg(format('%I.%I', n.nspname, c.relname), ', ')
+      into v_tables
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'pgfr_record'
+       and c.relname like 'query_map_%'
+       and c.relkind = 'r';
+    if v_tables is not null then
+        execute 'truncate table ' || v_tables;
+    end if;
+end $$;
+
 select is(
     (select count(*)::int from pgfr_record.query_map_all),
     0,
