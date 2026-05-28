@@ -563,8 +563,14 @@
       gap: 2px;
       margin-bottom: 20px;
       border-bottom: 1px solid var(--border-muted);
+      /* Keep overflow as a safety net for narrow viewports, but hide the
+         scrollbar UI -- the four tabs fit on any reasonable width and the
+         auto scrollbar was rendering as a phantom vertical line on the
+         right edge of the strip. */
       overflow-x: auto;
+      scrollbar-width: none;
     }
+    .tabs::-webkit-scrollbar { display: none; }
     .tab {
       padding: 9px 18px 12px;
       background: none;
