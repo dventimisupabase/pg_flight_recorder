@@ -7,8 +7,16 @@ on:
       - index.html
       - install.html
       - .github/workflows/pages.yml
-  release:
-    types: [published]
+  # workflow_run, not `release: published`. GitHub Actions intentionally
+  # does not cascade `release` events when the release was created by
+  # another workflow using GITHUB_TOKEN -- which is exactly how our
+  # Release workflow operates. workflow_run is the documented escape
+  # hatch for cross-workflow chaining and is unaffected by that
+  # safeguard. The if-guard below skips deploys when Release itself
+  # failed so we never publish bundles from a half-finished release.
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -22,6 +30,11 @@ concurrency:
 
 jobs:
   deploy:
+    # Skip cascade deploys when the upstream Release workflow failed --
+    # we don't want to publish bundles from a release that never reached
+    # GitHub Releases. Non-workflow_run triggers (push, dispatch) carry
+    # no workflow_run context, so the condition is true for them too.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
