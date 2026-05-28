@@ -137,13 +137,21 @@ jobs:
       - name: Create release assets
         run: |
           mkdir -p release-assets
+          VER="${{ steps.version.outputs.version }}"
+
+          # Self-contained single-file install bundles. Suitable for clients
+          # that do not process psql metacommands -- e.g. the Supabase
+          # dashboard SQL editor. Differs from the dbdev packages: not
+          # minified, no size cap, wrapped in BEGIN/COMMIT.
+          ./scripts/build_install_bundle.sh pgfr_record  "release-assets/pgfr_record-${VER}-bundle.sql"
+          ./scripts/build_install_bundle.sh pgfr_analyze "release-assets/pgfr_analyze-${VER}-bundle.sql"
 
           # Create tarball
-          tar -czf release-assets/pgfr_record-${{ steps.version.outputs.version }}.tar.gz \
+          tar -czf release-assets/pgfr_record-${VER}.tar.gz \
             pgfr_record/install.sql pgfr_analyze/install.sql pgfr_record/uninstall.sql pgfr_analyze/uninstall.sql README.md REFERENCE.md $([ -f CHANGELOG.md ] && echo CHANGELOG.md)
 
           # Create zip
-          zip -q release-assets/pgfr_record-${{ steps.version.outputs.version }}.zip \
+          zip -q release-assets/pgfr_record-${VER}.zip \
             pgfr_record/install.sql pgfr_analyze/install.sql pgfr_record/uninstall.sql pgfr_analyze/uninstall.sql README.md REFERENCE.md $([ -f CHANGELOG.md ] && echo CHANGELOG.md)
 
       - name: Create GitHub Release
@@ -157,6 +165,7 @@ jobs:
           files: |
             release-assets/*.tar.gz
             release-assets/*.zip
+            release-assets/*-bundle.sql
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
