@@ -26,7 +26,10 @@ DO $$ BEGIN
     PERFORM pgfr_record.sample_ring();
 END $$;
 
-SELECT skip('Legacy sample() collection_stats logging retired with the legacy sampler');
+SELECT ok(
+    (SELECT count(*) FROM pgfr_record.collection_stats WHERE skipped = false AND collection_type = 'sample') >= 1,
+    'Safety: Load shedding disabled should allow collection'
+);
 
 -- Re-enable for other tests
 UPDATE pgfr_record.config SET value = 'true' WHERE key = 'load_shedding_enabled';
@@ -40,7 +43,10 @@ DO $$ BEGIN
 END $$;
 
 -- Check if collection was attempted and skipped (if active connections > 0%)
-SELECT skip('Legacy sample() collection_stats logging retired with the legacy sampler');
+SELECT ok(
+    (SELECT count(*) FROM pgfr_record.collection_stats WHERE collection_type = 'sample') > 0,
+    'Safety: Load shedding with 0% threshold should create collection_stats entry'
+);
 
 -- Test 3: Verify skip_reason format for load shedding (if skip occurred)
 SELECT ok(
@@ -58,7 +64,10 @@ DO $$ BEGIN
 END $$;
 
 -- With 100% threshold, load shedding should not trigger (unless exactly at 100% connections)
-SELECT skip('Legacy sample() collection_stats logging retired with the legacy sampler');
+SELECT ok(
+    (SELECT count(*) FROM pgfr_record.collection_stats WHERE collection_type = 'sample') > 0,
+    'Safety: Load shedding with 100% threshold should create collection_stats entry'
+);
 
 -- Reset to default
 UPDATE pgfr_record.config SET value = '70' WHERE key = 'load_shedding_active_pct';
@@ -71,7 +80,16 @@ DO $$ BEGIN
     PERFORM pgfr_record.sample_ring();
 END $$;
 
-SELECT skip('Legacy sample() collection_stats logging retired with the legacy sampler');
+SELECT ok(
+    EXISTS (
+        SELECT 1 FROM pgfr_record.collection_stats
+        WHERE collection_type = 'sample'
+          AND skipped = true
+          AND skipped_reason IS NOT NULL
+          AND skipped_reason LIKE '%Load shedding%'
+    ),
+    'Safety: Load shedding should log skip to collection_stats with reason'
+);
 
 -- Reset
 UPDATE pgfr_record.config SET value = '70' WHERE key = 'load_shedding_active_pct';
@@ -109,7 +127,10 @@ DO $$ BEGIN
     PERFORM pgfr_record.sample_ring();
 END $$;
 
-SELECT skip('Legacy sample() collection_stats logging retired with the legacy sampler');
+SELECT ok(
+    (SELECT count(*) FROM pgfr_record.collection_stats WHERE skipped = false AND collection_type = 'sample') >= 1,
+    'Safety: Load shedding recovery - collection should succeed after threshold increased'
+);
 
 -- Test 8: Verify skip_reason includes threshold value
 UPDATE pgfr_record.config SET value = '0' WHERE key = 'load_shedding_active_pct';
@@ -119,7 +140,11 @@ DO $$ BEGIN
     PERFORM pgfr_record.sample_ring();
 END $$;
 
-SELECT skip('Legacy sample() collection_stats logging retired with the legacy sampler');
+SELECT ok(
+    (SELECT skipped_reason FROM pgfr_record.collection_stats WHERE collection_type = 'sample' AND skipped = true ORDER BY started_at DESC LIMIT 1) LIKE
+    '%0% threshold%',
+    'Safety: Load shedding skip reason should include configured threshold'
+);
 
 -- Reset
 UPDATE pgfr_record.config SET value = '70' WHERE key = 'load_shedding_active_pct';
@@ -152,7 +177,10 @@ DO $$ BEGIN
     PERFORM pgfr_record.sample_ring();
 END $$;
 
-SELECT skip('Legacy sample() collection_stats logging retired with the legacy sampler');
+SELECT ok(
+    (SELECT count(*) FROM pgfr_record.collection_stats WHERE collection_type = 'sample' AND skipped = true AND skipped_reason LIKE '%Load shedding%') = 3,
+    'Safety: Multiple load shedding skips should all be tracked in collection_stats'
+);
 
 -- Reset
 UPDATE pgfr_record.config SET value = '70' WHERE key = 'load_shedding_active_pct';
@@ -169,7 +197,10 @@ DO $$ BEGIN
     PERFORM pgfr_record.sample_ring();
 END $$;
 
-SELECT skip('Legacy sample() collection_stats logging retired with the legacy sampler');
+SELECT ok(
+    (SELECT count(*) FROM pgfr_record.collection_stats WHERE skipped = false AND collection_type = 'sample') >= 1,
+    'Safety: Circuit breaker disabled should allow collection'
+);
 
 -- Re-enable
 UPDATE pgfr_record.config SET value = 'true' WHERE key = 'circuit_breaker_enabled';

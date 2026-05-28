@@ -8,7 +8,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(30);
+SELECT plan(28);
 
 -- =============================================================================
 -- 1. COLUMN EXISTENCE (4 tests)
@@ -207,8 +207,6 @@ SELECT ok(
 -- allocated rows and HOT update tracking. v2's TRUNCATE-rotation model
 -- has no equivalent. mxid_age monitoring for v2 ring partitions would be
 -- a follow-up task.
-SELECT skip('ring_buffer_health() retired with the legacy 120-slot ring');
-SELECT skip('ring_buffer_health() mxid_age column retired with the legacy ring');
 
 -- =============================================================================
 -- 8. POSITIVE ANOMALY TESTS (3 tests)

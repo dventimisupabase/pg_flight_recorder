@@ -6,15 +6,13 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(23);
+SELECT plan(19);
 
 -- =============================================================================
 -- 1. ACTIVITY SAMPLING ENHANCEMENTS - COLUMN EXISTENCE (4 tests)
 -- =============================================================================
 
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 SELECT has_column(
     'pgfr_record', 'activity_samples_archive', 'backend_start',
@@ -88,9 +86,7 @@ SELECT pgfr_record.sample_ring();
 
 -- Verify backend_start is populated for active sessions
 -- Note: May be NULL if no sessions were active at sample time
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- =============================================================================
 -- 5. SNAPSHOT() FUNCTION - DATA POPULATION (3 tests)

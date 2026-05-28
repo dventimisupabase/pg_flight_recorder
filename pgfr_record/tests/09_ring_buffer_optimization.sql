@@ -6,7 +6,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(25);
+SELECT plan(18);
 
 -- =============================================================================
 -- 1. CONFIGURATION PARAMETER TESTS (5 tests)
@@ -161,14 +161,8 @@ SELECT throws_ok(
 -- rebuild_ring_buffers() was specific to the legacy ring's pre-allocated
 -- row model. The v2 ring uses TRUNCATE rotation on LIST-partitioned tables
 -- and is resized by recreating partitions, not by rebuilding pre-populated
--- slots. All seven assertions in this section are retired.
-SELECT skip('rebuild_ring_buffers() retired with the legacy 120-slot ring');
-SELECT skip('rebuild_ring_buffers() no-op message retired with the legacy ring');
-SELECT skip('samples_ring row-count assertion retired with the legacy ring');
-SELECT skip('wait_samples_ring row-count assertion retired with the legacy ring');
-SELECT skip('rebuild_ring_buffers(72) resize retired with the legacy ring');
-SELECT skip('samples_ring row count after rebuild retired with the legacy ring');
-SELECT skip('rebuild_ring_buffers() slot-count validation retired with the legacy ring');
+-- slots. All seven assertions in this section are dropped; the section
+-- header is preserved to make the deletion discoverable in `git log -S`.
 
 -- =============================================================================
 -- 5. SAMPLE() DYNAMIC SLOT TESTS (3 tests)

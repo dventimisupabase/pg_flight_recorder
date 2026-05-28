@@ -643,8 +643,59 @@ declare
     v_active_count      smallint;
     v_seen_waits        text[] := '{}';
     v_rows_inserted     int    := 0;
+    -- collection_stats instrumentation (replaces the legacy sample()'s
+    -- observability; uses collection_type='sample' to stay compatible with
+    -- existing safety dashboards and tests).
+    v_stat_id           int;
+    v_load_shedding_enabled bool;
+    v_load_threshold_pct int;
+    v_max_connections   int;
+    v_active_clients    int;
+    v_active_pct        numeric;
 begin
     v_captured_at := clock_timestamp();
+
+    -- Circuit breaker: skip if recent runs averaged over the threshold.
+    if pgfr_record._check_circuit_breaker('sample') then
+        perform pgfr_record._record_collection_skip(
+            'sample',
+            'Circuit breaker tripped - recent runs exceeded threshold');
+        return v_captured_at;
+    end if;
+
+    -- Load shedding: skip if active client connections are above the configured
+    -- percentage of max_connections. Read config before opening the stats row
+    -- so a skip doesn't create an orphan started_at row.
+    v_load_shedding_enabled := coalesce(
+        pgfr_record._get_config('load_shedding_enabled', 'true')::bool,
+        true
+    );
+    if v_load_shedding_enabled then
+        v_load_threshold_pct := coalesce(
+            pgfr_record._get_config('load_shedding_active_pct', '70')::int,
+            70
+        );
+        select setting::int into v_max_connections
+        from pg_settings where name = 'max_connections';
+        select count(*) into v_active_clients
+        from pg_stat_activity
+        where state = 'active' and backend_type = 'client backend';
+        v_active_pct := (v_active_clients::numeric / nullif(v_max_connections, 0)) * 100;
+        if v_active_pct >= v_load_threshold_pct then
+            perform pgfr_record._record_collection_skip(
+                'sample',
+                format(
+                    'Load shedding: high load (%s active / %s max = %s%% >= %s%% threshold)',
+                    v_active_clients, v_max_connections, round(v_active_pct, 1),
+                    v_load_threshold_pct
+                )
+            );
+            return v_captured_at;
+        end if;
+    end if;
+
+    v_stat_id := pgfr_record._record_collection_start('sample', 3);
+
     v_sample_ts   := extract(epoch from (v_captured_at - pgfr_record.epoch()))::int4;
     v_slot        := pgfr_record.ring_current_slot();
 
@@ -820,6 +871,12 @@ begin
     exception when others then
         raise warning 'pgfr_record.sample_ring: activity_samples insert failed [%]: %', sqlstate, sqlerrm;
     end;
+
+    -- Mark collection as successful. We get here even if a section's
+    -- EXCEPTION handler fired -- those sections only emit a WARNING and
+    -- don't abort the rest of the sample. Counting partial-success runs
+    -- as 'success = true' matches the legacy sample()'s contract.
+    perform pgfr_record._record_collection_end(v_stat_id, true);
 
     return v_captured_at;
 end;

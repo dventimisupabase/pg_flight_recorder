@@ -7,7 +7,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(99);
+SELECT plan(98);
 
 -- =============================================================================
 -- 13. ERROR HANDLING & EXCEPTION PATHS (60 tests)
@@ -453,7 +453,6 @@ SELECT lives_ok(
 -- pre-allocated slot rows in samples_ring. The v2 ring uses INSERT into
 -- LIST-partitioned tables with TRUNCATE rotation; same-slot concurrency
 -- isn't a meaningful comparison.
-SELECT skip('Concurrent ring slot UPDATE retired with the legacy ring');
 
 -- Test pg_cron job schedule change during execution
 SELECT lives_ok(

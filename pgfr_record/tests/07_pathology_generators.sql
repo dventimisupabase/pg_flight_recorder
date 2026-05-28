@@ -9,7 +9,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(48);
+SELECT plan(46);
 
 -- =============================================================================
 -- PATHOLOGY 1: LOCK CONTENTION (6 tests)
@@ -66,7 +66,6 @@ SELECT lives_ok(
 -- Test that lock_samples_ring exists and can be queried
 -- Note: Lock samples may be empty if no actual blocking occurred
 -- (advisory locks don't create blocked sessions in single transaction)
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Test _recent_locks_current() function works
 SELECT lives_ok(
@@ -339,7 +338,6 @@ END;
 $$;
 
 -- Test that sample() captured activity
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Test that _recent_activity_current() works for real-time monitoring
 SELECT lives_ok(

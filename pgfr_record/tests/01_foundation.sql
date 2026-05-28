@@ -7,7 +7,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(50);
+SELECT plan(41);
 
 -- =============================================================================
 -- 1. INSTALLATION VERIFICATION (19 tests)
@@ -21,10 +21,6 @@ SELECT has_table('pgfr_record', 'snapshots', 'Table pgfr_record.snapshots should
 SELECT has_table('pgfr_record', 'replication_snapshots', 'Table pgfr_record.replication_snapshots should exist');
 SELECT has_table('pgfr_record', 'statement_snapshots', 'Table pgfr_record.statement_snapshots should exist');
 -- Ring buffers (UNLOGGED)
-SELECT skip('Assertion retired with the legacy 120-slot ring');
-SELECT skip('Assertion retired with the legacy 120-slot ring');
-SELECT skip('Assertion retired with the legacy 120-slot ring');
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 -- Aggregates (REGULAR/durable)
 SELECT has_table('pgfr_record', 'wait_event_aggregates', 'Aggregates: Table pgfr_record.wait_event_aggregates should exist');
 SELECT has_table('pgfr_record', 'lock_aggregates', 'Aggregates: Table pgfr_record.lock_aggregates should exist');
@@ -38,11 +34,8 @@ SELECT has_table('pgfr_record', 'config', 'Table pgfr_record.config should exist
 SELECT has_table('pgfr_record', 'collection_stats', 'P0 Safety: Table pgfr_record.collection_stats should exist');
 
 -- Test Foreign Keys (Ring buffer child tables reference master samples_ring)
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Test all 6 views exist
 SELECT has_view('pgfr_record', 'deltas', 'View pgfr_record.deltas should exist');
@@ -104,10 +97,8 @@ SELECT lives_ok(
 );
 
 -- Test wait_samples_ring captured
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Test activity_samples_ring captured
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Test version detection works
 SELECT ok(

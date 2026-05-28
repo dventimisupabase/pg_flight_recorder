@@ -7,18 +7,15 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(25);
+SELECT plan(22);
 
 -- =============================================================================
 -- 3A. RING BUFFER ARCHITECTURE (10 tests)
 -- =============================================================================
 
 -- Test ring buffer slot initialization (120 slots, 0-119)
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Test flush_ring_to_aggregates() function
 SELECT lives_ok(

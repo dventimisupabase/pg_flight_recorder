@@ -7,7 +7,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(79);
+SELECT plan(64);
 
 -- =============================================================================
 -- 11. ADVERSARIAL BOUNDARY TESTS (50 tests)
@@ -16,43 +16,30 @@ SELECT plan(79);
 -- Ring Buffer Slot Boundaries (10 tests)
 
 -- Test slot_id = 119 (should succeed - max valid)
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Test slot_id = 0 (should succeed - min valid)
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Test slot_id wraparound (verify both 0 and 119 exist)
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Test all 120 slots exist
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Row Number Boundaries (15 tests)
 
 -- Wait samples: row_num = 99 (should succeed - max valid)
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Wait samples: row_num = 0 (should succeed - min valid)
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Activity samples: row_num = 24 (should succeed - max valid)
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Activity samples: row_num = 0 (should succeed - min valid)
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Lock samples: row_num = 99 (should succeed - max valid)
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Lock samples: row_num = 0 (should succeed - min valid)
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Verify pre-population counts
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
-SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Configuration Boundaries (15 tests)
 
@@ -378,8 +365,6 @@ SELECT lives_ok(
 -- ring_buffer_health() was specific to the legacy 120-slot ring (HOT-update
 -- monitoring, pre-allocated slot bloat tracking). The v2 ring uses TRUNCATE
 -- rotation and has no equivalent metric surface.
-SELECT skip('ring_buffer_health() retired with the legacy 120-slot ring');
-SELECT skip('ring_buffer_health() return-shape test retired with the legacy ring');
 
 -- Test preflight_check() executes all checks
 SELECT ok(
