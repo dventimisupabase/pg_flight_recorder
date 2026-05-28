@@ -563,8 +563,14 @@
       gap: 2px;
       margin-bottom: 20px;
       border-bottom: 1px solid var(--border-muted);
+      /* Keep overflow as a safety net for narrow viewports, but hide the
+         scrollbar UI -- the four tabs fit on any reasonable width and the
+         auto scrollbar was rendering as a phantom vertical line on the
+         right edge of the strip. */
       overflow-x: auto;
+      scrollbar-width: none;
     }
+    .tabs::-webkit-scrollbar { display: none; }
     .tab {
       padding: 9px 18px 12px;
       background: none;
@@ -781,6 +787,23 @@
     .step .code-block {
       position: relative;
     }
+    .install-callout {
+      margin: 8px 0 12px;
+      padding: 10px 12px;
+      background: rgba(62, 206, 141, 0.06);
+      border: 1px solid rgba(62, 206, 141, 0.28);
+      border-radius: 6px;
+      font-size: 0.8125rem;
+      color: var(--fg-light);
+      line-height: 1.5;
+    }
+    .install-callout strong { color: var(--fg); font-weight: 500; }
+    .install-callout a {
+      color: var(--brand);
+      text-decoration: none;
+      font-weight: 500;
+    }
+    .install-callout a:hover { color: var(--brand-darker); }
     .step pre {
       margin: 0;
       padding: 10px 12px;
@@ -982,6 +1005,7 @@
         <a href="#architecture">Architecture</a>
         <a href="#workflows">Workflows</a>
         <a href="#safety">Safety</a>
+        <a href="install.html">Install</a>
         <a href="#quickstart">Get Started</a>
         <a href="https://github.com/dventimisupabase/pg_flight_recorder" class="btn-github" target="_blank" rel="noopener">
           <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -1061,26 +1085,24 @@
     <div class="container">
       <div class="section-label reveal">Architecture</div>
       <h2 class="section-title reveal">Two data paths.<br>Complete visibility.</h2>
-      <p class="section-desc reveal">Flight Recorder samples PostgreSQL state every minute — wait events, locks, and active sessions in lightweight ring buffers; WAL, I/O, and query stats in durable snapshots — so when an incident happens, the data's already there.</p>
+      <p class="section-desc reveal">Flight Recorder samples PostgreSQL state every minute — wait events, locks, and active sessions in a partitioned ring; WAL, I/O, and query stats in durable snapshots — so when an incident happens, the data's already there.</p>
 
       <div class="arch-grid stagger">
         <div class="arch-card reveal">
           <div class="arch-card-label">Sampled Activity</div>
           <h3>Wait events, sessions, locks</h3>
-          <p>Per-minute sampling into UNLOGGED ring buffers for low overhead. Automatically flushed to durable aggregates and archives.</p>
+          <p>Per-minute sampling into a LIST-partitioned ring. Partitions are rotated with TRUNCATE on a fixed cadence — no DELETE, no vacuum, no bloat.</p>
           <div class="arch-flow">
             <span class="arch-node">pg_stat_activity</span>
             <span class="arch-arrow">&rarr;</span>
-            <span class="arch-node">Ring Buffers</span>
+            <span class="arch-node">wait_samples / activity_samples / lock_samples</span>
             <span class="arch-arrow">&rarr;</span>
-            <span class="arch-node">Aggregates</span>
-            <span class="arch-arrow">&rarr;</span>
-            <span class="arch-node">Archives</span>
+            <span class="arch-node">TRUNCATE rotation</span>
           </div>
           <div class="arch-meta">
             <div class="arch-meta-item"><strong>Frequency:</strong> 1 min</div>
-            <div class="arch-meta-item"><strong>Ring:</strong> 2h</div>
-            <div class="arch-meta-item"><strong>Archives:</strong> 7d</div>
+            <div class="arch-meta-item"><strong>Rotation:</strong> 2h</div>
+            <div class="arch-meta-item"><strong>Bloat:</strong> zero</div>
           </div>
         </div>
         <div class="arch-card reveal">
@@ -1192,7 +1214,7 @@
               <h3>Daily monitoring</h3>
               <p>Two distinct checks. First confirm the recorder itself is healthy — run after install, after upgrades, or whenever a report looks thin. Then read the database's daily diagnostic report: anomalies, wait events, top queries, and trends.</p>
               <ul>
-                <li><strong>Recorder self-check:</strong> collection status, ring buffer health, circuit breaker trips, pg_cron job activity</li>
+                <li><strong>Recorder self-check:</strong> collection status, circuit breaker trips, pg_cron job activity, schema size</li>
                 <li><strong>Database report:</strong> markdown summary over the given window — pasteable into an LLM for triage</li>
                 <li>Anomaly detection with severity levels and recommendations</li>
                 <li>Pre-deployment preflight checks</li>
@@ -1384,9 +1406,9 @@
         <div class="ext-card reveal">
           <span class="ext-badge core">Core</span>
           <h3>pgfr_record</h3>
-          <p>Tables, collection functions, scheduling, ring buffers, and safety mechanisms.</p>
+          <p>Tables, collection functions, scheduling, the partitioned sample ring, and safety mechanisms.</p>
           <ul class="ext-features">
-            <li>Ring buffer sampling &amp; archival</li>
+            <li>TRUNCATE-rotated sample ring (zero bloat)</li>
             <li>Configuration profiles</li>
             <li>Circuit breaker &amp; load shedding</li>
             <li>Health check &amp; diagnostics</li>
@@ -1420,7 +1442,10 @@
         <div class="step reveal">
           <div class="step-number">01</div>
           <h3>Install</h3>
-          <p>Download from GitHub Releases or clone the repo, <code>cd</code> into the project root, then run the SQL scripts. Or for Supabase users: <a href="install.html">one-click copy install bundles &rarr;</a></p>
+          <div class="install-callout">
+            <strong>Using Supabase or any SQL editor?</strong> Skip the CLI and use the <a href="install.html">one-click copy install page &rarr;</a> — two paste-and-run bundles, no <code>psql</code> required.
+          </div>
+          <p>Otherwise, download from GitHub Releases or clone the repo, <code>cd</code> into the project root, then run the SQL scripts.</p>
           <div class="code-block">
             <button class="copy-btn" aria-label="Copy to clipboard">
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M5 11H3.5A1.5 1.5 0 012 9.5v-7A1.5 1.5 0 013.5 1h7A1.5 1.5 0 0112 2.5V5"/></svg>
