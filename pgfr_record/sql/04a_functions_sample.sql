@@ -11,49 +11,12 @@
 -- standing unschedule block on next install.
 
 
--- Removes aged aggregate and archived sample data based on configured retention periods
--- Deletes expired records from wait_event_aggregates, lock_aggregates, activity_aggregates, and all *_samples_archive tables
-CREATE OR REPLACE FUNCTION pgfr_record.cleanup_aggregates()
-RETURNS VOID
-LANGUAGE plpgsql AS $$
-DECLARE
-    v_aggregate_retention interval;
-    v_archive_retention interval;
-    v_deleted_waits INTEGER;
-    v_deleted_locks INTEGER;
-    v_deleted_queries INTEGER;
-    v_deleted_activity_archive INTEGER;
-    v_deleted_lock_archive INTEGER;
-    v_deleted_wait_archive INTEGER;
-BEGIN
-    v_aggregate_retention := (pgfr_record._get_config('aggregate_retention_days', '7') || ' days')::interval;
-    v_archive_retention   := (pgfr_record._get_config('archive_retention_days', '7') || ' days')::interval;
-    DELETE FROM pgfr_record.wait_event_aggregates
-    WHERE start_time < now() - v_aggregate_retention;
-    GET DIAGNOSTICS v_deleted_waits = ROW_COUNT;
-    DELETE FROM pgfr_record.lock_aggregates
-    WHERE start_time < now() - v_aggregate_retention;
-    GET DIAGNOSTICS v_deleted_locks = ROW_COUNT;
-    DELETE FROM pgfr_record.activity_aggregates
-    WHERE start_time < now() - v_aggregate_retention;
-    GET DIAGNOSTICS v_deleted_queries = ROW_COUNT;
-    DELETE FROM pgfr_record.activity_samples_archive
-    WHERE captured_at < now() - v_archive_retention;
-    GET DIAGNOSTICS v_deleted_activity_archive = ROW_COUNT;
-    DELETE FROM pgfr_record.lock_samples_archive
-    WHERE captured_at < now() - v_archive_retention;
-    GET DIAGNOSTICS v_deleted_lock_archive = ROW_COUNT;
-    DELETE FROM pgfr_record.wait_samples_archive
-    WHERE captured_at < now() - v_archive_retention;
-    GET DIAGNOSTICS v_deleted_wait_archive = ROW_COUNT;
-    IF v_deleted_waits > 0 OR v_deleted_locks > 0 OR v_deleted_queries > 0 OR
-       v_deleted_activity_archive > 0 OR v_deleted_lock_archive > 0 OR v_deleted_wait_archive > 0 THEN
-        RAISE NOTICE 'pgfr_record: Cleaned up % wait aggregates, % lock aggregates, % query aggregates, % activity archives, % lock archives, % wait archives',
-            v_deleted_waits, v_deleted_locks, v_deleted_queries, v_deleted_activity_archive, v_deleted_lock_archive, v_deleted_wait_archive;
-    END IF;
-END;
-$$;
-COMMENT ON FUNCTION pgfr_record.cleanup_aggregates() IS 'Cleanup: Remove old aggregate and archive data based on retention periods';
+-- cleanup_aggregates() retired with the aggregates + archive tables it cleaned
+-- (wait_event_aggregates, lock_aggregates, activity_aggregates, *_samples_archive).
+-- Those tables are dropped in 02_tables.sql; nothing else needs purging here.
+
+DROP FUNCTION IF EXISTS pgfr_record.cleanup_aggregates();
+
 
 
 -- Collects table-level statistics from pg_stat_user_tables

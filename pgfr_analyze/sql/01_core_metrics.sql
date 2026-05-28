@@ -543,16 +543,17 @@ BEGIN
         END IF;
     END;
 
-    -- Idle-in-transaction detection
+    -- Idle-in-transaction detection (migrated to v2 activity_samples).
     FOR v_row IN
-        SELECT pid, usename, application_name,
-               EXTRACT(EPOCH FROM (now() - xact_start))/60 AS idle_minutes
-        FROM pgfr_record.activity_samples_archive
-        WHERE captured_at BETWEEN p_start_time AND p_end_time
-          AND state = 'idle in transaction'
-          AND xact_start IS NOT NULL
-          AND now() - xact_start > interval '5 minutes'
-        ORDER BY xact_start ASC
+        SELECT a.pid, a.usename, a.application_name,
+               EXTRACT(EPOCH FROM (now() - a.xact_start))/60 AS idle_minutes
+        FROM pgfr_record.activity_samples a
+        WHERE pgfr_record.epoch() + a.sample_ts * interval '1 second'
+              BETWEEN p_start_time AND p_end_time
+          AND a.state = 'idle in transaction'
+          AND a.xact_start IS NOT NULL
+          AND now() - a.xact_start > interval '5 minutes'
+        ORDER BY a.xact_start ASC
         LIMIT 5
     LOOP
         anomaly_type := 'IDLE_IN_TRANSACTION';
@@ -626,15 +627,16 @@ BEGIN
         RETURN NEXT;
     END LOOP;
 
-    -- Connection leak detection (sessions open > 7 days)
+    -- Connection leak detection (sessions open > 7 days; migrated to v2).
     FOR v_row IN
-        SELECT DISTINCT ON (pid) pid, usename, application_name, backend_start,
-               EXTRACT(DAY FROM (now() - backend_start)) AS days_open
-        FROM pgfr_record.activity_samples_archive
-        WHERE captured_at BETWEEN p_start_time AND p_end_time
-          AND backend_start IS NOT NULL
-          AND backend_start < now() - interval '7 days'
-        ORDER BY pid, backend_start
+        SELECT DISTINCT ON (a.pid) a.pid, a.usename, a.application_name, a.backend_start,
+               EXTRACT(DAY FROM (now() - a.backend_start)) AS days_open
+        FROM pgfr_record.activity_samples a
+        WHERE pgfr_record.epoch() + a.sample_ts * interval '1 second'
+              BETWEEN p_start_time AND p_end_time
+          AND a.backend_start IS NOT NULL
+          AND a.backend_start < now() - interval '7 days'
+        ORDER BY a.pid, a.backend_start
         LIMIT 5
     LOOP
         anomaly_type := 'CONNECTION_LEAK';

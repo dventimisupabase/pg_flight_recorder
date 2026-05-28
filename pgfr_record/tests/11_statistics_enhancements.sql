@@ -6,7 +6,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(19);
+SELECT plan(17);
 
 -- =============================================================================
 -- 1. ACTIVITY SAMPLING ENHANCEMENTS - COLUMN EXISTENCE (4 tests)
@@ -14,15 +14,9 @@ SELECT plan(19);
 
 
 
-SELECT has_column(
-    'pgfr_record', 'activity_samples_archive', 'backend_start',
-    'activity_samples_archive should have backend_start column'
-);
-
-SELECT has_column(
-    'pgfr_record', 'activity_samples_archive', 'xact_start',
-    'activity_samples_archive should have xact_start column'
-);
+-- activity_samples_archive retired; backend_start and xact_start columns
+-- now live on v2 activity_samples instead (still present, same names).
+-- 2 has_column assertions dropped.
 
 -- =============================================================================
 -- 2. VACUUM PROGRESS SNAPSHOTS - TABLE EXISTENCE (2 tests)

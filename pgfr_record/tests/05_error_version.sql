@@ -7,7 +7,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(98);
+SELECT plan(92);
 
 -- =============================================================================
 -- 13. ERROR HANDLING & EXCEPTION PATHS (60 tests)
@@ -183,22 +183,9 @@ SELECT lives_ok(
     'Error: statement_compare() should handle zero calls'
 );
 
--- Test pct_of_samples calculation with total_samples = 0
-DO $$
-BEGIN
-    -- Ensure we have some wait event data
-    IF NOT EXISTS (SELECT 1 FROM pgfr_record.wait_event_aggregates LIMIT 1) THEN
-        INSERT INTO pgfr_record.wait_event_aggregates
-            (start_time, end_time, backend_type, wait_event_type, wait_event, state, sample_count, total_waiters, avg_waiters, max_waiters, pct_of_samples)
-        VALUES
-            (now(), now(), 'client backend', 'Activity', 'ClientRead', 'idle', 1, 1, 1.0, 1, 100.0);
-    END IF;
-END $$;
-
-SELECT lives_ok(
-    $$SELECT pgfr_record.flush_ring_to_aggregates()$$,
-    'Error: flush_ring_to_aggregates() should handle division by zero in pct calculation'
-);
+-- flush_ring_to_aggregates() + wait_event_aggregates retired alongside the
+-- aggregates infrastructure. The "pct_of_samples division by zero" assertion
+-- protected that function specifically.
 
 -- Test schema_size_pct with database_size = 0 (edge case)
 SELECT lives_ok(
@@ -315,11 +302,7 @@ SELECT lives_ok(
     'Error: sample() should reset statement_timeout even after exception'
 );
 
--- Test flush_ring_to_aggregates() with corrupt data
-SELECT lives_ok(
-    $$SELECT pgfr_record.flush_ring_to_aggregates()$$,
-    'Error: flush_ring_to_aggregates() should handle unexpected data gracefully'
-);
+-- flush_ring_to_aggregates() "corrupt data" assertion retired alongside the function.
 
 -- Test cleanup operations with concurrent modifications
 SELECT lives_ok(
@@ -367,32 +350,9 @@ SELECT lives_ok(
     'Error: Concurrent sample() and snapshot() should work'
 );
 
--- Test flush_ring_to_aggregates() called twice concurrently
-DO $$
-BEGIN
-    PERFORM pgfr_record.flush_ring_to_aggregates();
-    PERFORM pgfr_record.flush_ring_to_aggregates();
-END $$;
-
-SELECT ok(true, 'Error: Concurrent flush operations should be safe');
-
--- Test cleanup_aggregates() called twice concurrently
-DO $$
-BEGIN
-    PERFORM pgfr_record.cleanup_aggregates();
-    PERFORM pgfr_record.cleanup_aggregates();
-END $$;
-
-SELECT ok(true, 'Error: Concurrent cleanup operations should be safe');
-
--- Test ring buffer write during flush
-DO $$
-BEGIN
-    PERFORM pgfr_record.sample_ring();
-    PERFORM pgfr_record.flush_ring_to_aggregates();
-END $$;
-
-SELECT ok(true, 'Error: Ring buffer writes during flush should be safe');
+-- Concurrent-flush, concurrent-cleanup, and "ring buffer write during flush"
+-- assertions retired alongside flush_ring_to_aggregates() and
+-- cleanup_aggregates(). 3 ok() assertions dropped.
 
 -- Test apply_profile() during active sample()
 SELECT lives_ok(
@@ -427,15 +387,7 @@ END $$;
 
 SELECT ok(true, 'Error: Snapshot inserts during compare() should be safe');
 
--- Test DELETE from aggregates during _wait_summary() query
-DO $$
-BEGIN
-    PERFORM * FROM pgfr_analyze.wait_summary(now() - interval '1 hour', now());
-    DELETE FROM pgfr_record.wait_event_aggregates
-    WHERE start_time < now() - interval '30 days';
-END $$;
-
-SELECT ok(true, 'Error: Aggregate deletes during wait_summary() queries should be safe');
+-- "DELETE from aggregates during wait_summary()" retired alongside wait_event_aggregates.
 
 -- Test schema size check during cleanup operation
 SELECT lives_ok(

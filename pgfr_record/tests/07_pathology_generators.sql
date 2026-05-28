@@ -9,7 +9,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(46);
+SELECT plan(45);
 
 -- =============================================================================
 -- PATHOLOGY 1: LOCK CONTENTION (6 tests)
@@ -666,11 +666,7 @@ SELECT lives_ok(
     'HISTORICAL PATHOLOGY: wait_summary() should execute for time range'
 );
 
--- Test that activity_samples_archive is queryable (may be empty if archiving hasn't run)
-SELECT ok(
-    (SELECT count(*) FROM pgfr_record.activity_samples_archive) >= 0,
-    'HISTORICAL PATHOLOGY: activity_samples_archive should be queryable'
-);
+-- activity_samples_archive retired; assertion dropped.
 
 -- Cleanup
 DROP TABLE test_historical;

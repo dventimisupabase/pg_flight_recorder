@@ -6,7 +6,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(25);
+SELECT plan(22);
 
 -- =============================================================================
 -- 1. DATABASE CONFLICT COLUMNS - COLUMN EXISTENCE (6 tests)
@@ -157,21 +157,8 @@ SELECT results_eq(
 -- Take a sample to populate activity data
 SELECT pgfr_record.sample_ring();
 
--- Verify activity_samples_archive has required columns for anomaly detection
-SELECT has_column(
-    'pgfr_record', 'activity_samples_archive', 'state',
-    'activity_samples_archive should have state column for idle-in-transaction detection'
-);
-
-SELECT has_column(
-    'pgfr_record', 'activity_samples_archive', 'xact_start',
-    'activity_samples_archive should have xact_start column for idle-in-transaction detection'
-);
-
-SELECT has_column(
-    'pgfr_record', 'activity_samples_archive', 'backend_start',
-    'activity_samples_archive should have backend_start column for connection leak detection'
-);
+-- activity_samples_archive retired; 3 has_column assertions dropped. Anomaly
+-- detection now reads from the v2 ring tables (activity_samples) directly.
 
 -- =============================================================================
 -- 6. TABLE_SNAPSHOTS - REQUIRED COLUMNS FOR DEAD TUPLE DETECTION (2 tests)

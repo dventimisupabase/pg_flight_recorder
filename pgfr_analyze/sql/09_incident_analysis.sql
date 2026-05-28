@@ -592,22 +592,27 @@ BEGIN
 
         UNION ALL
 
-        -- Wait event spikes from aggregates
+        -- Wait event spikes (v2): one row per (database, wait group) per tick
+        -- in wait_samples; we surface samples where waiter_count >= 3.
+        -- wait_event identity comes from wait_event_map.
         SELECT
-            wa.start_time AS event_time,
+            pgfr_record.epoch() + ws.sample_ts * interval '1 second' AS event_time,
             'wait_spike'::TEXT AS event_type,
-            format('Wait spike: %s/%s (max %s concurrent)',
-                   wa.wait_event_type, wa.wait_event, wa.max_waiters) AS description,
+            format('Wait spike: %s/%s (%s concurrent)',
+                   wem.type, wem.event, abs(ws.data[i + 1])) AS description,
             jsonb_build_object(
-                'wait_event_type', wa.wait_event_type,
-                'wait_event', wa.wait_event,
-                'max_concurrent', wa.max_waiters,
-                'avg_concurrent', round(wa.avg_waiters, 1),
-                'sample_count', wa.sample_count
+                'wait_event_type', wem.type,
+                'wait_event',      wem.event,
+                'max_concurrent',  abs(ws.data[i + 1]),
+                'active_count',    ws.active_count
             ) AS details
-        FROM pgfr_record.wait_event_aggregates wa
-        WHERE wa.start_time BETWEEN p_start_time AND p_end_time
-          AND wa.max_waiters >= 3  -- Only show significant waits
+        FROM pgfr_record.wait_samples ws
+        CROSS JOIN generate_subscripts(ws.data, 1) AS i
+        JOIN pgfr_record.wait_event_map wem ON wem.id = abs(ws.data[i])::smallint
+        WHERE ws.data[i] < 0
+          AND pgfr_record.epoch() + ws.sample_ts * interval '1 second'
+              BETWEEN p_start_time AND p_end_time
+          AND abs(ws.data[i + 1]) >= 3  -- Only show significant waits
 
         UNION ALL
 
@@ -757,17 +762,8 @@ BEGIN
           BETWEEN p_start_time AND p_end_time
       AND ls.blocked_pid IS NOT NULL;
 
-    -- Also check archive for longer incidents
-    IF v_blocked_total = 0 OR v_blocked_total IS NULL THEN
-        SELECT
-            COUNT(DISTINCT blocked_pid),
-            MAX(blocked_duration),
-            AVG(blocked_duration)
-        INTO v_blocked_total, v_max_block_duration, v_avg_block_duration
-        FROM pgfr_record.lock_samples_archive
-        WHERE captured_at BETWEEN p_start_time AND p_end_time
-          AND blocked_pid IS NOT NULL;
-    END IF;
+    -- (Legacy lock_samples_archive fallback retired alongside the archive
+    -- tables; v2 lock_samples is the single source of truth.)
 
     v_blocked_total := COALESCE(v_blocked_total, 0);
 

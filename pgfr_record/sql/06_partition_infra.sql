@@ -242,8 +242,8 @@ begin
     --     tables: statement_snapshots_v2, table_snapshots_v2, index_snapshots_v2,
     --             snapshots_v2, replication_snapshots_v2, vacuum_progress_snapshots_v2
     --   archive tier: retention_archive_days (default 7)
-    --     tables: activity_samples_archive_v2, lock_samples_archive_v2,
-    --             wait_samples_archive_v2
+    --     tables: (none active; the *_archive_v2 tables were retired in
+    --      wave 13. The tier is preserved for future archive-tier tables.)
     -- -------------------------------------------------------------------------
     v_retention_days := coalesce(
         pgfr_record._get_config('retention_snapshots_days', '30')::int,

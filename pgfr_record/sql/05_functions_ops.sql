@@ -204,7 +204,7 @@ BEGIN
         -- they exist from an older install. The v2 path (pgfr_sample_ring,
         -- pgfr_rotate_ring, scheduled below) is the canonical sampler now.
         PERFORM cron.schedule('pgfr_cleanup', '0 3 * * *',
-            'SET statement_timeout = ''60s''; SELECT pgfr_record.cleanup_aggregates(); SELECT * FROM pgfr_record.cleanup(''30 days''::interval);');
+            'SET statement_timeout = ''60s''; SELECT * FROM pgfr_record.cleanup(''30 days''::interval);');
         v_scheduled := v_scheduled + 1;
         -- One-time rename migration (#59): unschedule old hyphenated job names
         -- if a prior install left them. Self-healing on next enable().
@@ -244,9 +244,10 @@ BEGIN
             'PERFORM pgfr_record._ensure_partition(''statement_snapshots_v2'', current_date + 1); '
             'PERFORM pgfr_record._ensure_partition(''table_snapshots_v2'', current_date + 1, ''relid, dbid, sample_ts desc''); '
             'PERFORM pgfr_record._ensure_partition(''index_snapshots_v2'', current_date + 1, ''indexrelid, dbid, sample_ts desc''); '
-            'PERFORM pgfr_record._ensure_partition(''activity_samples_archive_v2'', current_date + 1, ''sample_ts desc, pid''); '
-            'PERFORM pgfr_record._ensure_partition(''lock_samples_archive_v2'', current_date + 1, ''sample_ts desc, blocked_pid''); '
-            'PERFORM pgfr_record._ensure_partition(''wait_samples_archive_v2'', current_date + 1, ''sample_ts desc, wait_event_type, wait_event''); '
+            -- *_archive_v2 _ensure_partition calls retired; archive tables
+            -- (legacy and _v2 partitioned) had no writers after the legacy
+            -- archive_ring_samples() was retired and are dropped in
+            -- 02_tables.sql / 09_phase3_snapshots_v2.sql.
             'END $x$');
         v_scheduled := v_scheduled + 1;
         -- Ensure pg_cron uses the unix socket for all pgfr jobs (not TCP).
@@ -553,35 +554,10 @@ BEGIN
            min(sample_ts)::TEXT || ' to ' || max(sample_ts)::TEXT
     FROM pgfr_record.index_snapshots;
 
-    RETURN QUERY
-    SELECT 'activity_samples_archive'::TEXT, count(*)::BIGINT,
-           min(captured_at)::TEXT || ' to ' || max(captured_at)::TEXT
-    FROM pgfr_record.activity_samples_archive;
-
-    RETURN QUERY
-    SELECT 'lock_samples_archive'::TEXT, count(*)::BIGINT,
-           min(captured_at)::TEXT || ' to ' || max(captured_at)::TEXT
-    FROM pgfr_record.lock_samples_archive;
-
-    RETURN QUERY
-    SELECT 'wait_samples_archive'::TEXT, count(*)::BIGINT,
-           min(captured_at)::TEXT || ' to ' || max(captured_at)::TEXT
-    FROM pgfr_record.wait_samples_archive;
-
-    RETURN QUERY
-    SELECT 'wait_event_aggregates'::TEXT, count(*)::BIGINT,
-           min(start_time)::TEXT || ' to ' || max(start_time)::TEXT
-    FROM pgfr_record.wait_event_aggregates;
-
-    RETURN QUERY
-    SELECT 'activity_aggregates'::TEXT, count(*)::BIGINT,
-           min(start_time)::TEXT || ' to ' || max(start_time)::TEXT
-    FROM pgfr_record.activity_aggregates;
-
-    RETURN QUERY
-    SELECT 'lock_aggregates'::TEXT, count(*)::BIGINT,
-           min(start_time)::TEXT || ' to ' || max(start_time)::TEXT
-    FROM pgfr_record.lock_aggregates;
+    -- Archives + aggregates (activity_samples_archive, lock_samples_archive,
+    -- wait_samples_archive, wait_event_aggregates, activity_aggregates,
+    -- lock_aggregates) retired with the legacy ring; export_for_upgrade no
+    -- longer reports row counts for those tables.
 
     RETURN QUERY
     SELECT 'config'::TEXT, count(*)::BIGINT,

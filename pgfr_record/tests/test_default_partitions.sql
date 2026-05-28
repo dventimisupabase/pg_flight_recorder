@@ -11,7 +11,7 @@
 \set ON_ERROR_STOP 1
 set client_min_messages to warning;
 
-select plan(10);
+select plan(7);
 
 -- =========================================================================
 -- 1. Each of the 9 range-partitioned parents has a DEFAULT child (9 tests)
@@ -83,38 +83,8 @@ select ok(
     'vacuum_progress_snapshots_v2 has DEFAULT partition'
 );
 
-select ok(
-    exists(
-        select 1
-        from pg_inherits i
-        join pg_class c on c.oid = i.inhrelid
-        where i.inhparent = 'pgfr_record.activity_samples_archive_v2'::regclass
-          and pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT'
-    ),
-    'activity_samples_archive_v2 has DEFAULT partition'
-);
-
-select ok(
-    exists(
-        select 1
-        from pg_inherits i
-        join pg_class c on c.oid = i.inhrelid
-        where i.inhparent = 'pgfr_record.lock_samples_archive_v2'::regclass
-          and pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT'
-    ),
-    'lock_samples_archive_v2 has DEFAULT partition'
-);
-
-select ok(
-    exists(
-        select 1
-        from pg_inherits i
-        join pg_class c on c.oid = i.inhrelid
-        where i.inhparent = 'pgfr_record.wait_samples_archive_v2'::regclass
-          and pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT'
-    ),
-    'wait_samples_archive_v2 has DEFAULT partition'
-);
+-- *_archive_v2 DEFAULT-partition assertions retired alongside the
+-- archive tables (3 ok() dropped).
 
 -- =========================================================================
 -- 2. _partition_inventory() excludes DEFAULT partitions (1 test)

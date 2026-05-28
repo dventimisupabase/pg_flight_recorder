@@ -7,7 +7,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(22);
+SELECT plan(16);
 
 -- =============================================================================
 -- 3A. RING BUFFER ARCHITECTURE (10 tests)
@@ -17,63 +17,12 @@ SELECT plan(22);
 
 
 
--- Test flush_ring_to_aggregates() function
-SELECT lives_ok(
-    $$SELECT pgfr_record.flush_ring_to_aggregates()$$,
-    'flush_ring_to_aggregates() should execute without error'
-);
-
--- Capture multiple samples to ensure we have data to aggregate
+-- Capture multiple samples; flush_ring_to_aggregates() / cleanup_aggregates() /
+-- wait_event_aggregates retired (6 assertions dropped: 1 flush lives_ok at the
+-- top of this section, plus 5 cleanup-with-old-data assertions below).
 SELECT pgfr_record.sample_ring();
 SELECT pgfr_record.sample_ring();
 SELECT pgfr_record.sample_ring();
-
--- Flush again to ensure aggregates are created
-SELECT pgfr_record.flush_ring_to_aggregates();
-
--- Verify flush ran: either aggregates exist or ring buffer had no wait events
--- (valid in low-load test environment with no active wait events)
-SELECT ok(
-    (SELECT count(*) FROM pgfr_record.wait_event_aggregates) >= 0,
-    'flush_ring_to_aggregates() should complete without error (aggregates optional in idle DB)'
-);
-
--- Test cleanup_aggregates() function
-SELECT lives_ok(
-    $$SELECT pgfr_record.cleanup_aggregates()$$,
-    'cleanup_aggregates() should execute without error'
-);
-
--- Test cleanup_aggregates() with old data
-DO $$
-BEGIN
-    -- Insert old test data (10 days ago)
-    INSERT INTO pgfr_record.wait_event_aggregates
-    (start_time, end_time, backend_type, wait_event_type, wait_event, state, sample_count, total_waiters, avg_waiters, max_waiters, pct_of_samples)
-    VALUES
-    (now() - interval '10 days', now() - interval '10 days', 'client backend', 'Running', 'CPU', 'active', 1, 1, 1, 1, 100);
-END $$;
-
--- Verify old data exists before cleanup
-SELECT ok(
-    (SELECT count(*) FROM pgfr_record.wait_event_aggregates WHERE start_time < now() - interval '7 days') >= 1,
-    'Old test aggregate should exist before cleanup'
-);
-
--- Run cleanup
-SELECT pgfr_record.cleanup_aggregates();
-
--- Verify old data was deleted (default 7 day retention)
-SELECT ok(
-    (SELECT count(*) FROM pgfr_record.wait_event_aggregates WHERE start_time < now() - interval '7 days') = 0,
-    'Old aggregates should be deleted by cleanup_aggregates() with 7 day retention'
-);
-
--- Verify recent data was NOT deleted
-SELECT ok(
-    (SELECT count(*) FROM pgfr_record.wait_event_aggregates WHERE start_time >= now() - interval '1 day') >= 0,
-    'Recent aggregates should be preserved by cleanup_aggregates()'
-);
 
 -- =============================================================================
 -- 4. ANALYSIS FUNCTIONS (8 tests)

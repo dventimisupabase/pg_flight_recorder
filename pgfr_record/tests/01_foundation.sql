@@ -7,7 +7,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(41);
+SELECT plan(32);
 
 -- =============================================================================
 -- 1. INSTALLATION VERIFICATION (19 tests)
@@ -20,15 +20,10 @@ SELECT has_schema('pgfr_record', 'Schema pgfr_record should exist');
 SELECT has_table('pgfr_record', 'snapshots', 'Table pgfr_record.snapshots should exist');
 SELECT has_table('pgfr_record', 'replication_snapshots', 'Table pgfr_record.replication_snapshots should exist');
 SELECT has_table('pgfr_record', 'statement_snapshots', 'Table pgfr_record.statement_snapshots should exist');
--- Ring buffers (UNLOGGED)
--- Aggregates (REGULAR/durable)
-SELECT has_table('pgfr_record', 'wait_event_aggregates', 'Aggregates: Table pgfr_record.wait_event_aggregates should exist');
-SELECT has_table('pgfr_record', 'lock_aggregates', 'Aggregates: Table pgfr_record.lock_aggregates should exist');
-SELECT has_table('pgfr_record', 'activity_aggregates', 'Aggregates: Table pgfr_record.activity_aggregates should exist');
--- Raw archives (REGULAR/durable)
-SELECT has_table('pgfr_record', 'activity_samples_archive', 'Raw archives: Table pgfr_record.activity_samples_archive should exist');
-SELECT has_table('pgfr_record', 'lock_samples_archive', 'Raw archives: Table pgfr_record.lock_samples_archive should exist');
-SELECT has_table('pgfr_record', 'wait_samples_archive', 'Raw archives: Table pgfr_record.wait_samples_archive should exist');
+-- Aggregates + archives retired alongside the legacy ring (6 has_table
+-- assertions dropped for wait_event_aggregates, lock_aggregates,
+-- activity_aggregates, activity_samples_archive, lock_samples_archive,
+-- wait_samples_archive).
 -- Config and monitoring
 SELECT has_table('pgfr_record', 'config', 'Table pgfr_record.config should exist');
 SELECT has_table('pgfr_record', 'collection_stats', 'P0 Safety: Table pgfr_record.collection_stats should exist');
@@ -61,10 +56,8 @@ SELECT has_function('pgfr_analyze', 'summary_report', 'Function pgfr_analyze.sum
 SELECT has_function('pgfr_record', 'get_mode', 'Function pgfr_record.get_mode should exist');
 SELECT has_function('pgfr_record', 'set_mode', 'Function pgfr_record.set_mode should exist');
 SELECT has_function('pgfr_record', 'cleanup', 'Function pgfr_record.cleanup should exist');
--- Ring buffer functions
-SELECT has_function('pgfr_record', 'flush_ring_to_aggregates', 'Aggregates: Function pgfr_record.flush_ring_to_aggregates should exist');
-SELECT has_function('pgfr_record', 'archive_ring_samples', 'Raw archives: Function pgfr_record.archive_ring_samples should exist');
-SELECT has_function('pgfr_record', 'cleanup_aggregates', 'Cleanup: Function pgfr_record.cleanup_aggregates should exist');
+-- flush_ring_to_aggregates, archive_ring_samples, cleanup_aggregates retired
+-- alongside the aggregates + archive tables (3 has_function assertions dropped).
 
 -- =============================================================================
 -- 3. CORE FUNCTIONALITY (10 tests)
