@@ -120,14 +120,14 @@ BEGIN
     -- STEP 2: Find surrounding samples (from ring buffer)
     -- ==========================================================================
     SELECT sr.* INTO v_sample_before
-    FROM pgfr_record.samples_ring sr
+    FROM pgfr_record.samples_ring_legacy sr
     WHERE sr.captured_at <= p_timestamp
       AND sr.captured_at > '1970-01-01'::timestamptz
     ORDER BY sr.captured_at DESC
     LIMIT 1;
 
     SELECT sr.* INTO v_sample_after
-    FROM pgfr_record.samples_ring sr
+    FROM pgfr_record.samples_ring_legacy sr
     WHERE sr.captured_at >= p_timestamp
       AND sr.captured_at > '1970-01-01'::timestamptz
     ORDER BY sr.captured_at ASC
@@ -268,14 +268,14 @@ BEGIN
         -- Count active sessions
         SELECT COUNT(*), COUNT(*) FILTER (WHERE a.state = 'active')
         INTO v_sessions, v_sessions
-        FROM pgfr_record.activity_samples_ring a
+        FROM pgfr_record.activity_samples_ring_legacy a
         WHERE a.slot_id = v_sample_before.slot_id
           AND a.pid IS NOT NULL;
 
         -- Find long-running queries (> 60 seconds at sample time)
         SELECT COUNT(*), MAX(EXTRACT(EPOCH FROM (v_sample_before.captured_at - a.query_start)))
         INTO v_long_running, v_longest_secs
-        FROM pgfr_record.activity_samples_ring a
+        FROM pgfr_record.activity_samples_ring_legacy a
         WHERE a.slot_id = v_sample_before.slot_id
           AND a.pid IS NOT NULL
           AND a.state = 'active'
@@ -292,7 +292,7 @@ BEGIN
                 'user', a.usename,
                 'query_preview', a.query_preview
             )
-            FROM pgfr_record.activity_samples_ring a
+            FROM pgfr_record.activity_samples_ring_legacy a
             WHERE a.slot_id = v_sample_before.slot_id
               AND a.pid IS NOT NULL
               AND a.query_start BETWEEN v_window_start AND v_window_end
@@ -311,7 +311,7 @@ BEGIN
                 'pid', a.pid,
                 'user', a.usename
             )
-            FROM pgfr_record.activity_samples_ring a
+            FROM pgfr_record.activity_samples_ring_legacy a
             WHERE a.slot_id = v_sample_before.slot_id
               AND a.pid IS NOT NULL
               AND a.xact_start BETWEEN v_window_start AND v_window_end
@@ -385,7 +385,7 @@ BEGIN
     IF v_sample_before IS NOT NULL THEN
         SELECT COUNT(*) > 0, COUNT(*)
         INTO v_lock_detected, v_blocked
-        FROM pgfr_record.lock_samples_ring l
+        FROM pgfr_record.lock_samples_ring_legacy l
         WHERE l.slot_id = v_sample_before.slot_id
           AND l.blocked_pid IS NOT NULL;
 
@@ -416,7 +416,7 @@ BEGIN
                 'wait_event', ws.wait_event,
                 'count', ws.count
             ) AS w
-            FROM pgfr_record.wait_samples_ring ws
+            FROM pgfr_record.wait_samples_ring_legacy ws
             WHERE ws.slot_id = v_sample_before.slot_id
               AND ws.wait_event IS NOT NULL
             ORDER BY ws.count DESC NULLS LAST
@@ -627,8 +627,8 @@ BEGIN
                 'client_addr', a.client_addr::TEXT,
                 'query_preview', a.query_preview
             ) AS details
-        FROM pgfr_record.activity_samples_ring a
-        JOIN pgfr_record.samples_ring sr ON sr.slot_id = a.slot_id
+        FROM pgfr_record.activity_samples_ring_legacy a
+        JOIN pgfr_record.samples_ring_legacy sr ON sr.slot_id = a.slot_id
         WHERE a.query_start BETWEEN p_start_time AND p_end_time
           AND a.query_start IS NOT NULL
           AND a.pid IS NOT NULL
@@ -665,8 +665,8 @@ BEGIN
                 'user', a.usename,
                 'application', a.application_name
             ) AS details
-        FROM pgfr_record.activity_samples_ring a
-        JOIN pgfr_record.samples_ring sr ON sr.slot_id = a.slot_id
+        FROM pgfr_record.activity_samples_ring_legacy a
+        JOIN pgfr_record.samples_ring_legacy sr ON sr.slot_id = a.slot_id
         WHERE a.xact_start BETWEEN p_start_time AND p_end_time
           AND a.xact_start IS NOT NULL
           AND a.pid IS NOT NULL
@@ -706,8 +706,8 @@ BEGIN
                 'client_addr', a.client_addr::TEXT,
                 'backend_type', a.backend_type
             ) AS details
-        FROM pgfr_record.activity_samples_ring a
-        JOIN pgfr_record.samples_ring sr ON sr.slot_id = a.slot_id
+        FROM pgfr_record.activity_samples_ring_legacy a
+        JOIN pgfr_record.samples_ring_legacy sr ON sr.slot_id = a.slot_id
         WHERE a.backend_start BETWEEN p_start_time AND p_end_time
           AND a.backend_start IS NOT NULL
           AND a.pid IS NOT NULL
@@ -751,8 +751,8 @@ BEGIN
                 'lock_type', l.lock_type,
                 'duration', l.blocked_duration::TEXT
             ) AS details
-        FROM pgfr_record.lock_samples_ring l
-        JOIN pgfr_record.samples_ring sr ON sr.slot_id = l.slot_id
+        FROM pgfr_record.lock_samples_ring_legacy l
+        JOIN pgfr_record.samples_ring_legacy sr ON sr.slot_id = l.slot_id
         WHERE sr.captured_at BETWEEN p_start_time AND p_end_time
           AND l.blocked_pid IS NOT NULL
           AND sr.captured_at > '1970-01-01'::timestamptz
@@ -942,8 +942,8 @@ BEGIN
     INTO v_blocked_total, v_max_block_duration, v_avg_block_duration
     FROM (
         SELECT l.blocked_pid, l.blocked_duration
-        FROM pgfr_record.lock_samples_ring l
-        JOIN pgfr_record.samples_ring sr ON sr.slot_id = l.slot_id
+        FROM pgfr_record.lock_samples_ring_legacy l
+        JOIN pgfr_record.samples_ring_legacy sr ON sr.slot_id = l.slot_id
         WHERE sr.captured_at BETWEEN p_start_time AND p_end_time
           AND l.blocked_pid IS NOT NULL
         UNION ALL
@@ -976,8 +976,8 @@ BEGIN
         SELECT sample_key, COUNT(DISTINCT blocked_pid) AS blocked_count
         FROM (
             SELECT sr.slot_id::text AS sample_key, l.blocked_pid
-            FROM pgfr_record.lock_samples_ring l
-            JOIN pgfr_record.samples_ring sr ON sr.slot_id = l.slot_id
+            FROM pgfr_record.lock_samples_ring_legacy l
+            JOIN pgfr_record.samples_ring_legacy sr ON sr.slot_id = l.slot_id
             WHERE sr.captured_at BETWEEN p_start_time AND p_end_time
               AND l.blocked_pid IS NOT NULL
             UNION ALL
@@ -997,8 +997,8 @@ BEGIN
         SELECT lock_type, COUNT(*) AS cnt
         FROM (
             SELECT l.lock_type
-            FROM pgfr_record.lock_samples_ring l
-            JOIN pgfr_record.samples_ring sr ON sr.slot_id = l.slot_id
+            FROM pgfr_record.lock_samples_ring_legacy l
+            JOIN pgfr_record.samples_ring_legacy sr ON sr.slot_id = l.slot_id
             WHERE sr.captured_at BETWEEN p_start_time AND p_end_time
               AND l.blocked_pid IS NOT NULL
               AND l.lock_type IS NOT NULL
@@ -1113,8 +1113,8 @@ BEGIN
             SELECT COALESCE(l.blocked_app, 'unknown') AS app,
                    l.blocked_pid,
                    l.blocked_duration
-            FROM pgfr_record.lock_samples_ring l
-            JOIN pgfr_record.samples_ring sr ON sr.slot_id = l.slot_id
+            FROM pgfr_record.lock_samples_ring_legacy l
+            JOIN pgfr_record.samples_ring_legacy sr ON sr.slot_id = l.slot_id
             WHERE sr.captured_at BETWEEN p_start_time AND p_end_time
               AND l.blocked_pid IS NOT NULL
             UNION ALL
@@ -1140,8 +1140,8 @@ BEGIN
         FROM (
             -- legacy ring
             SELECT w.wait_event_type, w.wait_event, w.count::bigint AS total_count
-            FROM pgfr_record.wait_samples_ring w
-            JOIN pgfr_record.samples_ring sr ON sr.slot_id = w.slot_id
+            FROM pgfr_record.wait_samples_ring_legacy w
+            JOIN pgfr_record.samples_ring_legacy sr ON sr.slot_id = w.slot_id
             WHERE sr.captured_at BETWEEN v_baseline_start AND v_baseline_end
               AND w.wait_event IS NOT NULL
             UNION ALL
@@ -1162,8 +1162,8 @@ BEGIN
         FROM (
             -- legacy ring
             SELECT w.wait_event_type, w.wait_event, w.count::bigint AS total_count
-            FROM pgfr_record.wait_samples_ring w
-            JOIN pgfr_record.samples_ring sr ON sr.slot_id = w.slot_id
+            FROM pgfr_record.wait_samples_ring_legacy w
+            JOIN pgfr_record.samples_ring_legacy sr ON sr.slot_id = w.slot_id
             WHERE sr.captured_at BETWEEN p_start_time AND p_end_time
               AND w.wait_event IS NOT NULL
             UNION ALL
