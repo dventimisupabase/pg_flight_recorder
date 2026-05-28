@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Install pg_flight_recorder</title>
+  <meta name="description" content="One-click install bundles for pg_flight_recorder. Paste into the Supabase dashboard SQL editor and run.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Source+Code+Pro:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg: #121212;
+      --bg-surface: #1F1F1F;
+      --bg-control: #232323;
+      --brand: #3ECE8D;
+      --brand-darker: #34B27B;
+      --fg: #FAFAFA;
+      --fg-light: #B4B4B4;
+      --fg-lighter: #888888;
+      --border-default: #2D2D2D;
+      --border-strong: #363636;
+      --destructive: #E54D2D;
+      --font-sans: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      --font-mono: 'Source Code Pro', 'Office Code Pro', Menlo, monospace;
+    }
+
+    html { color-scheme: dark; scroll-behavior: smooth; }
+
+    body {
+      font-family: var(--font-sans);
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.65;
+      font-size: 15px;
+      -webkit-font-smoothing: antialiased;
+      min-height: 100vh;
+    }
+
+    a { color: var(--brand); text-decoration: none; }
+    a:hover { color: var(--brand-darker); }
+
+    .container {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 48px 24px 96px;
+    }
+
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 24px;
+      border-bottom: 1px solid var(--border-default);
+      margin-bottom: 48px;
+    }
+
+    .topbar .brand {
+      font-family: var(--font-mono);
+      font-weight: 600;
+      font-size: 14px;
+      color: var(--fg);
+    }
+
+    .topbar a { font-size: 13px; color: var(--fg-light); }
+    .topbar a:hover { color: var(--brand); }
+
+    h1 {
+      font-size: 2.25rem;
+      letter-spacing: -0.02em;
+      margin-bottom: 12px;
+    }
+
+    .lede {
+      color: var(--fg-light);
+      font-size: 1.0625rem;
+      margin-bottom: 8px;
+      max-width: 60ch;
+    }
+
+    .version-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 12px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-default);
+      border-radius: 100px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--fg-light);
+      margin-top: 8px;
+    }
+
+    .version-pill .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--brand);
+    }
+
+    .step {
+      margin-top: 48px;
+      padding: 28px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-default);
+      border-radius: 8px;
+    }
+
+    .step-header {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 4px;
+    }
+
+    .step-number {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--fg-lighter);
+    }
+
+    .step-title {
+      font-size: 1.25rem;
+      letter-spacing: -0.01em;
+    }
+
+    .step-desc {
+      color: var(--fg-light);
+      margin-bottom: 20px;
+      font-size: 14px;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 20px;
+      border-radius: 6px;
+      font-family: var(--font-sans);
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+      text-decoration: none;
+    }
+
+    .btn-primary {
+      background: var(--brand);
+      color: #0A0A0A;
+    }
+    .btn-primary:hover { background: var(--brand-darker); color: #0A0A0A; }
+    .btn-primary[disabled] {
+      background: var(--bg-control);
+      color: var(--fg-lighter);
+      cursor: not-allowed;
+    }
+
+    .btn-secondary {
+      background: var(--bg-control);
+      color: var(--fg);
+      border-color: var(--border-strong);
+    }
+    .btn-secondary:hover { border-color: var(--brand); color: var(--brand); }
+
+    .btn.copied {
+      background: var(--bg-surface);
+      color: var(--brand);
+      border-color: var(--brand);
+    }
+
+    .btn.error {
+      background: var(--bg-surface);
+      color: var(--destructive);
+      border-color: var(--destructive);
+    }
+
+    .btn svg { width: 16px; height: 16px; }
+
+    details {
+      margin-top: 8px;
+      border: 1px solid var(--border-default);
+      border-radius: 6px;
+      background: var(--bg);
+    }
+
+    details summary {
+      padding: 10px 16px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--fg-light);
+      user-select: none;
+    }
+
+    details summary:hover { color: var(--brand); }
+
+    details[open] summary { border-bottom: 1px solid var(--border-default); }
+
+    details pre {
+      max-height: 480px;
+      overflow: auto;
+      padding: 16px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--fg-light);
+      white-space: pre;
+    }
+
+    .meta {
+      color: var(--fg-lighter);
+      font-size: 12px;
+      font-family: var(--font-mono);
+    }
+
+    .meta.error { color: var(--destructive); }
+
+    .footer {
+      margin-top: 64px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border-default);
+      font-size: 13px;
+      color: var(--fg-lighter);
+    }
+
+    .footer p { margin-bottom: 8px; }
+    .footer code {
+      background: var(--bg-surface);
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--fg-light);
+    }
+
+    .prereq-list {
+      list-style: none;
+      margin: 12px 0 0 0;
+      padding: 0;
+    }
+
+    .prereq-list li {
+      padding: 4px 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="topbar">
+      <span class="brand">pg_flight_recorder</span>
+      <span><a href="./">← Project page</a></span>
+    </div>
+
+    <h1>Install in two pastes.</h1>
+    <p class="lede">Two self-contained SQL bundles ready for the Supabase dashboard SQL editor (or any plain-SQL client). No psql, no CLI, no extension registry.</p>
+    <p class="version-pill"><span class="dot"></span>Latest release: <span id="version">RELEASE_VERSION</span></p>
+
+    <section class="step" id="record-step">
+      <div class="step-header">
+        <span class="step-number">01 / required</span>
+      </div>
+      <h2 class="step-title">pgfr_record &mdash; core recorder</h2>
+      <p class="step-desc">Tables, collection functions, scheduling, ring buffers, safety mechanisms. Schedules every pg_cron job on install.</p>
+
+      <div class="actions">
+        <button class="btn btn-primary" id="copy-record" disabled>
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M5 11H3.5A1.5 1.5 0 012 9.5v-7A1.5 1.5 0 013.5 1h7A1.5 1.5 0 0112 2.5V5"/></svg>
+          <span class="label">Loading…</span>
+        </button>
+        <a class="btn btn-secondary" href="pgfr_record-bundle.sql" download>
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2v9M4 7l4 4 4-4M3 14h10"/></svg>
+          Download
+        </a>
+        <span class="meta" id="record-meta"></span>
+      </div>
+
+      <details>
+        <summary>Preview SQL</summary>
+        <pre id="record-preview">Loading…</pre>
+      </details>
+    </section>
+
+    <section class="step" id="analyze-step">
+      <div class="step-header">
+        <span class="step-number">02 / optional</span>
+      </div>
+      <h2 class="step-title">pgfr_analyze &mdash; reporting &amp; analysis</h2>
+      <p class="step-desc">Anomaly detection, time-travel, incident timelines, capacity planning. Requires pgfr_record to be installed first.</p>
+
+      <div class="actions">
+        <button class="btn btn-primary" id="copy-analyze" disabled>
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M5 11H3.5A1.5 1.5 0 012 9.5v-7A1.5 1.5 0 013.5 1h7A1.5 1.5 0 0112 2.5V5"/></svg>
+          <span class="label">Loading…</span>
+        </button>
+        <a class="btn btn-secondary" href="pgfr_analyze-bundle.sql" download>
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2v9M4 7l4 4 4-4M3 14h10"/></svg>
+          Download
+        </a>
+        <span class="meta" id="analyze-meta"></span>
+      </div>
+
+      <details>
+        <summary>Preview SQL</summary>
+        <pre id="analyze-preview">Loading…</pre>
+      </details>
+    </section>
+
+    <div class="footer">
+      <p><strong>Before you paste:</strong></p>
+      <ul class="prereq-list">
+        <li>&bull; Enable <code>pg_cron</code> on your database.</li>
+        <li>&bull; Enable <code>pg_stat_statements</code> on your database (for query-level analysis).</li>
+        <li>&bull; Each bundle is wrapped in <code>BEGIN; … COMMIT;</code>. If something fails, nothing partial gets installed.</li>
+      </ul>
+      <p style="margin-top: 16px;">After install, run <code>SELECT * FROM pgfr_record.health_check();</code> to verify the recorder is collecting. See the <a href="./">project page</a> for daily-monitoring and incident-response workflows.</p>
+    </div>
+  </div>
+
+  <script>
+    const BUNDLES = [
+      { url: 'pgfr_record-bundle.sql',  copyBtn: 'copy-record',  preview: 'record-preview',  meta: 'record-meta'  },
+      { url: 'pgfr_analyze-bundle.sql', copyBtn: 'copy-analyze', preview: 'analyze-preview', meta: 'analyze-meta' },
+    ];
+
+    function humanSize(bytes) {
+      if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+      if (bytes >= 1024) return (bytes / 1024).toFixed(0) + ' KB';
+      return bytes + ' B';
+    }
+
+    function previewClip(text, maxLines = 200) {
+      const lines = text.split('\n');
+      if (lines.length <= maxLines) return text;
+      return lines.slice(0, maxLines).join('\n') + '\n\n-- … ' + (lines.length - maxLines) + ' more lines …';
+    }
+
+    function wireBundle({ url, copyBtn, preview, meta }) {
+      const btn   = document.getElementById(copyBtn);
+      const pre   = document.getElementById(preview);
+      const metaE = document.getElementById(meta);
+      const label = btn.querySelector('.label');
+      let text = null;
+
+      fetch(url, { cache: 'no-store' })
+        .then(r => {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.text();
+        })
+        .then(body => {
+          text = body;
+          pre.textContent = previewClip(body);
+          metaE.textContent = humanSize(body.length) + ' · ' + body.split('\n').length.toLocaleString() + ' lines';
+          label.textContent = 'Copy to clipboard';
+          btn.disabled = false;
+        })
+        .catch(err => {
+          label.textContent = 'Unavailable';
+          metaE.textContent = err.message;
+          metaE.classList.add('error');
+          pre.textContent = '-- Failed to load bundle: ' + err.message;
+          btn.classList.add('error');
+        });
+
+      btn.addEventListener('click', async () => {
+        if (text == null) return;
+        try {
+          await navigator.clipboard.writeText(text);
+          btn.classList.add('copied');
+          label.textContent = 'Copied — paste into Supabase SQL editor';
+          setTimeout(() => {
+            btn.classList.remove('copied');
+            label.textContent = 'Copy to clipboard';
+          }, 2400);
+        } catch (err) {
+          btn.classList.add('error');
+          label.textContent = 'Copy failed — use Download';
+        }
+      });
+    }
+
+    BUNDLES.forEach(wireBundle);
+  </script>
+</body>
+</html>
