@@ -157,9 +157,12 @@ CREATE TABLE IF NOT EXISTS pgfr_record.statement_snapshots (
 CREATE INDEX IF NOT EXISTS statement_snapshots_queryid_idx
     ON pgfr_record.statement_snapshots(queryid);
 
--- Add delta columns to existing installations (additive-only upgrade)
+-- Add delta columns to existing installations (additive-only upgrade).
+-- set local client_min_messages = warning silences the "column already exists,
+-- skipping" notices on fresh installs (the columns were created above).
 DO $$
 BEGIN
+    SET LOCAL client_min_messages = warning;
     ALTER TABLE pgfr_record.statement_snapshots ADD COLUMN IF NOT EXISTS calls_delta BIGINT;
     ALTER TABLE pgfr_record.statement_snapshots ADD COLUMN IF NOT EXISTS total_exec_time_delta DOUBLE PRECISION;
     ALTER TABLE pgfr_record.statement_snapshots ADD COLUMN IF NOT EXISTS rows_delta BIGINT;
@@ -199,6 +202,7 @@ END $$;
 -- monitoring" and blueprints/XMIN_HORIZON.md.
 DO $$
 BEGIN
+    SET LOCAL client_min_messages = warning;
     ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS activity_xmin XID;
     ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS activity_xmin_age BIGINT;
     ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS slot_xmin XID;
@@ -220,6 +224,7 @@ END $$;
 -- by the collector so it's genuinely binary, never three-valued.
 DO $$
 BEGIN
+    SET LOCAL client_min_messages = warning;
     ALTER TABLE pgfr_record.replication_snapshots ADD COLUMN IF NOT EXISTS backend_xmin XID;
     ALTER TABLE pgfr_record.replication_snapshots ADD COLUMN IF NOT EXISTS backend_xmin_age BIGINT;
     ALTER TABLE pgfr_record.replication_snapshots ADD COLUMN IF NOT EXISTS slot_name TEXT;
@@ -230,18 +235,23 @@ END $$;
 -- retired. Their writers, readers, and ring-infra functions were removed
 -- in the legacy-ring retirement; the v2 path in 08_ring_buffer_v2.sql is
 -- the canonical sampler now. DROP at install time covers existing
--- installs being upgraded.
-DROP TABLE IF EXISTS pgfr_record.wait_samples_ring_legacy     CASCADE;
-DROP TABLE IF EXISTS pgfr_record.activity_samples_ring_legacy CASCADE;
-DROP TABLE IF EXISTS pgfr_record.lock_samples_ring_legacy     CASCADE;
-DROP TABLE IF EXISTS pgfr_record.samples_ring_legacy          CASCADE;
--- Also clean up the original pre-rename names if they exist (an installation
--- that ran a pre-rename pgfr_record will have samples_ring etc. without the
--- _legacy suffix).
-DROP TABLE IF EXISTS pgfr_record.wait_samples_ring     CASCADE;
-DROP TABLE IF EXISTS pgfr_record.activity_samples_ring CASCADE;
-DROP TABLE IF EXISTS pgfr_record.lock_samples_ring     CASCADE;
-DROP TABLE IF EXISTS pgfr_record.samples_ring          CASCADE;
+-- installs being upgraded; set local silences the "table does not exist,
+-- skipping" notices on fresh installs.
+DO $$
+BEGIN
+    SET LOCAL client_min_messages = warning;
+    DROP TABLE IF EXISTS pgfr_record.wait_samples_ring_legacy     CASCADE;
+    DROP TABLE IF EXISTS pgfr_record.activity_samples_ring_legacy CASCADE;
+    DROP TABLE IF EXISTS pgfr_record.lock_samples_ring_legacy     CASCADE;
+    DROP TABLE IF EXISTS pgfr_record.samples_ring_legacy          CASCADE;
+    DROP TABLE IF EXISTS pgfr_record.wait_samples_ring     CASCADE;
+    DROP TABLE IF EXISTS pgfr_record.activity_samples_ring CASCADE;
+    DROP TABLE IF EXISTS pgfr_record.lock_samples_ring     CASCADE;
+    DROP TABLE IF EXISTS pgfr_record.samples_ring          CASCADE;
+END $$;
+-- (The DROPs above also cover the original pre-rename names — an installation
+-- that ran a pre-rename pgfr_record had samples_ring etc. without the
+-- _legacy suffix.)
 -- Aggregates wait event statistics over 5-minute windows, enabling analysis of wait event patterns
 -- Stores metrics like average/max concurrent waiters per event type, state, and backend type
 -- Aggregates: durable and survives crashes, with indexes for efficient time-range and event-type queries

@@ -491,10 +491,11 @@ comment on view pgfr_record.partition_gc_health is
 -- End Phase 1: Core Partition Infrastructure
 -- =============================================================================
 
-SELECT pgfr_record.snapshot();
--- Legacy pgfr_record.sample() removed during ring retirement; the v2 ring
--- sampler (pgfr_record.sample_ring()) is fired by the pgfr_sample_ring
--- cron job and doesn't need a one-shot kick at install time.
+-- The install-time SELECT pgfr_record.snapshot() lives at the end of
+-- install.sql now, after every collector is defined. Running it here
+-- emitted spurious WARNINGs for v2 collectors that hadn't loaded yet
+-- (sparse statement/table/index collectors, _ensure_partition on
+-- snapshots_v2/table_snapshots_v2/index_snapshots_v2).
 DO $$
 DECLARE
     v_sample_schedule TEXT;

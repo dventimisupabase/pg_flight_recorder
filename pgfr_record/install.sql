@@ -35,6 +35,11 @@
 -- Idempotent; safe on fresh install (keys won't exist yet) and upgrades.
 select old_key, new_key, action from pgfr_record.migrate_config_keys();
 
+-- One-shot snapshot to seed the durable tables and the v2 partitions.
+-- Lives here (rather than at the end of 06_partition_infra.sql) so every
+-- collector defined in 07/08/09 is in place before snapshot() runs.
+select pgfr_record.snapshot();
+
 -- Schedule all pg_cron jobs via the single source of truth (enable()).
 -- pg_cron's cron.schedule() replaces same-named jobs, so this is idempotent
 -- across re-runs.
