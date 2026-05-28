@@ -16,92 +16,43 @@ SELECT plan(79);
 -- Ring Buffer Slot Boundaries (10 tests)
 
 -- Test slot_id = 119 (should succeed - max valid)
-SELECT lives_ok(
-    $$UPDATE pgfr_record.samples_ring_legacy SET captured_at = now() WHERE slot_id = 119$$,
-    'Boundary: slot_id = 119 should be valid (max slot)'
-);
+SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Test slot_id = 0 (should succeed - min valid)
-SELECT lives_ok(
-    $$UPDATE pgfr_record.samples_ring_legacy SET captured_at = now() WHERE slot_id = 0$$,
-    'Boundary: slot_id = 0 should be valid (min slot)'
-);
+SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Test slot_id wraparound (verify both 0 and 119 exist)
-SELECT ok(
-    (SELECT count(*) FROM pgfr_record.samples_ring_legacy WHERE slot_id IN (0, 119)) = 2,
-    'Boundary: Slots 0 and 119 should both exist for wraparound'
-);
+SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Test all 120 slots exist
-SELECT is(
-    (SELECT count(DISTINCT slot_id) FROM pgfr_record.samples_ring_legacy),
-    120::bigint,
-    'Boundary: Exactly 120 unique slots should exist (0-119)'
-);
+SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Row Number Boundaries (15 tests)
 
 -- Wait samples: row_num = 99 (should succeed - max valid)
-SELECT lives_ok(
-    $$UPDATE pgfr_record.wait_samples_ring_legacy
-      SET backend_type = 'test' WHERE slot_id = 0 AND row_num = 99$$,
-    'Boundary: wait_samples row_num = 99 should be valid (max row)'
-);
+SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Wait samples: row_num = 0 (should succeed - min valid)
-SELECT lives_ok(
-    $$UPDATE pgfr_record.wait_samples_ring_legacy
-      SET backend_type = 'test' WHERE slot_id = 0 AND row_num = 0$$,
-    'Boundary: wait_samples row_num = 0 should be valid (min row)'
-);
+SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Activity samples: row_num = 24 (should succeed - max valid)
-SELECT lives_ok(
-    $$UPDATE pgfr_record.activity_samples_ring_legacy
-      SET pid = 9999 WHERE slot_id = 0 AND row_num = 24$$,
-    'Boundary: activity_samples row_num = 24 should be valid (max row)'
-);
+SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Activity samples: row_num = 0 (should succeed - min valid)
-SELECT lives_ok(
-    $$UPDATE pgfr_record.activity_samples_ring_legacy
-      SET pid = 9999 WHERE slot_id = 0 AND row_num = 0$$,
-    'Boundary: activity_samples row_num = 0 should be valid (min row)'
-);
+SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Lock samples: row_num = 99 (should succeed - max valid)
-SELECT lives_ok(
-    $$UPDATE pgfr_record.lock_samples_ring_legacy
-      SET blocked_pid = 9999 WHERE slot_id = 0 AND row_num = 99$$,
-    'Boundary: lock_samples row_num = 99 should be valid (max row)'
-);
+SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Lock samples: row_num = 0 (should succeed - min valid)
-SELECT lives_ok(
-    $$UPDATE pgfr_record.lock_samples_ring_legacy
-      SET blocked_pid = 9999 WHERE slot_id = 0 AND row_num = 0$$,
-    'Boundary: lock_samples row_num = 0 should be valid (min row)'
-);
+SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Verify pre-population counts
-SELECT is(
-    (SELECT count(*) FROM pgfr_record.wait_samples_ring_legacy),
-    12000::bigint,
-    'Boundary: wait_samples_ring should have 12,000 pre-populated rows (120 slots x 100 rows)'
-);
+SELECT skip('Assertion retired with the legacy 120-slot ring');
 
-SELECT is(
-    (SELECT count(*) FROM pgfr_record.activity_samples_ring_legacy),
-    3000::bigint,
-    'Boundary: activity_samples_ring should have 3,000 pre-populated rows (120 slots x 25 rows)'
-);
+SELECT skip('Assertion retired with the legacy 120-slot ring');
 
-SELECT is(
-    (SELECT count(*) FROM pgfr_record.lock_samples_ring_legacy),
-    12000::bigint,
-    'Boundary: lock_samples_ring should have 12,000 pre-populated rows (120 slots x 100 rows)'
-);
+SELECT skip('Assertion retired with the legacy 120-slot ring');
 
 -- Configuration Boundaries (15 tests)
 
@@ -257,8 +208,10 @@ DECLARE
     v_start timestamptz;
     v_end timestamptz;
 BEGIN
-    SELECT min(captured_at), min(captured_at) INTO v_start, v_end
-    FROM pgfr_record.samples_ring_legacy WHERE captured_at IS NOT NULL;
+    SELECT pgfr_record.epoch() + min(sample_ts) * interval '1 second',
+           pgfr_record.epoch() + min(sample_ts) * interval '1 second'
+      INTO v_start, v_end
+      FROM pgfr_record.wait_samples;
 
     IF v_start IS NOT NULL THEN
         PERFORM * FROM pgfr_analyze.wait_summary(v_start, v_end);
@@ -273,8 +226,10 @@ DECLARE
     v_start timestamptz;
     v_end timestamptz;
 BEGIN
-    SELECT max(captured_at), min(captured_at) INTO v_start, v_end
-    FROM pgfr_record.samples_ring_legacy WHERE captured_at IS NOT NULL;
+    SELECT pgfr_record.epoch() + max(sample_ts) * interval '1 second',
+           pgfr_record.epoch() + min(sample_ts) * interval '1 second'
+      INTO v_start, v_end
+      FROM pgfr_record.wait_samples;
 
     IF v_start IS NOT NULL AND v_end IS NOT NULL THEN
         PERFORM * FROM pgfr_analyze.wait_summary(v_start, v_end);
@@ -420,22 +375,11 @@ SELECT lives_ok(
     'Health: performance_report(''0 seconds'') should not crash'
 );
 
--- Test ring_buffer_health()
-SELECT is(
-    (SELECT count(*) FROM pgfr_record.ring_buffer_health()),
-    4::bigint,
-    'Health: ring_buffer_health() should check all 4 ring buffer tables'
-);
-
--- Test ring_buffer_health() returns expected columns
-SELECT ok(
-    EXISTS(
-        SELECT 1 FROM pgfr_record.ring_buffer_health()
-        WHERE table_name IS NOT NULL
-        AND dead_tuples IS NOT NULL
-    ),
-    'Health: ring_buffer_health() should return table names and dead tuple counts'
-);
+-- ring_buffer_health() was specific to the legacy 120-slot ring (HOT-update
+-- monitoring, pre-allocated slot bloat tracking). The v2 ring uses TRUNCATE
+-- rotation and has no equivalent metric surface.
+SELECT skip('ring_buffer_health() retired with the legacy 120-slot ring');
+SELECT skip('ring_buffer_health() return-shape test retired with the legacy ring');
 
 -- Test preflight_check() executes all checks
 SELECT ok(

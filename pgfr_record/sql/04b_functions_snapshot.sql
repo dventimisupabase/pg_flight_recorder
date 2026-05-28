@@ -1374,15 +1374,17 @@ BEGIN
         v_profile.archive_frequency_min::text,
         (v_old_archive IS DISTINCT FROM v_profile.archive_frequency_min::text);
 
-    -- Warn if rebuild is needed
+    -- Ring buffer slot count change is now a config-only signal; the v2
+    -- ring uses TRUNCATE-rotated LIST-partitioned tables and is resized
+    -- via partition management, not a rebuild call.
     IF v_rebuild_needed THEN
-        RAISE WARNING 'Ring buffer slot count changed. Run pgfr_record.rebuild_ring_buffers() to resize. Data in ring buffers will be lost.';
+        RAISE NOTICE 'ring_buffer_slots config changed; v2 ring partitions are managed by partition-maintenance cron jobs.';
     END IF;
 
     RAISE NOTICE 'Applied optimization profile: % (%)', p_profile, v_profile.description;
 END;
 $$;
-COMMENT ON FUNCTION pgfr_record.apply_optimization_profile(TEXT) IS 'Applies a ring buffer optimization profile. Updates ring_buffer_slots, sample_interval_seconds, and archive_sample_frequency_minutes. Call rebuild_ring_buffers() after if slot count changed.';
+COMMENT ON FUNCTION pgfr_record.apply_optimization_profile(TEXT) IS 'Applies a ring buffer optimization profile. Updates ring_buffer_slots, sample_interval_seconds, and archive_sample_frequency_minutes config keys. Partition management for the v2 ring is handled by the partition-maintenance cron jobs.';
 
 -- Preview the configuration changes from applying a specified profile
 -- Compares current settings against profile values to show impact before applying

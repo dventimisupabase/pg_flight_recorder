@@ -76,66 +76,9 @@ COMMENT ON FUNCTION pgfr_record.cleanup(INTERVAL) IS
 'Remove old data based on configured retention periods (snapshots, statements, collection_stats). Pass an interval to override per-table retention, or NULL to use configured defaults.';
 
 DROP FUNCTION IF EXISTS pgfr_record.ring_buffer_health();
+DROP FUNCTION IF EXISTS pgfr_record.configure_ring_autovacuum(boolean);
+DROP FUNCTION IF EXISTS pgfr_record.rebuild_ring_buffers(integer);
 
--- Monitor ring buffer health: XID age, dead tuple bloat, HOT update effectiveness, and autovacuum status
-CREATE OR REPLACE FUNCTION pgfr_record.ring_buffer_health()
-RETURNS TABLE(
-    table_name              TEXT,
-    row_count               BIGINT,
-    dead_tuples             BIGINT,
-    dead_tuple_pct          NUMERIC,
-    xid_age                 INTEGER,
-    mxid_age                INTEGER,
-    total_updates           BIGINT,
-    hot_updates             BIGINT,
-    hot_update_pct          NUMERIC,
-    last_vacuum             TIMESTAMPTZ,
-    last_autovacuum         TIMESTAMPTZ,
-    autovacuum_threshold    BIGINT,
-    needs_vacuum            BOOLEAN,
-    status                  TEXT
-)
-LANGUAGE sql STABLE AS $$
-    SELECT
-        c.relname::text,
-        s.n_live_tup,
-        s.n_dead_tup,
-        CASE
-            WHEN s.n_live_tup > 0 THEN round(100.0 * s.n_dead_tup / NULLIF(s.n_live_tup, 0), 1)
-            ELSE 0
-        END,
-        age(c.relfrozenxid)::integer,
-        mxid_age(c.relminmxid)::integer,
-        s.n_tup_upd,
-        s.n_tup_hot_upd,
-        CASE
-            WHEN s.n_tup_upd > 0 THEN round(100.0 * s.n_tup_hot_upd / NULLIF(s.n_tup_upd, 0), 1)
-            ELSE 0
-        END,
-        s.last_vacuum,
-        s.last_autovacuum,
-        (50 + (0.2 * s.n_live_tup)::bigint),
-        s.n_dead_tup > (50 + (0.2 * s.n_live_tup)::bigint),
-        CASE
-            WHEN age(c.relfrozenxid) > 200000000 THEN 'CRITICAL: XID wraparound risk'
-            WHEN mxid_age(c.relminmxid) > 200000000 THEN 'CRITICAL: MultiXID wraparound risk'
-            WHEN age(c.relfrozenxid) > 100000000 THEN 'WARNING: High XID age'
-            WHEN mxid_age(c.relminmxid) > 100000000 THEN 'WARNING: High MultiXID age'
-            WHEN c.relname = 'samples_ring_legacy' AND s.n_tup_upd > 100 AND (100.0 * s.n_tup_hot_upd / NULLIF(s.n_tup_upd, 0)) < 50 THEN 'WARNING: Low HOT update ratio'
-            WHEN s.n_dead_tup > (50 + (0.2 * s.n_live_tup)::bigint) THEN 'INFO: Autovacuum pending'
-            ELSE 'OK'
-        END::text
-    FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
-    WHERE n.nspname = 'pgfr_record'
-      AND c.relkind = 'r'
-      AND c.relname IN ('samples_ring_legacy', 'wait_samples_ring_legacy', 'activity_samples_ring_legacy', 'lock_samples_ring_legacy')
-    ORDER BY c.relname;
-$$;
-COMMENT ON FUNCTION pgfr_record.ring_buffer_health() IS
-
-'Monitor ring buffer XID/MultiXID age, dead tuple bloat, and HOT update effectiveness. samples_ring uses UPSERT (1,440x/day) and should achieve >90% HOT update ratio with fillfactor=70. Child tables use DELETE/INSERT so HOT updates are N/A. MultiXID thresholds match XID (200M critical, 100M warning); see https://postgres.ai/docs/postgres-howtos/performance-optimization/monitoring/how-to-monitor-transaction-id-wraparound-risks';
 -- Disable Flight Recorder by unscheduling all cron jobs and updating the enabled configuration flag to false
 CREATE OR REPLACE FUNCTION pgfr_record.disable()
 RETURNS TEXT
@@ -207,123 +150,6 @@ END;
 $$;
 COMMENT ON FUNCTION pgfr_record.disable() IS
 'Stop Flight Recorder by unscheduling all pg_cron jobs (sample, snapshot, flush, archive, cleanup) and setting enabled=false. Use enable() to restart.';
-
--- Configure autovacuum on ring buffer tables
--- Ring buffers use pre-allocated rows with UPDATE-only pattern, achieving high HOT update ratios.
--- With fillfactor 70-90, most updates are HOT (no dead tuples in indexes), but tuple chains still
--- form within pages. Autovacuum collapses these chains. Since ring buffers are fixed-size UNLOGGED
--- tables with bounded bloat, autovacuum is optional - page pruning during UPSERTs provides cleanup.
--- Autovacuum enabled by default; disable for minimal observer effect if desired.
-CREATE OR REPLACE FUNCTION pgfr_record.configure_ring_autovacuum(p_enabled BOOLEAN DEFAULT true)
-RETURNS TEXT
-LANGUAGE plpgsql AS $$
-DECLARE
-    v_status TEXT;
-BEGIN
-    EXECUTE format('ALTER TABLE pgfr_record.samples_ring_legacy SET (autovacuum_enabled = %L)', p_enabled);
-    EXECUTE format('ALTER TABLE pgfr_record.wait_samples_ring_legacy SET (autovacuum_enabled = %L)', p_enabled);
-    EXECUTE format('ALTER TABLE pgfr_record.activity_samples_ring_legacy SET (autovacuum_enabled = %L)', p_enabled);
-    EXECUTE format('ALTER TABLE pgfr_record.lock_samples_ring_legacy SET (autovacuum_enabled = %L)', p_enabled);
-
-    IF p_enabled THEN
-        v_status := 'Autovacuum ENABLED on ring buffer tables. Autovacuum will periodically collapse HOT chains.';
-    ELSE
-        v_status := 'Autovacuum DISABLED on ring buffer tables. Page pruning during UPSERTs handles cleanup.';
-    END IF;
-
-    RETURN v_status;
-END;
-$$;
-
-COMMENT ON FUNCTION pgfr_record.configure_ring_autovacuum(BOOLEAN) IS
-'Toggle autovacuum on ring buffer tables. Enabled by default (PostgreSQL standard behavior). Ring buffers are fixed-size UNLOGGED tables with bounded bloat, so autovacuum can be disabled to minimize observer effect if desired.';
-
--- Rebuilds ring buffers to match configured slot count
--- WARNING: This clears all data in ring buffers (archives and aggregates are preserved)
-CREATE OR REPLACE FUNCTION pgfr_record.rebuild_ring_buffers(p_slots INTEGER DEFAULT NULL)
-RETURNS TEXT
-LANGUAGE plpgsql AS $$
-DECLARE
-    v_target_slots INTEGER;
-    v_current_slots INTEGER;
-    v_autovacuum_enabled BOOLEAN := true;
-BEGIN
-    -- Get target slot count from param or config
-    v_target_slots := COALESCE(p_slots, pgfr_record._get_ring_buffer_slots());
-
-    -- Validate range
-    IF v_target_slots < 72 OR v_target_slots > 2880 THEN
-        RAISE EXCEPTION 'Ring buffer slots must be between 72 and 2880. Got: %', v_target_slots;
-    END IF;
-
-    -- Get current slot count
-    SELECT COUNT(*) INTO v_current_slots FROM pgfr_record.samples_ring_legacy;
-
-    -- Check if resize is needed
-    IF v_current_slots = v_target_slots THEN
-        RETURN format('Ring buffers already sized for %s slots. No rebuild needed.', v_target_slots);
-    END IF;
-
-    -- Preserve autovacuum setting
-    SELECT COALESCE(
-        (SELECT reloptions::text LIKE '%autovacuum_enabled=false%'
-         FROM pg_class WHERE relname = 'samples_ring_legacy' AND relnamespace = 'pgfr_record'::regnamespace),
-        false
-    ) INTO v_autovacuum_enabled;
-    v_autovacuum_enabled := NOT v_autovacuum_enabled;  -- Invert because we checked for false
-
-    RAISE NOTICE 'Rebuilding ring buffers from % to % slots...', v_current_slots, v_target_slots;
-
-    -- TRUNCATE CASCADE clears all child tables via FK
-    TRUNCATE pgfr_record.samples_ring_legacy CASCADE;
-
-    -- Rebuild samples_ring
-    INSERT INTO pgfr_record.samples_ring_legacy (slot_id, captured_at, epoch_seconds)
-    SELECT
-        generate_series AS slot_id,
-        '1970-01-01'::timestamptz,
-        0
-    FROM generate_series(0, v_target_slots - 1);
-
-    -- Rebuild wait_samples_ring
-    INSERT INTO pgfr_record.wait_samples_ring_legacy (slot_id, row_num)
-    SELECT s.slot_id, r.row_num
-    FROM generate_series(0, v_target_slots - 1) s(slot_id)
-    CROSS JOIN generate_series(0, 99) r(row_num);
-
-    -- Rebuild activity_samples_ring
-    INSERT INTO pgfr_record.activity_samples_ring_legacy (slot_id, row_num)
-    SELECT s.slot_id, r.row_num
-    FROM generate_series(0, v_target_slots - 1) s(slot_id)
-    CROSS JOIN generate_series(0, 24) r(row_num);
-
-    -- Rebuild lock_samples_ring
-    INSERT INTO pgfr_record.lock_samples_ring_legacy (slot_id, row_num)
-    SELECT s.slot_id, r.row_num
-    FROM generate_series(0, v_target_slots - 1) s(slot_id)
-    CROSS JOIN generate_series(0, 99) r(row_num);
-
-    -- Restore autovacuum setting
-    IF NOT v_autovacuum_enabled THEN
-        PERFORM pgfr_record.configure_ring_autovacuum(false);
-    END IF;
-
-    -- Update config if p_slots was provided
-    IF p_slots IS NOT NULL THEN
-        INSERT INTO pgfr_record.config (key, value, updated_at)
-        VALUES ('ring_buffer_slots', p_slots::text, now())
-        ON CONFLICT (key) DO UPDATE SET value = p_slots::text, updated_at = now();
-    END IF;
-
-    RETURN format('Ring buffers rebuilt: %s → %s slots. Tables: samples_ring (%s), wait_samples_ring (%s), activity_samples_ring (%s), lock_samples_ring (%s)',
-        v_current_slots, v_target_slots,
-        v_target_slots,
-        v_target_slots * 100,
-        v_target_slots * 25,
-        v_target_slots * 100);
-END;
-$$;
-COMMENT ON FUNCTION pgfr_record.rebuild_ring_buffers(INTEGER) IS 'Rebuilds ring buffers to match configured slot count (72-2880). WARNING: Clears all ring buffer data. Archives and aggregates are preserved. Pass slot count as parameter or use ring_buffer_slots config.';
 
 -- Enables flight recorder by scheduling periodic cron jobs for collection, archival, and cleanup
 -- Requires pg_cron extension; returns status message on success
@@ -781,7 +607,8 @@ DECLARE
 BEGIN
     v_mode := pgfr_record._get_config('mode', 'normal');
     SELECT schema_size_mb INTO v_schema_size_mb FROM pgfr_record._check_schema_size();
-    SELECT count(*) INTO v_sample_count FROM pgfr_record.samples_ring_legacy;
+    -- Sample volume from v2 wait_samples (legacy samples_ring retired).
+    SELECT count(*) INTO v_sample_count FROM pgfr_record.wait_samples;
     SELECT count(*) INTO v_snapshot_count FROM pgfr_record.snapshots;
     SELECT avg(duration_ms) INTO v_avg_sample_ms
     FROM pgfr_record.collection_stats

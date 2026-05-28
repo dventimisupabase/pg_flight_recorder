@@ -203,21 +203,12 @@ SELECT ok(
 -- 7. RING BUFFER HEALTH EXPOSES MXID (2 tests)
 -- =============================================================================
 
--- ring_buffer_health() returns an mxid_age column — lives_ok fails if the
--- column doesn't exist in the function signature
-SELECT lives_ok(
-    $$SELECT mxid_age FROM pgfr_record.ring_buffer_health() LIMIT 1$$,
-    'ring_buffer_health() should expose an mxid_age output column'
-);
-
--- Functional check: mxid_age is non-null for all ring buffer tables
-SELECT ok(
-    NOT EXISTS (
-        SELECT 1 FROM pgfr_record.ring_buffer_health()
-        WHERE mxid_age IS NULL
-    ),
-    'ring_buffer_health() should populate mxid_age for all 4 ring buffer tables'
-);
+-- ring_buffer_health() was specific to the legacy 120-slot ring's pre-
+-- allocated rows and HOT update tracking. v2's TRUNCATE-rotation model
+-- has no equivalent. mxid_age monitoring for v2 ring partitions would be
+-- a follow-up task.
+SELECT skip('ring_buffer_health() retired with the legacy 120-slot ring');
+SELECT skip('ring_buffer_health() mxid_age column retired with the legacy ring');
 
 -- =============================================================================
 -- 8. POSITIVE ANOMALY TESTS (3 tests)

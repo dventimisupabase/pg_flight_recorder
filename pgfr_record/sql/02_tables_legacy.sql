@@ -226,85 +226,22 @@ BEGIN
     ALTER TABLE pgfr_record.replication_snapshots ADD COLUMN IF NOT EXISTS is_logical_walsender BOOLEAN NOT NULL DEFAULT false;
 END $$;
 
-CREATE UNLOGGED TABLE IF NOT EXISTS pgfr_record.samples_ring_legacy (
-    slot_id             INTEGER PRIMARY KEY CHECK (slot_id >= 0 AND slot_id < 2880),
-    captured_at         TIMESTAMPTZ NOT NULL,
-    epoch_seconds       BIGINT NOT NULL
-) WITH (fillfactor = 70);
-COMMENT ON TABLE pgfr_record.samples_ring_legacy IS 'Ring buffer: Master slot tracker (configurable slots via ring_buffer_slots, default 120). Supports up to 2880 slots for extended retention or fine-grained sampling. Fillfactor 70 enables HOT updates. Use configure_ring_autovacuum(false) to disable autovacuum if desired.';
-
-CREATE UNLOGGED TABLE IF NOT EXISTS pgfr_record.wait_samples_ring_legacy (
-    slot_id             INTEGER REFERENCES pgfr_record.samples_ring_legacy(slot_id) ON DELETE CASCADE,
-    row_num             INTEGER NOT NULL CHECK (row_num >= 0 AND row_num < 100),
-    backend_type        TEXT,
-    wait_event_type     TEXT,
-    wait_event          TEXT,
-    state               TEXT,
-    count               INTEGER,
-    PRIMARY KEY (slot_id, row_num)
-) WITH (fillfactor = 90);
-COMMENT ON TABLE pgfr_record.wait_samples_ring_legacy IS 'Ring buffer: Wait events (UPDATE-only pattern). Pre-populated rows (slots × 100 rows, default 12,000). Fillfactor 90 enables HOT updates. Use configure_ring_autovacuum(false) to disable autovacuum if desired. NULLs indicate unused slots.';
-
-CREATE UNLOGGED TABLE IF NOT EXISTS pgfr_record.activity_samples_ring_legacy (
-    slot_id             INTEGER REFERENCES pgfr_record.samples_ring_legacy(slot_id) ON DELETE CASCADE,
-    row_num             INTEGER NOT NULL CHECK (row_num >= 0 AND row_num < 25),
-    pid                 INTEGER,
-    usename             TEXT,
-    application_name    TEXT,
-    client_addr         INET,
-    backend_type        TEXT,
-    state               TEXT,
-    wait_event_type     TEXT,
-    wait_event          TEXT,
-    backend_start       TIMESTAMPTZ,
-    xact_start          TIMESTAMPTZ,
-    query_start         TIMESTAMPTZ,
-    state_change        TIMESTAMPTZ,
-    query_preview       TEXT,
-    PRIMARY KEY (slot_id, row_num)
-) WITH (fillfactor = 90);
-COMMENT ON TABLE pgfr_record.activity_samples_ring_legacy IS 'Ring buffer: Active sessions (UPDATE-only pattern). Pre-populated rows (slots × 25 rows, default 3,000). Top 25 active sessions per sample. Fillfactor 90 enables HOT updates. Use configure_ring_autovacuum(false) to disable autovacuum if desired. NULLs indicate unused slots.';
-
-CREATE UNLOGGED TABLE IF NOT EXISTS pgfr_record.lock_samples_ring_legacy (
-    slot_id                 INTEGER REFERENCES pgfr_record.samples_ring_legacy(slot_id) ON DELETE CASCADE,
-    row_num                 INTEGER NOT NULL CHECK (row_num >= 0 AND row_num < 100),
-    blocked_pid             INTEGER,
-    blocked_user            TEXT,
-    blocked_app             TEXT,
-    blocked_query_preview   TEXT,
-    blocked_duration        INTERVAL,
-    blocking_pid            INTEGER,
-    blocking_user           TEXT,
-    blocking_app            TEXT,
-    blocking_query_preview  TEXT,
-    lock_type               TEXT,
-    locked_relation_oid     OID,
-    PRIMARY KEY (slot_id, row_num)
-) WITH (fillfactor = 90);
-COMMENT ON TABLE pgfr_record.lock_samples_ring_legacy IS 'Ring buffer: Lock contention (UPDATE-only pattern). Pre-populated rows (slots × 100 rows, default 12,000). Max 100 blocked/blocking pairs per sample. Fillfactor 90 enables HOT updates. Use configure_ring_autovacuum(false) to disable autovacuum if desired. NULLs indicate unused slots.';
-
-INSERT INTO pgfr_record.samples_ring_legacy (slot_id, captured_at, epoch_seconds)
-SELECT
-    generate_series AS slot_id,
-    '1970-01-01'::timestamptz,
-    0
-FROM generate_series(0, 119)
-ON CONFLICT (slot_id) DO NOTHING;
-INSERT INTO pgfr_record.wait_samples_ring_legacy (slot_id, row_num)
-SELECT s.slot_id, r.row_num
-FROM generate_series(0, 119) s(slot_id)
-CROSS JOIN generate_series(0, 99) r(row_num)
-ON CONFLICT (slot_id, row_num) DO NOTHING;
-INSERT INTO pgfr_record.activity_samples_ring_legacy (slot_id, row_num)
-SELECT s.slot_id, r.row_num
-FROM generate_series(0, 119) s(slot_id)
-CROSS JOIN generate_series(0, 24) r(row_num)
-ON CONFLICT (slot_id, row_num) DO NOTHING;
-INSERT INTO pgfr_record.lock_samples_ring_legacy (slot_id, row_num)
-SELECT s.slot_id, r.row_num
-FROM generate_series(0, 119) s(slot_id)
-CROSS JOIN generate_series(0, 99) r(row_num)
-ON CONFLICT (slot_id, row_num) DO NOTHING;
+-- Legacy 120-slot ring buffer tables (samples_ring + 3 child tables)
+-- retired. Their writers, readers, and ring-infra functions were removed
+-- in the legacy-ring retirement; the v2 path in 08_ring_buffer_v2.sql is
+-- the canonical sampler now. DROP at install time covers existing
+-- installs being upgraded.
+DROP TABLE IF EXISTS pgfr_record.wait_samples_ring_legacy     CASCADE;
+DROP TABLE IF EXISTS pgfr_record.activity_samples_ring_legacy CASCADE;
+DROP TABLE IF EXISTS pgfr_record.lock_samples_ring_legacy     CASCADE;
+DROP TABLE IF EXISTS pgfr_record.samples_ring_legacy          CASCADE;
+-- Also clean up the original pre-rename names if they exist (an installation
+-- that ran a pre-rename pgfr_record will have samples_ring etc. without the
+-- _legacy suffix).
+DROP TABLE IF EXISTS pgfr_record.wait_samples_ring     CASCADE;
+DROP TABLE IF EXISTS pgfr_record.activity_samples_ring CASCADE;
+DROP TABLE IF EXISTS pgfr_record.lock_samples_ring     CASCADE;
+DROP TABLE IF EXISTS pgfr_record.samples_ring          CASCADE;
 -- Aggregates wait event statistics over 5-minute windows, enabling analysis of wait event patterns
 -- Stores metrics like average/max concurrent waiters per event type, state, and backend type
 -- Aggregates: durable and survives crashes, with indexes for efficient time-range and event-type queries

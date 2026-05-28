@@ -156,58 +156,19 @@ SELECT throws_ok(
 );
 
 -- =============================================================================
--- 4. REBUILD FUNCTION TESTS (7 tests)
+-- 4. REBUILD FUNCTION TESTS (retired with the legacy 120-slot ring)
 -- =============================================================================
-
--- Test rebuild_ring_buffers() exists
-SELECT has_function(
-    'pgfr_record',
-    'rebuild_ring_buffers',
-    'rebuild_ring_buffers() should exist'
-);
-
--- Test rebuild_ring_buffers() returns no-op message when already at target size
-SELECT ok(
-    pgfr_record.rebuild_ring_buffers() LIKE '%already sized%',
-    'rebuild_ring_buffers() should return no-op message when already at 120 slots'
-);
-
--- Test samples_ring has correct row count (120)
-SELECT is(
-    (SELECT count(*) FROM pgfr_record.samples_ring_legacy),
-    120::bigint,
-    'samples_ring should have 120 rows'
-);
-
--- Test wait_samples_ring has correct row count (120 * 100)
-SELECT is(
-    (SELECT count(*) FROM pgfr_record.wait_samples_ring_legacy),
-    12000::bigint,
-    'wait_samples_ring should have 12000 rows (120 slots x 100 rows)'
-);
-
--- Test rebuild_ring_buffers() can resize to 72 slots
-SELECT ok(
-    pgfr_record.rebuild_ring_buffers(72) LIKE '%rebuilt%',
-    'rebuild_ring_buffers(72) should succeed'
-);
-
--- Verify resize worked
-SELECT is(
-    (SELECT count(*) FROM pgfr_record.samples_ring_legacy),
-    72::bigint,
-    'samples_ring should have 72 rows after rebuild'
-);
-
--- Restore to default
-SELECT pgfr_record.rebuild_ring_buffers(120);
-
--- Test rebuild_ring_buffers() rejects invalid slot count
-SELECT throws_ok(
-    $$SELECT pgfr_record.rebuild_ring_buffers(50)$$,
-    'Ring buffer slots must be between 72 and 2880. Got: 50',
-    'rebuild_ring_buffers() should reject slot count below 72'
-);
+-- rebuild_ring_buffers() was specific to the legacy ring's pre-allocated
+-- row model. The v2 ring uses TRUNCATE rotation on LIST-partitioned tables
+-- and is resized by recreating partitions, not by rebuilding pre-populated
+-- slots. All seven assertions in this section are retired.
+SELECT skip('rebuild_ring_buffers() retired with the legacy 120-slot ring');
+SELECT skip('rebuild_ring_buffers() no-op message retired with the legacy ring');
+SELECT skip('samples_ring row-count assertion retired with the legacy ring');
+SELECT skip('wait_samples_ring row-count assertion retired with the legacy ring');
+SELECT skip('rebuild_ring_buffers(72) resize retired with the legacy ring');
+SELECT skip('samples_ring row count after rebuild retired with the legacy ring');
+SELECT skip('rebuild_ring_buffers() slot-count validation retired with the legacy ring');
 
 -- =============================================================================
 -- 5. SAMPLE() DYNAMIC SLOT TESTS (3 tests)

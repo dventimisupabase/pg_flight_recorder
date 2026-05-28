@@ -449,19 +449,11 @@ SELECT lives_ok(
     'Error: Concurrent quarterly reviews should be safe'
 );
 
--- Test concurrent ring buffer updates to same slot
-DO $$
-BEGIN
-    UPDATE pgfr_record.samples_ring_legacy
-    SET captured_at = now()
-    WHERE slot_id = 0;
-
-    UPDATE pgfr_record.samples_ring_legacy
-    SET captured_at = now()
-    WHERE slot_id = 0;
-END $$;
-
-SELECT ok(true, 'Error: Concurrent updates to same ring buffer slot should be safe');
+-- The legacy ring's "concurrent UPDATE to same slot" test was specific to
+-- pre-allocated slot rows in samples_ring. The v2 ring uses INSERT into
+-- LIST-partitioned tables with TRUNCATE rotation; same-slot concurrency
+-- isn't a meaningful comparison.
+SELECT skip('Concurrent ring slot UPDATE retired with the legacy ring');
 
 -- Test pg_cron job schedule change during execution
 SELECT lives_ok(
