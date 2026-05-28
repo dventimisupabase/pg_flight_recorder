@@ -3,7 +3,12 @@ name: Deploy to GitHub Pages
 on:
   push:
     branches: [main]
-    paths: [index.html]
+    paths:
+      - index.html
+      - install.html
+      - .github/workflows/pages.yml
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -23,6 +28,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Fetch the latest release's install bundles and rename them to
+      # versionless filenames so install.html can fetch them from a stable
+      # URL. The install page surfaces the actual version it ships via the
+      # tag stamped in below.
+      - name: Download latest-release bundles
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=$(gh release list --limit 1 --json tagName -q '.[0].tagName')
+          echo "Latest release tag: $TAG"
+          gh release download "$TAG" -p '*-bundle.sql' --clobber
+          # Strip versioned filenames to stable names install.html expects.
+          for f in *-${TAG}-bundle.sql; do
+            mv "$f" "${f/-${TAG}/}"
+          done
+          ls -la *.sql || true
+          echo "$TAG" > .release-tag
+
+      - name: Stamp install page with release version
+        run: |
+          TAG=$(cat .release-tag)
+          sed -i "s|RELEASE_VERSION|${TAG}|g" install.html
+
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
