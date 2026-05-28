@@ -25,9 +25,8 @@ Complete reference for [pg_flight_recorder](README.md). For installation and get
 | Function | Returns | Description |
 |----------|---------|-------------|
 | `pgfr_record.snapshot()` | `timestamptz` | Durable snapshot: WAL, checkpoints, I/O, tables, indexes, statements, replication, config |
-| `pgfr_record.sample()` | `timestamptz` | Sampled activity: wait events, active sessions, locks into ring buffers |
-| `pgfr_record.flush_ring_to_aggregates()` | `void` | Flush ring buffer data to durable aggregate tables (every 5 min) |
-| `pgfr_record.archive_ring_samples()` | `void` | Archive raw ring buffer samples to durable archive tables (every 15 min) |
+| `pgfr_record.sample_ring()` | `timestamptz` | Sampled activity: wait events, active sessions, locks into the v2 ring (TRUNCATE-rotated partitions) |
+| `pgfr_record.rotate_ring()` | `void` | Advance the v2 ring buffer by one slot (TRUNCATE the slot two steps ahead) |
 | `pgfr_record.cleanup()` | `record` | Remove expired data based on retention settings |
 | `pgfr_record.cleanup_aggregates()` | `void` | Remove old aggregate and archive data |
 
@@ -46,10 +45,14 @@ Complete reference for [pg_flight_recorder](README.md). For installation and get
 
 | Function | Returns | Description |
 |----------|---------|-------------|
-| `pgfr_record.ring_buffer_health()` | `record` | Ring buffer fill status and diagnostics |
-| `pgfr_record.rebuild_ring_buffers(slots int)` | `text` | Resize ring buffers (72-2880 slots). **Clears ring data**; archives and aggregates preserved |
-| `pgfr_record.configure_ring_autovacuum(enabled bool)` | `text` | Toggle autovacuum on ring buffer tables |
 | `pgfr_record.validate_ring_configuration()` | `record` | Validate ring buffer retention, batching, CPU, and memory |
+
+The v2 ring uses TRUNCATE-rotation on LIST-partitioned tables; partition
+maintenance is handled by the `pgfr_truncate_partitions`,
+`pgfr_drop_ancient_partitions`, and `pgfr_precreate_partitions` cron jobs.
+The legacy `ring_buffer_health()`, `rebuild_ring_buffers()`, and
+`configure_ring_autovacuum()` functions were retired with the legacy
+120-slot ring (they targeted pre-allocated slot rows that no longer exist).
 
 ### Export
 
@@ -70,9 +73,9 @@ Complete reference for [pg_flight_recorder](README.md). For installation and get
 | `pgfr_analyze.wait_summary(start timestamptz, end timestamptz)` | `record` | Wait event breakdown over a time range |
 | `pgfr_analyze.statement_compare(start timestamptz, end timestamptz, min_delta_ms float8, limit int)` | `record` | Query performance changes between two points |
 | `pgfr_analyze.activity_at(ts timestamptz)` | `record` | Activity snapshot closest to a timestamp |
-| `pgfr_analyze.recent_waits_current()` | `record` | Current wait event data from ring buffer |
-| `pgfr_analyze.recent_activity_current()` | `record` | Current activity data from ring buffer |
-| `pgfr_analyze.recent_locks_current()` | `record` | Current lock data from ring buffer |
+| `pgfr_analyze.recent_waits_current()` | `record` | Current wait event data from the v2 ring (decoded via wait_event_map) |
+| `pgfr_analyze.recent_activity_current()` | `record` | Current activity data from the v2 ring |
+| `pgfr_analyze.recent_locks_current()` | `record` | Current lock data from the v2 ring (decoded via lock_type_map) |
 
 ### Reporting
 
@@ -159,35 +162,28 @@ Complete reference for [pg_flight_recorder](README.md). For installation and get
 
 ## Tables
 
-### Ring buffers (UNLOGGED, auto-overwrite)
+### Ring buffer (LIST-partitioned by slot, TRUNCATE-rotated)
 
-**`pgfr_record.samples_ring`** -- Slot tracker (configurable slots, default 120, range 72-2880)
+**`pgfr_record.ring_config`** -- Singleton config row for the v2 ring (num_slots, rotation_period).
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `slot_id` | int | Ring buffer slot index |
-| `captured_at` | timestamptz | When this slot was last written |
-| `epoch_seconds` | bigint | Epoch timestamp for fast comparisons |
-
-**`pgfr_record.wait_samples_ring`** -- Wait event samples (slots x 100 rows)
+**`pgfr_record.wait_samples`** -- Encoded wait event samples (one row per active wait group per tick)
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `slot_id` | int | Ring buffer slot index |
-| `row_num` | int | Row within slot (1-100) |
-| `backend_type` | text | Backend type (client backend, autovacuum worker, etc.) |
-| `wait_event_type` | text | Wait event category (IO, Lock, LWLock, etc.) |
-| `wait_event` | text | Specific wait event |
-| `state` | text | Backend state (active, idle, etc.) |
-| `count` | int | Number of backends in this state |
+| `sample_ts` | int4 | Seconds since `pgfr_record.epoch()` |
+| `datid` | oid | Database OID |
+| `active_count` | smallint | Total active backends in this sample |
+| `data` | integer[] | Encoded `[-wait_id, count, qid, qid, …, -next_wait_id, count, …]` |
+| `slot` | smallint | Ring slot (LIST partition key) |
 
-**`pgfr_record.activity_samples_ring`** -- Active session samples (slots x 25 rows)
+Decode `data` via `pgfr_record.wait_event_map` to get `(state, type, event)` per wait_id.
+
+**`pgfr_record.activity_samples`** -- Active session samples (one row per backend per tick)
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `slot_id` | int | Ring buffer slot index |
-| `row_num` | int | Row within slot (1-25) |
-| `pid` | int | Backend process ID |
+| `sample_ts` | int4 | Seconds since `pgfr_record.epoch()` |
+| `pid` | int4 | Backend process ID |
 | `usename` | text | User name |
 | `application_name` | text | Application name |
 | `client_addr` | inet | Client IP address |
@@ -200,32 +196,33 @@ Complete reference for [pg_flight_recorder](README.md). For installation and get
 | `query_start` | timestamptz | When current query started |
 | `state_change` | timestamptz | When state last changed |
 | `query_preview` | text | Truncated query text |
+| `slot` | smallint | Ring slot (LIST partition key) |
 
-**`pgfr_record.lock_samples_ring`** -- Lock contention samples (slots x 100 rows)
+**`pgfr_record.lock_samples`** -- Lock contention samples (one row per blocked/blocking pair per tick)
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `slot_id` | int | Ring buffer slot index |
-| `row_num` | int | Row within slot (1-100) |
-| `blocked_pid` | int | PID of blocked backend |
-| `blocked_user` | text | User of blocked backend |
-| `blocked_app` | text | Application name of blocked backend |
-| `blocked_query_preview` | text | Truncated query of blocked backend |
-| `blocked_duration` | interval | How long the backend has been blocked |
-| `blocking_pid` | int | PID of blocking backend |
-| `blocking_user` | text | User of blocking backend |
-| `blocking_app` | text | Application name of blocking backend |
-| `blocking_query_preview` | text | Truncated query of blocking backend |
-| `lock_type` | text | Lock type (relation, transactionid, etc.) |
+| `sample_ts` | int4 | Seconds since `pgfr_record.epoch()` |
+| `blocked_pid` | int4 | PID of blocked backend |
+| `blocked_qid` | int4 | Query map id for blocked backend's query |
+| `blocked_duration_s` | int4 | Seconds the backend has been blocked |
+| `blocking_pid` | int4 | PID of blocking backend |
+| `blocking_qid` | int4 | Query map id for blocking backend's query |
+| `lock_type` | smallint | Lock type code (decode via `lock_type_map`) |
 | `locked_relation_oid` | oid | OID of locked relation |
+| `slot` | smallint | Ring slot (LIST partition key) |
+
+The v2 ring drops the legacy per-row `usename`/`app_name`/`query_preview` for
+lock samples — only `pid` and lookup ids are stored. Use `pgfr_analyze.recent_locks_current()`
+for a column-compatible reader (lost columns return NULL).
 
 ### Archives (durable, 7-day default retention)
 
 Archives preserve raw ring buffer samples at full resolution for forensic analysis. Archived every 15 minutes by default.
 
-- **`pgfr_record.wait_samples_archive`** -- Same columns as `wait_samples_ring` plus `id` (bigserial), `sample_id`, `captured_at`
-- **`pgfr_record.activity_samples_archive`** -- Same columns as `activity_samples_ring` plus `id` (bigserial), `sample_id`, `captured_at`
-- **`pgfr_record.lock_samples_archive`** -- Same columns as `lock_samples_ring` plus `id` (bigserial), `sample_id`, `captured_at`
+- **`pgfr_record.wait_samples_archive`** -- Durable wait sample archive
+- **`pgfr_record.activity_samples_archive`** -- Durable activity sample archive
+- **`pgfr_record.lock_samples_archive`** -- Durable lock sample archive
 
 ### Aggregates (durable, 7-day default retention)
 
