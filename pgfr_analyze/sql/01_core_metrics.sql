@@ -208,25 +208,13 @@ BEGIN
         recommendation := 'Increase work_mem for affected sessions or globally';
         RETURN NEXT;
     END IF;
-    -- query both legacy ring and v2 ring tables; dedup by taking max across both
-    SELECT count(DISTINCT blocked_pid), max(blocked_duration)
-    INTO v_lock_count, v_max_block_duration
-    FROM (
-        -- legacy ring (pre-Phase 3)
-        SELECT l.blocked_pid,
-               l.blocked_duration
-        FROM pgfr_record.lock_samples_ring l
-        JOIN pgfr_record.samples_ring s ON s.slot_id = l.slot_id
-        WHERE s.captured_at BETWEEN p_start_time AND p_end_time
-          AND l.blocked_pid IS NOT NULL
-        UNION ALL
-        -- v2 ring
-        SELECT ls.blocked_pid,
-               ls.blocked_duration_s * interval '1 second' as blocked_duration
-        FROM pgfr_record.lock_samples ls
-        WHERE pgfr_record.epoch() + ls.sample_ts * interval '1 second'
-              BETWEEN p_start_time AND p_end_time
-    ) combined;
+    -- Lock contention from v2 ring (legacy fallback retired).
+    SELECT count(DISTINCT ls.blocked_pid),
+           max(ls.blocked_duration_s * interval '1 second')
+      INTO v_lock_count, v_max_block_duration
+      FROM pgfr_record.lock_samples ls
+     WHERE pgfr_record.epoch() + ls.sample_ts * interval '1 second'
+           BETWEEN p_start_time AND p_end_time;
     IF v_lock_count > 0 THEN
         anomaly_type := 'LOCK_CONTENTION';
         severity := CASE
@@ -723,15 +711,11 @@ DECLARE
     v_lock_summary RECORD;
 BEGIN
     SELECT * INTO v_cmp FROM pgfr_analyze.compare(p_start_time, p_end_time);
+    -- Sample count from v2 activity_samples (legacy ring retired).
     SELECT count(*) INTO v_sample_count
-    FROM (
-        SELECT 1 FROM pgfr_record.samples_ring
-        WHERE captured_at BETWEEN p_start_time AND p_end_time
-        UNION ALL
-        SELECT 1 FROM pgfr_record.activity_samples
-        WHERE pgfr_record.epoch() + sample_ts * interval '1 second'
-              BETWEEN p_start_time AND p_end_time
-    ) combined;
+      FROM pgfr_record.activity_samples
+     WHERE pgfr_record.epoch() + sample_ts * interval '1 second'
+           BETWEEN p_start_time AND p_end_time;
     SELECT count(*) INTO v_anomaly_count
     FROM pgfr_analyze.anomaly_report(p_start_time, p_end_time);
     section := 'OVERVIEW';
@@ -815,14 +799,9 @@ BEGIN
         max(blocked_duration) AS max_duration
     INTO v_lock_summary
     FROM (
-        SELECT l.blocked_pid, l.blocked_duration
-        FROM pgfr_record.lock_samples_ring l
-        JOIN pgfr_record.samples_ring s ON s.slot_id = l.slot_id
-        WHERE s.captured_at BETWEEN p_start_time AND p_end_time
-          AND l.blocked_pid IS NOT NULL
-        UNION ALL
+        -- Lock contention from v2 ring (legacy retired).
         SELECT ls.blocked_pid,
-               ls.blocked_duration_s * interval '1 second'
+               ls.blocked_duration_s * interval '1 second' AS blocked_duration
         FROM pgfr_record.lock_samples ls
         WHERE pgfr_record.epoch() + ls.sample_ts * interval '1 second'
               BETWEEN p_start_time AND p_end_time

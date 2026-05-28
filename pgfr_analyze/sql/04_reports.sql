@@ -227,7 +227,7 @@ BEGIN
     DECLARE
         v_last_sample TIMESTAMPTZ;
     BEGIN
-        SELECT max(captured_at) INTO v_last_sample FROM pgfr_record.samples_ring;
+        SELECT pgfr_record.epoch() + max(sample_ts) * interval '1 second' INTO v_last_sample FROM pgfr_record.wait_samples;
         IF v_last_sample IS NULL OR v_last_sample < now() - interval '15 minutes' THEN
             RETURN QUERY SELECT
                 'STALE_DATA'::text,
@@ -885,7 +885,7 @@ BEGIN
             'Collections are slower than expected. Consider: (1) switching to light mode, (2) increasing sample_interval_seconds to 300, or (3) checking for system bottlenecks.'::text;
     END IF;
     SELECT schema_size_mb INTO v_schema_size_mb FROM pgfr_record._check_schema_size();
-    SELECT count(*) INTO v_sample_count FROM pgfr_record.samples_ring;
+    SELECT count(*) INTO v_sample_count FROM pgfr_record.wait_samples;
     IF v_schema_size_mb < 3000 THEN
         RETURN QUERY SELECT
             '2. Storage Consumption'::text,
@@ -953,7 +953,7 @@ BEGIN
             format('%s trips in 90 days', v_circuit_breaker_trips),
             'Frequent circuit breaker trips indicate system stress. Consider switching to light mode permanently.'::text;
     END IF;
-    SELECT max(captured_at) INTO v_last_sample FROM pgfr_record.samples_ring;
+    SELECT pgfr_record.epoch() + max(sample_ts) * interval '1 second' INTO v_last_sample FROM pgfr_record.wait_samples;
     SELECT max(captured_at) INTO v_last_snapshot FROM pgfr_record.snapshots;
     IF v_last_sample > now() - interval '10 minutes' AND v_last_snapshot > now() - interval '15 minutes' THEN
         RETURN QUERY SELECT
