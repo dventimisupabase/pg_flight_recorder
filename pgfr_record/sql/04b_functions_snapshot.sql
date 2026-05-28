@@ -1044,83 +1044,9 @@ LANGUAGE sql STABLE AS $$
     ))::text || ' seconds')::interval;
 $$;
 
-CREATE OR REPLACE VIEW pgfr_record.recent_waits AS
-SELECT
-    sr.captured_at,
-    w.backend_type,
-    w.wait_event_type,
-    w.wait_event,
-    w.state,
-    w.count
-FROM pgfr_record.samples_ring sr
-JOIN pgfr_record.wait_samples_ring w ON w.slot_id = sr.slot_id
-WHERE sr.captured_at > now() - pgfr_record._get_ring_retention_interval()
-  AND w.backend_type IS NOT NULL
-ORDER BY sr.captured_at DESC, w.count DESC;
-CREATE OR REPLACE VIEW pgfr_record.recent_activity AS
-SELECT
-    sr.captured_at,
-    a.pid,
-    a.usename,
-    a.application_name,
-    a.client_addr,
-    a.backend_type,
-    a.state,
-    a.wait_event_type,
-    a.wait_event,
-    a.backend_start,
-    a.xact_start,
-    a.query_start,
-    sr.captured_at - a.backend_start AS session_age,
-    sr.captured_at - a.xact_start AS xact_age,
-    sr.captured_at - a.query_start AS running_for,
-    a.query_preview
-FROM pgfr_record.samples_ring sr
-JOIN pgfr_record.activity_samples_ring a ON a.slot_id = sr.slot_id
-WHERE sr.captured_at > now() - pgfr_record._get_ring_retention_interval()
-  AND a.pid IS NOT NULL
-ORDER BY sr.captured_at DESC, a.query_start ASC;
-CREATE OR REPLACE VIEW pgfr_record.recent_locks AS
-SELECT
-    sr.captured_at,
-    l.blocked_pid,
-    l.blocked_user,
-    l.blocked_app,
-    l.blocked_duration,
-    l.blocking_pid,
-    l.blocking_user,
-    l.blocking_app,
-    l.lock_type,
-    COALESCE(l.locked_relation_oid::regclass::text, 'OID:' || l.locked_relation_oid::text) AS locked_relation,
-    l.blocked_query_preview,
-    l.blocking_query_preview
-FROM pgfr_record.samples_ring sr
-JOIN pgfr_record.lock_samples_ring l ON l.slot_id = sr.slot_id
-WHERE sr.captured_at > now() - pgfr_record._get_ring_retention_interval()
-  AND l.blocked_pid IS NOT NULL
-ORDER BY sr.captured_at DESC, l.blocked_duration DESC;
-
--- Shows sessions currently idle in transaction, ordered by how long they have been idle
--- Used for quick visibility into problem sessions that may be blocking vacuum or holding locks
-CREATE OR REPLACE VIEW pgfr_record.recent_idle_in_transaction AS
-SELECT
-    sr.captured_at,
-    a.pid,
-    a.usename,
-    a.application_name,
-    a.client_addr,
-    a.xact_start,
-    sr.captured_at - a.xact_start AS idle_duration,
-    a.query_preview
-FROM pgfr_record.samples_ring sr
-JOIN pgfr_record.activity_samples_ring a ON a.slot_id = sr.slot_id
-WHERE sr.captured_at > now() - pgfr_record._get_ring_retention_interval()
-  AND a.pid IS NOT NULL
-  AND a.state = 'idle in transaction'
-ORDER BY a.xact_start ASC NULLS LAST;
-
-COMMENT ON VIEW pgfr_record.recent_idle_in_transaction IS
-'Sessions currently idle in transaction, ordered by how long they have been idle';
+-- recent_waits / recent_activity / recent_locks / recent_idle_in_transaction
+-- are now defined at the end of 08_ring_buffer_v2.sql alongside the v2
+-- tables they read from.
 
 CREATE OR REPLACE VIEW pgfr_record.recent_replication AS
 SELECT

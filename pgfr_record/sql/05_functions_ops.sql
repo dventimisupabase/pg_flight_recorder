@@ -373,12 +373,10 @@ BEGIN
             v_cron_expression := format('*/%s * * * *', v_sample_interval_minutes);
             v_sample_schedule := format('approximately every %s seconds', v_sample_interval_seconds);
         END IF;
-        PERFORM cron.schedule('pgfr_sample', v_cron_expression, 'SET statement_timeout = ''5s''; SELECT pgfr_record.sample()');
-        v_scheduled := v_scheduled + 1;
-        PERFORM cron.schedule('pgfr_flush', '*/5 * * * *', 'SET statement_timeout = ''10s''; SELECT pgfr_record.flush_ring_to_aggregates()');
-        v_scheduled := v_scheduled + 1;
-        PERFORM cron.schedule('pgfr_archive', '*/15 * * * *', 'SET statement_timeout = ''10s''; SELECT pgfr_record.archive_ring_samples()');
-        v_scheduled := v_scheduled + 1;
+        -- Legacy ring writers (pgfr_sample, pgfr_flush, pgfr_archive) retired.
+        -- The unschedule block at the top of enable() still removes them if
+        -- they exist from an older install. The v2 path (pgfr_sample_ring,
+        -- pgfr_rotate_ring, scheduled below) is the canonical sampler now.
         PERFORM cron.schedule('pgfr_cleanup', '0 3 * * *',
             'SET statement_timeout = ''60s''; SELECT pgfr_record.cleanup_aggregates(); SELECT * FROM pgfr_record.cleanup(''30 days''::interval);');
         v_scheduled := v_scheduled + 1;

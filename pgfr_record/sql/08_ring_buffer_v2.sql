@@ -1142,3 +1142,139 @@ comment on function pgfr_record.archive_ring_samples() is
 -- End of ring buffer v2 section
 --------------------------------------------------------------------------------
 
+
+-- recent_waits / recent_activity / recent_locks / recent_idle_in_transaction
+-- views migrated to v2 storage as part of the legacy-ring retirement.
+-- Column shape preserved where v2 stores the data; NULL where v2 dropped
+-- columns by design (see comments on each).
+
+DROP VIEW IF EXISTS pgfr_record.recent_waits;
+CREATE VIEW pgfr_record.recent_waits AS
+WITH retention_cutoff AS (
+    SELECT pgfr_record.epoch()
+         + (
+             extract(epoch FROM now() - pgfr_record.epoch())::int4
+             - (num_slots * extract(epoch FROM rotation_period)::int4)
+           ) * interval '1 second' AS cutoff
+    FROM pgfr_record.ring_config WHERE singleton
+),
+decoded AS (
+    SELECT
+        pgfr_record.epoch() + ws.sample_ts * interval '1 second' AS captured_at,
+        abs(ws.data[i])::smallint                                AS wait_id,
+        ws.data[i + 1]::integer                                  AS waiter_count
+    FROM pgfr_record.wait_samples ws,
+         retention_cutoff rc,
+         generate_subscripts(ws.data, 1) AS i
+    WHERE ws.data[i] < 0
+      AND (pgfr_record.epoch() + ws.sample_ts * interval '1 second') > rc.cutoff
+)
+-- backend_type is not stored in v2 wait_samples (the v2 row carries datid +
+-- encoded wait groups; per-backend type is no longer kept). Surfaced as NULL.
+SELECT
+    d.captured_at,
+    NULL::text       AS backend_type,
+    wem.type         AS wait_event_type,
+    wem.event        AS wait_event,
+    wem.state        AS state,
+    d.waiter_count   AS count
+FROM decoded d
+JOIN pgfr_record.wait_event_map wem ON wem.id = d.wait_id
+ORDER BY d.captured_at DESC, d.waiter_count DESC;
+
+DROP VIEW IF EXISTS pgfr_record.recent_activity;
+CREATE VIEW pgfr_record.recent_activity AS
+WITH retention_cutoff AS (
+    SELECT pgfr_record.epoch()
+         + (
+             extract(epoch FROM now() - pgfr_record.epoch())::int4
+             - (num_slots * extract(epoch FROM rotation_period)::int4)
+           ) * interval '1 second' AS cutoff
+    FROM pgfr_record.ring_config WHERE singleton
+)
+-- client_addr, backend_start are not stored in v2 activity_samples (v2 drops
+-- them as per-backend fields not material to ring-buffer analysis). NULL.
+SELECT
+    pgfr_record.epoch() + as2.sample_ts * interval '1 second' AS captured_at,
+    as2.pid,
+    as2.usename,
+    as2.application_name,
+    NULL::inet                                                AS client_addr,
+    as2.backend_type,
+    as2.state,
+    as2.wait_event_type,
+    as2.wait_event,
+    NULL::timestamptz                                         AS backend_start,
+    as2.xact_start,
+    as2.query_start,
+    NULL::interval                                            AS session_age,
+    (pgfr_record.epoch() + as2.sample_ts * interval '1 second') - as2.xact_start AS xact_age,
+    (pgfr_record.epoch() + as2.sample_ts * interval '1 second') - as2.query_start AS running_for,
+    as2.query_preview
+FROM pgfr_record.activity_samples as2,
+     retention_cutoff rc
+WHERE (pgfr_record.epoch() + as2.sample_ts * interval '1 second') > rc.cutoff
+  AND as2.pid IS NOT NULL
+ORDER BY as2.sample_ts DESC, as2.query_start ASC;
+
+DROP VIEW IF EXISTS pgfr_record.recent_locks;
+CREATE VIEW pgfr_record.recent_locks AS
+WITH retention_cutoff AS (
+    SELECT pgfr_record.epoch()
+         + (
+             extract(epoch FROM now() - pgfr_record.epoch())::int4
+             - (num_slots * extract(epoch FROM rotation_period)::int4)
+           ) * interval '1 second' AS cutoff
+    FROM pgfr_record.ring_config WHERE singleton
+)
+-- v2 lock_samples stores pids and a coded lock_type only. blocked_user,
+-- blocked_app, blocking_user, blocking_app, and the two query previews are
+-- not retained in v2 — surfaced as NULL.
+SELECT
+    pgfr_record.epoch() + ls.sample_ts * interval '1 second'   AS captured_at,
+    ls.blocked_pid,
+    NULL::text                                                  AS blocked_user,
+    NULL::text                                                  AS blocked_app,
+    ls.blocked_duration_s * interval '1 second'                AS blocked_duration,
+    ls.blocking_pid,
+    NULL::text                                                  AS blocking_user,
+    NULL::text                                                  AS blocking_app,
+    coalesce(ltm.lock_type, ls.lock_type::text)                AS lock_type,
+    coalesce(
+        (ls.locked_relation_oid::regclass)::text,
+        'OID:' || ls.locked_relation_oid::text
+    )                                                           AS locked_relation,
+    NULL::text                                                  AS blocked_query_preview,
+    NULL::text                                                  AS blocking_query_preview
+FROM pgfr_record.lock_samples ls
+CROSS JOIN retention_cutoff rc
+LEFT JOIN pgfr_record.lock_type_map ltm ON ltm.id = ls.lock_type
+WHERE (pgfr_record.epoch() + ls.sample_ts * interval '1 second') > rc.cutoff
+ORDER BY ls.sample_ts DESC, ls.blocked_duration_s DESC NULLS LAST;
+
+DROP VIEW IF EXISTS pgfr_record.recent_idle_in_transaction;
+CREATE VIEW pgfr_record.recent_idle_in_transaction AS
+WITH retention_cutoff AS (
+    SELECT pgfr_record.epoch()
+         + (
+             extract(epoch FROM now() - pgfr_record.epoch())::int4
+             - (num_slots * extract(epoch FROM rotation_period)::int4)
+           ) * interval '1 second' AS cutoff
+    FROM pgfr_record.ring_config WHERE singleton
+)
+SELECT
+    pgfr_record.epoch() + as2.sample_ts * interval '1 second' AS captured_at,
+    as2.pid,
+    as2.usename,
+    as2.application_name,
+    NULL::inet                                                AS client_addr,
+    as2.xact_start,
+    (pgfr_record.epoch() + as2.sample_ts * interval '1 second') - as2.xact_start AS idle_duration,
+    as2.query_preview
+FROM pgfr_record.activity_samples as2,
+     retention_cutoff rc
+WHERE (pgfr_record.epoch() + as2.sample_ts * interval '1 second') > rc.cutoff
+  AND as2.pid IS NOT NULL
+  AND as2.state = 'idle in transaction'
+ORDER BY as2.xact_start ASC NULLS LAST;
+

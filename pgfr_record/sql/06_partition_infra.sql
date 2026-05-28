@@ -492,13 +492,15 @@ comment on view pgfr_record.partition_gc_health is
 -- =============================================================================
 
 SELECT pgfr_record.snapshot();
-SELECT pgfr_record.sample();
+-- Legacy pgfr_record.sample() removed during ring retirement; the v2 ring
+-- sampler (pgfr_record.sample_ring()) is fired by the pgfr_sample_ring
+-- cron job and doesn't need a one-shot kick at install time.
 DO $$
 DECLARE
     v_sample_schedule TEXT;
 BEGIN
     SELECT schedule INTO v_sample_schedule
-    FROM cron.job WHERE jobname = 'pgfr_sample';
+    FROM cron.job WHERE jobname = 'pgfr_sample_ring';
     RAISE NOTICE '';
     RAISE NOTICE 'Flight Recorder installed successfully.';
     RAISE NOTICE '';
