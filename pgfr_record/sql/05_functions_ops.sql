@@ -426,7 +426,16 @@ BEGIN
             'END $x$');
         v_scheduled := v_scheduled + 1;
         -- Ensure pg_cron uses the unix socket for all pgfr jobs (not TCP).
-        UPDATE cron.job SET nodename = '' WHERE jobname LIKE 'pgfr%' AND nodename <> '';
+        -- Managed Postgres (e.g. Supabase) typically does not grant UPDATE
+        -- on cron.job to the SQL-editor role. In that environment the unix
+        -- socket vs TCP distinction is also irrelevant, so swallowing the
+        -- permission error is safe -- jobs are already scheduled via
+        -- cron.schedule() above.
+        BEGIN
+            UPDATE cron.job SET nodename = '' WHERE jobname LIKE 'pgfr%' AND nodename <> '';
+        EXCEPTION WHEN insufficient_privilege THEN
+            RAISE NOTICE 'pgfr_record.enable(): skipped cron.job.nodename normalization (insufficient_privilege). Jobs were still scheduled.';
+        END;
         INSERT INTO pgfr_record.config (key, value, updated_at)
         VALUES ('enabled', 'true', now())
         ON CONFLICT (key) DO UPDATE SET value = 'true', updated_at = now();
