@@ -1335,9 +1335,14 @@ BEGIN
     v_old_interval := pgfr_record._get_config('sample_interval_seconds', '60');
     v_old_archive := pgfr_record._get_config('archive_sample_frequency_minutes', '15');
 
-    -- Check if rebuild will be needed
-    SELECT COUNT(*) INTO v_current_slots FROM pgfr_record.samples_ring;
-    IF v_current_slots != v_profile.slots THEN
+    -- Check if rebuild will be needed. v2 ring slot count lives in
+    -- pgfr_record.ring_config.num_slots (set at install from
+    -- ring_buffer_partitions config), not in a pre-allocated row count
+    -- as the retired legacy ring did.
+    SELECT num_slots INTO v_current_slots
+      FROM pgfr_record.ring_config
+     WHERE singleton;
+    IF v_current_slots IS DISTINCT FROM v_profile.slots THEN
         v_rebuild_needed := true;
     END IF;
 

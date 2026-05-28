@@ -6,7 +6,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(18);
+SELECT plan(19);
 
 -- =============================================================================
 -- 1. CONFIGURATION PARAMETER TESTS (5 tests)
@@ -153,6 +153,14 @@ SELECT throws_ok(
     $$SELECT * FROM pgfr_record.apply_optimization_profile('invalid_profile')$$,
     'Unknown optimization profile: invalid_profile. Available: standard, fine_grained, ultra_fine, low_overhead, high_retention, forensic',
     'apply_optimization_profile() should reject invalid profile'
+);
+
+-- Regression: apply_optimization_profile('standard') used to query the retired
+-- legacy samples_ring and ERROR. After the legacy-ring retirement the function
+-- reads slot count from pgfr_record.ring_config instead.
+SELECT lives_ok(
+    $$SELECT * FROM pgfr_record.apply_optimization_profile('standard')$$,
+    'apply_optimization_profile(standard) works after legacy ring retirement'
 );
 
 -- =============================================================================
