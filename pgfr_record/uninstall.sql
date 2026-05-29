@@ -34,6 +34,7 @@ BEGIN
 EXCEPTION
     WHEN undefined_table THEN NULL;
     WHEN undefined_function THEN NULL;
+    WHEN insufficient_privilege THEN NULL;
 END;
 $$;
 
