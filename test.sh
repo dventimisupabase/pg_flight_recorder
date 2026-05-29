@@ -1,19 +1,31 @@
 #!/bin/bash
 set -e
 
-# Test runner for pgfr_record
-# Usage: ./test.sh [version]
-#   version: 15, 16, 17, 18 (runs single version)
-#   no args: runs all versions in parallel (default)
+# Test runner for pgfr_record / pgfr_analyze.
+#
+# Usage:
+#   ./test.sh [VERSION] [--channel=CHANNEL]
+#
+#   VERSION:  15 | 16 | 17 | 18 | all (default: all, runs in parallel)
+#   CHANNEL:  psql | bundle | dbdev | all (default: all, runs sequentially per version)
+#
+# Channels exercise the three install paths the project ships:
+#   psql    pgfr_record/install.sql via `psql -f` (\ir metacommand path)
+#   bundle  scripts/build_install_bundle.sh output (Supabase SQL-editor flow)
+#   dbdev   scripts/build_dbdev_package.sh output (dbdev / CREATE EXTENSION flow)
+#
+# When CHANNEL=all (default), each version installs each channel in sequence
+# inside the same container, dropping schemas + unscheduling pgfr cron jobs
+# between channels.
 #
 # Examples:
-#   ./test.sh           # Test on PostgreSQL 15, 16, 17, 18 in parallel
-#   ./test.sh 16        # Test on PostgreSQL 16 only
+#   ./test.sh                              # all versions x all channels
+#   ./test.sh 17                           # PG 17 only, all channels
+#   ./test.sh 17 --channel=psql            # PG 17, psql channel only
+#   ./test.sh --channel=bundle             # all versions, bundle channel only
 
-# Compose files: base + per-extension volumes
 COMPOSE_FILES="-f docker-compose.yml -f pgfr_record/docker-compose.yml -f pgfr_analyze/docker-compose.yml"
 
-# Detect docker compose command (standalone vs plugin)
 if command -v docker-compose &> /dev/null; then
     DOCKER_COMPOSE="docker-compose $COMPOSE_FILES"
 elif docker compose version &> /dev/null; then
@@ -23,15 +35,161 @@ else
     exit 1
 fi
 
-VERSION="${1:-all}"
+VERSION="all"
+CHANNEL="all"
 
-# Build progress mode: quiet locally (clean UX), plain on CI (full stdout/stderr
-# visible so failures can be diagnosed without reruns). See issue #44.
+for arg in "$@"; do
+    case "$arg" in
+        --channel=*)
+            CHANNEL="${arg#--channel=}"
+            ;;
+        15|16|17|18|all)
+            VERSION="$arg"
+            ;;
+        *)
+            echo "Unknown argument: $arg"
+            echo "Usage: ./test.sh [15|16|17|18|all] [--channel=psql|bundle|dbdev|all]"
+            exit 1
+            ;;
+    esac
+done
+
+case "$CHANNEL" in
+    psql|bundle|dbdev|all) ;;
+    *)
+        echo "Unknown channel: $CHANNEL"
+        echo "Valid channels: psql, bundle, dbdev, all"
+        exit 1
+        ;;
+esac
+
+# Resolve the selected channel into the list of channels to run, in order.
+if [ "$CHANNEL" = "all" ]; then
+    CHANNELS=(psql bundle dbdev)
+else
+    CHANNELS=("$CHANNEL")
+fi
+
+# Build progress mode: quiet locally, plain on CI (see issue #44).
 if [ -n "${CI:-}" ]; then
     BUILD_PROGRESS="--progress=plain"
 else
     BUILD_PROGRESS="--quiet"
 fi
+
+# ----------------------------------------------------------------------------
+# Channel-specific install helpers
+#
+# Each helper installs both pgfr_record and pgfr_analyze through the channel,
+# then deactivates every pgfr_ cron job. Channel-specific transactional
+# wrapping differs:
+#   psql/dbdev   server-side install scripts have no BEGIN/COMMIT of their own,
+#                so we use psql --single-transaction.
+#   bundle       the bundle wraps itself in BEGIN; ... COMMIT; (the entry point
+#                for users pasting into a SQL editor), so we omit
+#                --single-transaction to avoid nesting.
+# ----------------------------------------------------------------------------
+
+deactivate_pgfr_cron() {
+    local profile="$1"
+    local service="$2"
+    # Deactivate every pgfr_ cron job immediately before pg_cron's scheduler
+    # has a chance to fire one. Closes the race documented in #46
+    # (pgfr-sample-ring populating query_map_all before disable() runs,
+    # making test_ring_buffer.sql's "empty initially" assertion flake).
+    # Covers legacy AND v2 jobs by prefix, bypassing disable() (which would
+    # unschedule the rows and break test_wiring.sql).
+    $DOCKER_COMPOSE --profile "$profile" exec -T "$service" \
+        psql -U postgres -d postgres \
+        -c "UPDATE cron.job SET active = false WHERE jobname LIKE 'pgfr%'" \
+        > /dev/null
+}
+
+install_psql() {
+    local profile="$1"
+    local service="$2"
+    $DOCKER_COMPOSE --profile "$profile" exec -T "$service" \
+        psql -U postgres -d postgres --single-transaction \
+        -f /pgfr_record/install.sql > /dev/null
+    deactivate_pgfr_cron "$profile" "$service"
+    $DOCKER_COMPOSE --profile "$profile" exec -T "$service" \
+        psql -U postgres -d postgres --single-transaction \
+        -f /pgfr_analyze/install.sql > /dev/null
+}
+
+install_bundle() {
+    local profile="$1"
+    local service="$2"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    ./scripts/build_install_bundle.sh pgfr_record  "$tmpdir/record.sql"  > /dev/null
+    ./scripts/build_install_bundle.sh pgfr_analyze "$tmpdir/analyze.sql" > /dev/null
+    # Bundle wraps itself in BEGIN/COMMIT — no --single-transaction.
+    $DOCKER_COMPOSE --profile "$profile" exec -T "$service" \
+        psql -U postgres -d postgres -f - < "$tmpdir/record.sql" > /dev/null
+    deactivate_pgfr_cron "$profile" "$service"
+    $DOCKER_COMPOSE --profile "$profile" exec -T "$service" \
+        psql -U postgres -d postgres -f - < "$tmpdir/analyze.sql" > /dev/null
+    rm -rf "$tmpdir"
+}
+
+install_dbdev() {
+    local profile="$1"
+    local service="$2"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    ./scripts/build_dbdev_package.sh pgfr_record  "$tmpdir/record.sql"  > /dev/null
+    ./scripts/build_dbdev_package.sh pgfr_analyze "$tmpdir/analyze.sql" > /dev/null
+    $DOCKER_COMPOSE --profile "$profile" exec -T "$service" \
+        psql -U postgres -d postgres --single-transaction \
+        -f - < "$tmpdir/record.sql" > /dev/null
+    deactivate_pgfr_cron "$profile" "$service"
+    $DOCKER_COMPOSE --profile "$profile" exec -T "$service" \
+        psql -U postgres -d postgres --single-transaction \
+        -f - < "$tmpdir/analyze.sql" > /dev/null
+    rm -rf "$tmpdir"
+}
+
+# Dispatch table: install <channel> <profile> <service>
+install_channel() {
+    case "$1" in
+        psql)   install_psql   "$2" "$3" ;;
+        bundle) install_bundle "$2" "$3" ;;
+        dbdev)  install_dbdev  "$2" "$3" ;;
+        *)
+            echo "install_channel: unknown channel '$1'"
+            exit 1
+            ;;
+    esac
+}
+
+# Reset all pgfr state between channels in a single container. Drops both
+# schemas (CASCADE removes views/functions/tables) and unschedules every
+# pgfr_ cron job so the next channel's install starts from a clean slate.
+reset_pgfr_state() {
+    local profile="$1"
+    local service="$2"
+    $DOCKER_COMPOSE --profile "$profile" exec -T "$service" \
+        psql -U postgres -d postgres -c "
+        DO \$\$
+        BEGIN
+            BEGIN
+                PERFORM cron.unschedule(jobname)
+                FROM cron.job
+                WHERE jobname LIKE 'pgfr%';
+            EXCEPTION WHEN OTHERS THEN
+                NULL;
+            END;
+        END;
+        \$\$;
+        DROP SCHEMA IF EXISTS pgfr_analyze CASCADE;
+        DROP SCHEMA IF EXISTS pgfr_record  CASCADE;
+        " > /dev/null
+}
+
+# ----------------------------------------------------------------------------
+# Single-version test runner
+# ----------------------------------------------------------------------------
 
 run_single_version() {
     local pg_version=$1
@@ -41,12 +199,11 @@ run_single_version() {
     echo ""
     echo "========================================="
     echo "Testing on PostgreSQL $pg_version"
+    echo "Channels: ${CHANNELS[*]}"
     echo "========================================="
 
-    # Clean up any existing containers
     $DOCKER_COMPOSE --profile $profile down -v 2>/dev/null || true
 
-    # Build and start
     echo "Building PostgreSQL $pg_version image with pg_cron..."
     $DOCKER_COMPOSE --profile $profile build $BUILD_PROGRESS
 
@@ -54,11 +211,10 @@ run_single_version() {
     $DOCKER_COMPOSE --profile $profile up -d
 
     echo "Waiting for PostgreSQL to be ready..."
-    # Use `psql -c 'SELECT 1'` rather than `pg_isready`: the latter returns 0
-    # for the official postgres image's temporary init-phase postmaster, but
-    # that server is torn down (socket disappears) before the real one is
-    # started, and subsequent psql calls fail with "socket does not exist".
-    # A successful SELECT is a stronger readiness signal.
+    # Use psql `SELECT 1` rather than pg_isready: pg_isready returns 0 for the
+    # postgres image's init-phase temporary postmaster, but that server is torn
+    # down before the real one starts, breaking subsequent calls. A successful
+    # SELECT is a stronger readiness signal.
     ready=0
     for _ in {1..30}; do
         if $DOCKER_COMPOSE --profile $profile exec -T $service \
@@ -76,62 +232,61 @@ run_single_version() {
         exit 1
     fi
 
-    echo "Installing pg_cron and pg_stat_statements extensions..."
-    $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_cron; CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" > /dev/null
+    echo "Installing prerequisite extensions (pg_cron, pg_stat_statements, pgtap)..."
+    $DOCKER_COMPOSE --profile $profile exec -T $service \
+        psql -U postgres -d postgres -c "
+            CREATE EXTENSION IF NOT EXISTS pg_cron;
+            CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+            CREATE EXTENSION IF NOT EXISTS pgtap;
+        " > /dev/null
 
-    echo "Installing pgfr_record..."
-    $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres --single-transaction -f /pgfr_record/install.sql > /dev/null
+    local first=1
+    for channel in "${CHANNELS[@]}"; do
+        if [ "$first" -ne 1 ]; then
+            echo ""
+            echo "--- Resetting state before next channel ---"
+            reset_pgfr_state "$profile" "$service"
+        fi
+        first=0
 
-    # Deactivate every pgfr_ cron job immediately after install, before
-    # pg_cron's scheduler has a chance to fire one. Closes the race
-    # documented in #46: pgfr-sample-ring populating query_map_all before
-    # pgfr_record.disable() runs, making test_ring_buffer.sql's "empty
-    # initially" assertion flake. Covers legacy AND v2 jobs by prefix,
-    # bypassing disable() (which only knows about legacy job names).
-    $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres -c "UPDATE cron.job SET active = false WHERE jobname LIKE 'pgfr%'" > /dev/null
+        echo ""
+        echo "--- Channel: $channel ---"
+        echo "Installing pgfr_record + pgfr_analyze via $channel..."
+        install_channel "$channel" "$profile" "$service"
 
-    echo "Installing reporting functions..."
-    $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres --single-transaction -f /pgfr_analyze/install.sql > /dev/null
+        echo "Running pgTAP suite (channel=$channel)..."
+        $DOCKER_COMPOSE --profile $profile exec -T $service sh -c \
+            'pg_prove --timer -j 1 -U postgres -d postgres /tests/record/*.sql /tests/analyze/*.sql'
 
-    echo "Installing pgTAP extension..."
-    $DOCKER_COMPOSE --profile $profile exec -T $service psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pgtap;" > /dev/null
+        echo "PostgreSQL $pg_version channel=$channel: PASS"
+    done
 
-    # Note: pg_cron jobs were deactivated right after install.sql above
-    # (UPDATE cron.job SET active=false). That suffices for test isolation
-    # AND leaves job rows visible so test_wiring.sql's "job exists" assertions
-    # still pass. We deliberately don't call pgfr_record.disable() here — it
-    # would unschedule the jobs entirely and break those assertions.
+    echo ""
+    echo "PostgreSQL $pg_version: PASS (channels: ${CHANNELS[*]})"
 
-    echo "Running tests with per-file timing..."
-    $DOCKER_COMPOSE --profile $profile exec -T $service sh -c 'pg_prove --timer -j 1 -U postgres -d postgres /tests/record/*.sql /tests/analyze/*.sql'
-
-    echo "PostgreSQL $pg_version: PASS"
-
-    # Clean up
     $DOCKER_COMPOSE --profile $profile down -v
 }
+
+# ----------------------------------------------------------------------------
+# Parallel-across-versions runner (channels still sequential within a version)
+# ----------------------------------------------------------------------------
 
 run_all_parallel() {
     echo ""
     echo "========================================="
     echo "Running parallel tests on PG 15, 16, 17, 18"
+    echo "Channels per version: ${CHANNELS[*]}"
     echo "========================================="
 
-    # Clean up any existing containers
     $DOCKER_COMPOSE --profile all down -v 2>/dev/null || true
 
-    # Build all images in parallel
     echo "Building PostgreSQL images with pg_cron..."
     $DOCKER_COMPOSE --profile all build $BUILD_PROGRESS --parallel
 
-    # Start all PostgreSQL instances
     echo "Starting all PostgreSQL instances..."
     $DOCKER_COMPOSE --profile all up -d
 
-    # Wait for all instances to be ready
     echo "Waiting for all PostgreSQL instances to be ready..."
-    # See note in run_single_version: SELECT 1 is a stronger readiness
-    # signal than pg_isready during the postgres image's init-phase restart.
     for service in postgres15 postgres16 postgres17 postgres18; do
         ready=0
         for _ in {1..30}; do
@@ -151,25 +306,15 @@ run_all_parallel() {
         fi
     done
 
-    # Setup all instances in parallel
-    echo "Setting up extensions on all instances..."
+    echo "Installing prerequisite extensions on all instances..."
     for service in postgres15 postgres16 postgres17 postgres18; do
-        (
-            $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_cron; CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" > /dev/null
-            $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres --single-transaction -f /pgfr_record/install.sql > /dev/null
-            # Deactivate pgfr_ jobs before pg_cron can fire them (see single-version note)
-            $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -c "UPDATE cron.job SET active = false WHERE jobname LIKE 'pgfr%'" > /dev/null
-            $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres --single-transaction -f /pgfr_analyze/install.sql > /dev/null
-            $DOCKER_COMPOSE --profile all exec -T $service psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pgtap;" > /dev/null
-            # No disable() call — UPDATE cron.job SET active=false above already
-            # deactivates every pgfr job and leaves rows visible for test_wiring.
-        ) &
+        $DOCKER_COMPOSE --profile all exec -T $service \
+            psql -U postgres -d postgres -c "
+                CREATE EXTENSION IF NOT EXISTS pg_cron;
+                CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+                CREATE EXTENSION IF NOT EXISTS pgtap;
+            " > /dev/null
     done
-    wait
-
-    # Run tests in parallel, capturing output
-    echo "Running tests in parallel..."
-    echo ""
 
     PIDS=()
     RESULTS_DIR=$(mktemp -d)
@@ -177,25 +322,49 @@ run_all_parallel() {
     for service in postgres15 postgres16 postgres17 postgres18; do
         version="${service#postgres}"
         (
-            echo "=========================================" > "$RESULTS_DIR/$version.log"
-            echo "PostgreSQL $version" >> "$RESULTS_DIR/$version.log"
-            echo "=========================================" >> "$RESULTS_DIR/$version.log"
-            if $DOCKER_COMPOSE --profile all exec -T $service sh -c 'pg_prove --timer -j 1 -U postgres -d postgres /tests/record/*.sql /tests/analyze/*.sql' >> "$RESULTS_DIR/$version.log" 2>&1; then
-                echo "PASS" > "$RESULTS_DIR/$version.status"
+            log="$RESULTS_DIR/$version.log"
+            status_file="$RESULTS_DIR/$version.status"
+            echo "=========================================" > "$log"
+            echo "PostgreSQL $version (channels: ${CHANNELS[*]})" >> "$log"
+            echo "=========================================" >> "$log"
+
+            local first=1
+            local overall_ok=1
+            for channel in "${CHANNELS[@]}"; do
+                if [ "$first" -ne 1 ]; then
+                    reset_pgfr_state all "$service" >> "$log" 2>&1
+                fi
+                first=0
+
+                echo "" >> "$log"
+                echo "--- Channel: $channel ---" >> "$log"
+                if ! install_channel "$channel" all "$service" >> "$log" 2>&1; then
+                    overall_ok=0
+                    break
+                fi
+
+                if ! $DOCKER_COMPOSE --profile all exec -T "$service" sh -c \
+                    'pg_prove --timer -j 1 -U postgres -d postgres /tests/record/*.sql /tests/analyze/*.sql' \
+                    >> "$log" 2>&1; then
+                    overall_ok=0
+                    break
+                fi
+            done
+
+            if [ "$overall_ok" -eq 1 ]; then
+                echo "PASS" > "$status_file"
             else
-                echo "FAIL" > "$RESULTS_DIR/$version.status"
+                echo "FAIL" > "$status_file"
             fi
         ) &
         PIDS+=($!)
     done
 
-    # Wait for all tests to complete
     FAILED=0
     for pid in "${PIDS[@]}"; do
         wait $pid || FAILED=1
     done
 
-    # Display results
     for version in 15 16 17 18; do
         cat "$RESULTS_DIR/$version.log"
         echo ""
@@ -204,14 +373,12 @@ run_all_parallel() {
             echo "PostgreSQL $version: FAIL"
             FAILED=1
         else
-            echo "PostgreSQL $version: PASS"
+            echo "PostgreSQL $version: PASS (channels: ${CHANNELS[*]})"
         fi
         echo ""
     done
 
     rm -rf "$RESULTS_DIR"
-
-    # Clean up
     $DOCKER_COMPOSE --profile all down -v
 
     if [ $FAILED -eq 1 ]; then
@@ -229,9 +396,8 @@ run_all_parallel() {
 if [ "$VERSION" = "all" ]; then
     run_all_parallel
 elif [ "$VERSION" = "15" ] || [ "$VERSION" = "16" ] || [ "$VERSION" = "17" ] || [ "$VERSION" = "18" ]; then
-    run_single_version $VERSION
+    run_single_version "$VERSION"
 else
-    echo "Usage: ./test.sh [version]"
-    echo "  version: 15, 16, 17, 18 (single version) or omit for all versions in parallel"
+    echo "Usage: ./test.sh [15|16|17|18|all] [--channel=psql|bundle|dbdev|all]"
     exit 1
 fi
