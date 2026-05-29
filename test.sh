@@ -163,28 +163,43 @@ install_channel() {
     esac
 }
 
-# Reset all pgfr state between channels in a single container. Drops both
-# schemas (CASCADE removes views/functions/tables) and unschedules every
-# pgfr_ cron job so the next channel's install starts from a clean slate.
-reset_pgfr_state() {
+# Run the actual uninstall scripts shipped in the repo, then assert the
+# database is in a genuinely clean state. Two reasons to use the real
+# scripts here rather than an inline DROP SCHEMA:
+#
+#   1. Per-channel cleanup doubles as a regression test that uninstall
+#      itself works — if pgfr_record/uninstall.sql leaves something
+#      behind, the next channel's install (or the assertion below)
+#      catches it.
+#   2. Uninstall is channel-agnostic (pure SQL, no metacommands or
+#      transformations), so the same script is the canonical way out
+#      for every install path.
+#
+# Order matters: pgfr_analyze depends on pgfr_record at install time,
+# so analyze comes off first.
+uninstall_and_verify() {
     local profile="$1"
     local service="$2"
     $DOCKER_COMPOSE --profile "$profile" exec -T "$service" \
-        psql -U postgres -d postgres -c "
-        DO \$\$
-        BEGIN
-            BEGIN
-                PERFORM cron.unschedule(jobname)
-                FROM cron.job
-                WHERE jobname LIKE 'pgfr%';
-            EXCEPTION WHEN OTHERS THEN
-                NULL;
-            END;
-        END;
-        \$\$;
-        DROP SCHEMA IF EXISTS pgfr_analyze CASCADE;
-        DROP SCHEMA IF EXISTS pgfr_record  CASCADE;
-        " > /dev/null
+        psql -U postgres -d postgres --single-transaction \
+        -f /pgfr_analyze/uninstall.sql > /dev/null
+    $DOCKER_COMPOSE --profile "$profile" exec -T "$service" \
+        psql -U postgres -d postgres --single-transaction \
+        -f /pgfr_record/uninstall.sql > /dev/null
+
+    local result
+    result=$($DOCKER_COMPOSE --profile "$profile" exec -T "$service" \
+        psql -U postgres -d postgres -tA -c "
+            SELECT
+                (SELECT count(*) FROM pg_namespace
+                  WHERE nspname IN ('pgfr_record', 'pgfr_analyze')),
+                (SELECT count(*) FROM cron.job WHERE jobname LIKE 'pgfr%')
+        ")
+    # Expected: 0|0 — both schemas gone, no pgfr_ cron jobs left scheduled.
+    if [ "$result" != "0|0" ]; then
+        echo "ERROR: uninstall left state behind (got schemas|cron='$result', expected '0|0')" >&2
+        return 1
+    fi
 }
 
 # ----------------------------------------------------------------------------
@@ -240,15 +255,7 @@ run_single_version() {
             CREATE EXTENSION IF NOT EXISTS pgtap;
         " > /dev/null
 
-    local first=1
     for channel in "${CHANNELS[@]}"; do
-        if [ "$first" -ne 1 ]; then
-            echo ""
-            echo "--- Resetting state before next channel ---"
-            reset_pgfr_state "$profile" "$service"
-        fi
-        first=0
-
         echo ""
         echo "--- Channel: $channel ---"
         echo "Installing pgfr_record + pgfr_analyze via $channel..."
@@ -257,6 +264,9 @@ run_single_version() {
         echo "Running pgTAP suite (channel=$channel)..."
         $DOCKER_COMPOSE --profile $profile exec -T $service sh -c \
             'pg_prove --timer -j 1 -U postgres -d postgres /tests/record/*.sql /tests/analyze/*.sql'
+
+        echo "Verifying clean uninstall (channel=$channel)..."
+        uninstall_and_verify "$profile" "$service"
 
         echo "PostgreSQL $pg_version channel=$channel: PASS"
     done
@@ -328,14 +338,8 @@ run_all_parallel() {
             echo "PostgreSQL $version (channels: ${CHANNELS[*]})" >> "$log"
             echo "=========================================" >> "$log"
 
-            local first=1
             local overall_ok=1
             for channel in "${CHANNELS[@]}"; do
-                if [ "$first" -ne 1 ]; then
-                    reset_pgfr_state all "$service" >> "$log" 2>&1
-                fi
-                first=0
-
                 echo "" >> "$log"
                 echo "--- Channel: $channel ---" >> "$log"
                 if ! install_channel "$channel" all "$service" >> "$log" 2>&1; then
@@ -346,6 +350,11 @@ run_all_parallel() {
                 if ! $DOCKER_COMPOSE --profile all exec -T "$service" sh -c \
                     'pg_prove --timer -j 1 -U postgres -d postgres /tests/record/*.sql /tests/analyze/*.sql' \
                     >> "$log" 2>&1; then
+                    overall_ok=0
+                    break
+                fi
+
+                if ! uninstall_and_verify all "$service" >> "$log" 2>&1; then
                     overall_ok=0
                     break
                 fi
