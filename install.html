@@ -174,6 +174,27 @@
     }
     .btn-secondary:hover { border-color: var(--brand); color: var(--brand); }
 
+    /* Destructive variant for the uninstall section. Same affordances as
+       btn-primary, but uses the destructive color so a user can't confuse
+       Copy-Install with Copy-Uninstall at a glance. */
+    .btn-destructive {
+      background: var(--destructive);
+      color: #0A0A0A;
+    }
+    .btn-destructive:hover { background: #C13F23; color: #0A0A0A; }
+    .btn-destructive[disabled] {
+      background: var(--bg-control);
+      color: var(--fg-lighter);
+      cursor: not-allowed;
+    }
+
+    /* Uninstall section gets a destructive-tinted left border so it's
+       visually distinct from the install steps above it. */
+    .step.uninstall {
+      border-left: 3px solid var(--destructive);
+    }
+    .step.uninstall .step-number { color: var(--destructive); }
+
     .btn.copied {
       background: var(--bg-surface);
       color: var(--brand);
@@ -316,6 +337,62 @@
       </details>
     </section>
 
+    <h2 style="margin-top: 64px; margin-bottom: 4px; font-size: 1.75rem; letter-spacing: -0.02em;">Uninstall</h2>
+    <p class="lede" style="color: var(--fg-light);">
+      <strong style="color: var(--destructive);">Destructive.</strong>
+      Each script drops a schema with <code>CASCADE</code> — every table, view, and function in that schema is removed, along with the data. Cron jobs (<code>pgfr_*</code>) are unscheduled first. If you only want to stop collection without removing data, run <code>SELECT pgfr_record.disable();</code> instead.
+    </p>
+
+    <section class="step uninstall" id="uninstall-analyze-step">
+      <div class="step-header">
+        <span class="step-number">01 / uninstall</span>
+      </div>
+      <h2 class="step-title">pgfr_analyze</h2>
+      <p class="step-desc">Drops the <code>pgfr_analyze</code> schema. Reverses the second install step. Safe to run first; it has no side effects on <code>pgfr_record</code>.</p>
+
+      <div class="actions">
+        <button class="btn btn-destructive" id="copy-uninstall-analyze" disabled>
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M5 11H3.5A1.5 1.5 0 012 9.5v-7A1.5 1.5 0 013.5 1h7A1.5 1.5 0 0112 2.5V5"/></svg>
+          <span class="label">Loading…</span>
+        </button>
+        <a class="btn btn-secondary" href="pgfr_analyze-uninstall.sql" download>
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2v9M4 7l4 4 4-4M3 14h10"/></svg>
+          Download
+        </a>
+        <span class="meta" id="uninstall-analyze-meta"></span>
+      </div>
+
+      <details>
+        <summary>Preview SQL</summary>
+        <pre id="uninstall-analyze-preview">Loading…</pre>
+      </details>
+    </section>
+
+    <section class="step uninstall" id="uninstall-record-step">
+      <div class="step-header">
+        <span class="step-number">02 / uninstall</span>
+      </div>
+      <h2 class="step-title">pgfr_record</h2>
+      <p class="step-desc">Unschedules every <code>pgfr_*</code> cron job, deletes their run-history rows, then drops the <code>pgfr_record</code> schema. Run this after <code>pgfr_analyze</code> if you've installed both.</p>
+
+      <div class="actions">
+        <button class="btn btn-destructive" id="copy-uninstall-record" disabled>
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M5 11H3.5A1.5 1.5 0 012 9.5v-7A1.5 1.5 0 013.5 1h7A1.5 1.5 0 0112 2.5V5"/></svg>
+          <span class="label">Loading…</span>
+        </button>
+        <a class="btn btn-secondary" href="pgfr_record-uninstall.sql" download>
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2v9M4 7l4 4 4-4M3 14h10"/></svg>
+          Download
+        </a>
+        <span class="meta" id="uninstall-record-meta"></span>
+      </div>
+
+      <details>
+        <summary>Preview SQL</summary>
+        <pre id="uninstall-record-preview">Loading…</pre>
+      </details>
+    </section>
+
     <div class="footer">
       <p><strong>Before you paste:</strong></p>
       <ul class="prereq-list">
@@ -329,8 +406,12 @@
 
   <script>
     const BUNDLES = [
+      // Install bundles (channel: bundle / Supabase SQL editor paste-and-run).
       { url: 'pgfr_record-bundle.sql',  copyBtn: 'copy-record',  preview: 'record-preview',  meta: 'record-meta'  },
       { url: 'pgfr_analyze-bundle.sql', copyBtn: 'copy-analyze', preview: 'analyze-preview', meta: 'analyze-meta' },
+      // Uninstall scripts (pure SQL, no transformation needed).
+      { url: 'pgfr_analyze-uninstall.sql', copyBtn: 'copy-uninstall-analyze', preview: 'uninstall-analyze-preview', meta: 'uninstall-analyze-meta' },
+      { url: 'pgfr_record-uninstall.sql',  copyBtn: 'copy-uninstall-record',  preview: 'uninstall-record-preview',  meta: 'uninstall-record-meta'  },
     ];
 
     function humanSize(bytes) {

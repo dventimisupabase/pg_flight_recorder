@@ -60,6 +60,14 @@ jobs:
           ls -la *.sql || true
           echo "$TAG" > .release-tag
 
+      # Uninstall scripts are pure-SQL and channel-agnostic, so they live
+      # in the source tree (not the release artifacts). Copy them to the
+      # site root with the same naming convention install.html expects.
+      - name: Copy uninstall scripts to site root
+        run: |
+          cp pgfr_record/uninstall.sql  pgfr_record-uninstall.sql
+          cp pgfr_analyze/uninstall.sql pgfr_analyze-uninstall.sql
+
       - name: Stamp install page with release version
         run: |
           TAG=$(cat .release-tag)
