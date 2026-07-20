@@ -443,3 +443,213 @@ comment on function pgfr_analyze._refresh_consumption_trends() is
 'consumption_trend_shape_guard_pct default 25) are pgfr_record.config keys '
 'read via _get_config(), never written by pgfr_analyze. Non-fatal on failure '
 '(wrapped in EXCEPTION, emits WARNING). See Issue #83.';
+
+--------------------------------------------------------------------------------
+-- Phase 4 of 4: the report renderer.
+--
+-- Vocabulary is part of the spec (Issue #83): "specific consumption" and
+-- "amplification factor" are terms of art and appear as section headers
+-- verbatim. Every classification's phrasing stays purely factual -- state the
+-- figure, the trend, the classification, stop -- rather than using any of the
+-- issue's explicitly-permitted "fitness-consistent" language for unflagged
+-- drift/step: given the strict adjective ban elsewhere in the same spec, the
+-- safer reading is no interpretive language anywhere, not just on flagged
+-- windows.
+--------------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- 5. _sparkline() — renders a numeric[] as a Unicode block-bar string.
+--    Standalone and independently testable, same reasoning as
+--    _reset_guarded_delta()/_pct_shift_exceeds(). NULLs render as an explicit
+--    gap marker rather than being silently skipped (dropping a NULL would
+--    shift every later bar left, making a gap invisible instead of honest).
+--    A constant series (zero range) renders as a flat mid-level bar rather
+--    than dividing by zero.
+-- ---------------------------------------------------------------------------
+create or replace function pgfr_analyze._sparkline(p_values numeric[])
+returns text
+language plpgsql
+immutable
+as $$
+declare
+    v_chars  constant text[] := array['▁','▂','▃','▄','▅','▆','▇','█'];
+    v_min    numeric;
+    v_max    numeric;
+    v_range  numeric;
+    v_result text := '';
+    v_val    numeric;
+    v_level  integer;
+begin
+    select min(v), max(v) into v_min, v_max from unnest(p_values) as v where v is not null;
+    if v_min is null then
+        return '';
+    end if;
+    v_range := v_max - v_min;
+
+    foreach v_val in array p_values loop
+        if v_val is null then
+            v_result := v_result || '·';
+        elsif v_range = 0 then
+            v_result := v_result || v_chars[4];
+        else
+            -- Multiply before dividing: numeric division of a repeating
+            -- decimal (e.g. 1/7) rounds, and re-multiplying that rounded
+            -- value by 7 does not reliably cancel back out (observed:
+            -- floor(1/7*7) = 0, not 1). (v-min)*7/range divides only once,
+            -- at the end, avoiding the compounded rounding error.
+            v_level  := greatest(0, least(7, floor((v_val - v_min) * 7 / v_range)::integer));
+            v_result := v_result || v_chars[v_level + 1];
+        end if;
+    end loop;
+
+    return v_result;
+end;
+$$;
+
+comment on function pgfr_analyze._sparkline(numeric[]) is
+'Renders a numeric[] as a Unicode block-bar sparkline (8 levels, relative to '
+'the array''s own min/max). NULL entries render as "·" (an explicit gap, not '
+'a silently-skipped one -- dropping it would shift later bars left). A '
+'constant array (zero range) renders as a flat mid-level bar. Used by '
+'consumption_trend_report(). See Issue #83.';
+
+-- ---------------------------------------------------------------------------
+-- 6. _render_consumption_trend_metric() — one metric's report block: heading,
+--    classification line (purely factual phrasing, no adjectives), changepoint
+--    or composition note where applicable, sparkline. Factored out so the
+--    three report sections don't each repeat the same rendering logic.
+-- ---------------------------------------------------------------------------
+create or replace function pgfr_analyze._render_consumption_trend_metric(
+    p_datname     text,
+    p_metric_name text,
+    p_window_days integer,
+    p_min_days    integer
+)
+returns text
+language plpgsql as $$
+declare
+    v_trend  record;
+    v_values numeric[];
+    v_result text;
+begin
+    select * into v_trend
+    from pgfr_analyze.consumption_trends
+    where datname = p_datname and metric_name = p_metric_name and window_days = p_window_days
+    order by as_of_date desc
+    limit 1;
+
+    v_result := '### ' || p_metric_name || E'\n\n';
+
+    if not found then
+        return v_result || 'No data collected yet.' || E'\n\n';
+    end if;
+
+    if v_trend.classification = 'insufficient_data' then
+        return v_result || 'Insufficient data: ' || p_min_days || ' days required, '
+            || v_trend.sample_count || ' collected.' || E'\n\n';
+    end if;
+
+    v_result := v_result || 'Classification: ' || v_trend.classification;
+    if v_trend.slope_pct_per_30d is not null then
+        v_result := v_result || ' (' || round(v_trend.slope_pct_per_30d, 1) || '%/30d)';
+    end if;
+    v_result := v_result || E'\n';
+
+    -- Every classification gets an explicit, purely factual sentence -- state
+    -- the figure, the trend, the classification, stop. No adjectives, even
+    -- for the cases Issue #83 would permit "fitness-consistent" language on.
+    if v_trend.classification = 'stable' then
+        v_result := v_result || 'No material change detected.' || E'\n';
+    elsif v_trend.classification = 'drift' then
+        v_result := v_result || 'Gradual change detected.' || E'\n';
+    elsif v_trend.classification = 'step' then
+        v_result := v_result || 'Level shift detected on ' || v_trend.changepoint_date || '.' || E'\n';
+    elsif v_trend.classification = 'composition' then
+        v_result := v_result || 'A change was detected, but the workload mix also shifted '
+            || 'during this window -- no attribution made.' || E'\n';
+    end if;
+
+    select array_agg(s.value order by s.rollup_date) into v_values
+    from pgfr_analyze.consumption_metric_series s
+    where s.datname = p_datname and s.metric_name = p_metric_name
+      and s.rollup_date >= v_trend.baseline_start and s.rollup_date <= v_trend.baseline_end;
+
+    v_result := v_result || '`' || pgfr_analyze._sparkline(v_values) || '`' || E'\n\n';
+
+    return v_result;
+end;
+$$;
+
+comment on function pgfr_analyze._render_consumption_trend_metric(text, text, integer, integer) is
+'Renders one metric''s report block for consumption_trend_report(): heading, '
+'factual classification line (no adjectives), changepoint/composition note '
+'where applicable, sparkline. See Issue #83.';
+
+-- ---------------------------------------------------------------------------
+-- 7. consumption_trend_report() — the user-facing entry point. Calls
+--    _refresh_consumption_trends() first (refresh-on-read, matching every
+--    other pgfr_analyze function -- this extension has never had a cron job
+--    and Theil-Sen over <=90 points is cheap enough not to need one), then
+--    renders a markdown report. 28-day window only, matching the rest of
+--    this phase; a 90-day section is a later addition once that window
+--    exists.
+-- ---------------------------------------------------------------------------
+create or replace function pgfr_analyze.consumption_trend_report(
+    p_datname text default current_database()
+)
+returns text
+language plpgsql as $$
+declare
+    v_window_days constant integer := 28;
+    v_min_days    integer;
+    v_result      text := '';
+    v_latest      record;
+begin
+    perform pgfr_analyze._refresh_consumption_trends();
+
+    v_min_days := coalesce(pgfr_record._get_config('consumption_trend_min_days', '14')::integer, 14);
+
+    v_result := v_result || '# Consumption Trend Report' || E'\n\n';
+    v_result := v_result || '**Database:** ' || p_datname || E'\n';
+    v_result := v_result || '**Generated:** ' || to_char(now(), 'YYYY-MM-DD HH24:MI:SS TZ') || E'\n\n';
+
+    select as_of_date, baseline_start, baseline_end into v_latest
+    from pgfr_analyze.consumption_trends
+    where datname = p_datname and window_days = v_window_days
+    order by as_of_date desc
+    limit 1;
+
+    if not found then
+        v_result := v_result || 'No consumption trend data collected yet for this database.' || E'\n';
+        return v_result;
+    end if;
+
+    v_result := v_result || '**Baseline:** ' || v_latest.baseline_start || ' -> '
+        || v_latest.baseline_end || ' (' || v_window_days || ' days)' || E'\n\n';
+
+    v_result := v_result || '## Specific consumption' || E'\n\n';
+    v_result := v_result || pgfr_analyze._render_consumption_trend_metric(p_datname, 'blocks_per_row_returned', v_window_days, v_min_days);
+    v_result := v_result || pgfr_analyze._render_consumption_trend_metric(p_datname, 'wal_bytes_per_row_mutated', v_window_days, v_min_days);
+    v_result := v_result || pgfr_analyze._render_consumption_trend_metric(p_datname, 'temp_bytes_per_xact', v_window_days, v_min_days);
+
+    v_result := v_result || '## Amplification factors' || E'\n\n';
+    v_result := v_result || pgfr_analyze._render_consumption_trend_metric(p_datname, 'fpi_fraction', v_window_days, v_min_days);
+    v_result := v_result || pgfr_analyze._render_consumption_trend_metric(p_datname, 'ckpt_requested_fraction', v_window_days, v_min_days);
+    v_result := v_result || pgfr_analyze._render_consumption_trend_metric(p_datname, 'rollback_fraction', v_window_days, v_min_days);
+    v_result := v_result || pgfr_analyze._render_consumption_trend_metric(p_datname, 'autovacuum_write_share', v_window_days, v_min_days);
+
+    v_result := v_result || '## Substrate' || E'\n\n';
+    v_result := v_result || pgfr_analyze._render_consumption_trend_metric(p_datname, 'cache_hit_fraction', v_window_days, v_min_days);
+
+    return v_result;
+end;
+$$;
+
+comment on function pgfr_analyze.consumption_trend_report(text) is
+'Markdown consumption trend report for p_datname (default current_database()). '
+'Refreshes consumption_trends first (refresh-on-read, no cron dependency), '
+'then renders Specific consumption / Amplification factors / Substrate '
+'sections using this schema''s Issue #83 vocabulary verbatim, a factual '
+'classification line per metric (no adjectives -- state the figure, the '
+'trend, the classification, stop), and a sparkline. 28-day window only in '
+'this phase. See Issue #83.';
