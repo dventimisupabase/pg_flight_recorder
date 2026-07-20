@@ -301,6 +301,17 @@ begin
         set current_slot = v_new_slot, rotated_at = now()
         where singleton;
 
+        -- Roll up v_truncate_slot's about-to-be-destroyed data into durable
+        -- wait/lock/activity rollup tables (see 11_ring_rollups.sql) before
+        -- truncating it. Wrapped so a rollup bug can never block rotation --
+        -- ring safety takes priority over rollup completeness.
+        begin
+            perform pgfr_record._flush_ring_slot_to_rollups(v_truncate_slot);
+        exception when others then
+            raise warning 'pgfr_record: _flush_ring_slot_to_rollups failed for slot %: %',
+                v_truncate_slot, sqlerrm;
+        end;
+
         -- lockstep TRUNCATE — zero bloat, no dead tuples, no GC needed
         execute format('truncate pgfr_record.wait_samples_%s', v_truncate_slot);
         execute format('truncate pgfr_record.lock_samples_%s', v_truncate_slot);
@@ -325,10 +336,11 @@ end;
 $$;
 
 comment on function pgfr_record.rotate_ring() is
-'Rotate ring buffer partitions: advance current_slot, TRUNCATE the oldest partition '
-'and its matching query_map. Dynamic N-partition support (reads num_slots from ring_config). '
-'Idempotent within 90% of rotation_period. Advisory lock prevents concurrent rotation. '
-'Returns text status: rotated / skipped / failed.';
+'Rotate ring buffer partitions: advance current_slot, roll up the oldest slot into '
+'durable rollup tables (_flush_ring_slot_to_rollups(), see 11_ring_rollups.sql), then '
+'TRUNCATE that partition and its matching query_map. Dynamic N-partition support '
+'(reads num_slots from ring_config). Idempotent within 90% of rotation_period. '
+'Advisory lock prevents concurrent rotation. Returns text status: rotated / skipped / failed.';
 
 -- 8. sample_ring() — INSERT-based sampler (replaces UPDATE pattern)
 -- Implements the same integer[] encoding as ash.take_sample():
