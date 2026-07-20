@@ -108,7 +108,17 @@ is treated as the ledger of record for WAL volume. `pg_stat_wal`'s own
   deployments this distinction is cosmetic but the schema carries it honestly.
 - **`track_io_timing`.** `blk_read_time_ms` / `blk_write_time_ms` are `0` (not
   NULL) for the entire history when `track_io_timing` is off -- treat a
-  persistent `0` there as "unknown", not "instant".
+  persistent `0` there as "unknown", not "instant". Recommended on for most
+  systems; check the overhead first with `pg_test_timing`.
+- **No "physical" I/O, on purpose.** `os_read_blocks_per_s` / `os_write_blocks_per_s`
+  count block read/write requests Postgres issues *to the OS* (buffer-pool
+  misses) -- not confirmed disk I/O. Postgres has no visibility past that
+  boundary: the OS page cache may satisfy an "OS read" without ever touching
+  physical storage, and Postgres can't tell which happened. True disk-level
+  I/O requires OS/platform metrics (`iostat`, cloud provider disk metrics)
+  from outside this database. `block_demand_per_s` (buffer-pool hits + misses)
+  has the same property in reverse: it's everything the executor asked the
+  buffer pool for, regardless of how each access was satisfied.
 - **No CPU.** Core Postgres exposes wall-clock, not cycles; CPU-seconds would
   have to join in from outside the database. Out of scope here.
 - **No per-statement attribution.** This is a cluster/database-level ledger;
@@ -121,7 +131,7 @@ is treated as the ledger of record for WAL volume. `pg_stat_wal`'s own
 - **`recorder_overhead_fraction`.** A footnote-grade self-accounting figure in
   `consumption_flows`: the recorder's own block footprint
   (`pg_statio_user_tables` for the `pgfr_record` schema) as a fraction of the
-  ledger's total logical blocks for that interval.
+  ledger's total block demand for that interval.
 
 ## Ring rollups
 
