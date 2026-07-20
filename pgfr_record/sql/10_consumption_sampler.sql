@@ -711,3 +711,55 @@ comment on function pgfr_record._rollup_consumption_daily() is
 'row yet, up to (excluding) the current day. Called from the daily '
 'pgfr_cleanup cron job, not a separate schedule. Non-fatal on failure '
 '(wrapped in EXCEPTION, emits WARNING). See Issue #83.';
+
+-- ---------------------------------------------------------------------------
+-- consumption_daily_flows — daily-grain sibling of consumption_flows.
+-- Reconstructs ratios from consumption_daily_rollups' summed components.
+-- Purely mechanical (no judgment, no trend/classification logic) -- the same
+-- category as consumption_flows, so it lives here in pgfr_record rather than
+-- in pgfr_analyze. Unlike consumption_flows, no self-join against a prior row
+-- is needed: consumption_daily_rollups already has one pre-summed row per day.
+--
+-- Covers Issue #83's full metric basket plus its workload-shape guard
+-- indicators; pgfr_analyze's trend engine (Issue #83, in progress) reads this
+-- view rather than consumption_daily_rollups directly.
+-- ---------------------------------------------------------------------------
+create or replace view pgfr_record.consumption_daily_flows as
+select
+    rollup_date, datname, total_seconds, valid_tick_count,
+
+    -- Specific consumption (headline). Numerators explicitly cast to numeric:
+    -- these sums are bigint, and bigint/bigint in Postgres is truncating
+    -- integer division, not the continuous division a ratio needs.
+    (blks_hit_sum + blks_read_sum)::numeric / nullif(tup_returned_sum, 0) as blocks_per_row_returned,
+    wal_bytes_sum / nullif(tup_mutated_sum, 0) as wal_bytes_per_row_mutated,
+    temp_bytes_sum::numeric / nullif(xact_commit_sum, 0) as temp_bytes_per_xact,
+
+    -- Amplification / mechanically unambiguous
+    (wal_fpi_sum * current_setting('block_size')::numeric) / nullif(wal_bytes_advisory_sum, 0) as fpi_fraction,
+    ckpt_num_requested_sum::numeric / nullif(ckpt_num_timed_sum + ckpt_num_requested_sum, 0) as ckpt_requested_fraction,
+    xact_rollback_sum::numeric / nullif(xact_commit_sum + xact_rollback_sum, 0) as rollback_fraction,
+    io_writes_autovacuum_sum::numeric / nullif(io_writes_total_sum, 0) as autovacuum_write_share,
+
+    -- Substrate (tracked, never called consumption)
+    blks_hit_sum::numeric / nullif(blks_hit_sum + blks_read_sum, 0) as cache_hit_fraction,
+
+    -- Workload-shape indicators (guards, not metrics -- see the composition-
+    -- drift confound in Issue #83)
+    tup_returned_sum::numeric / nullif(tup_mutated_sum, 0) as read_write_tuple_ratio,
+    (xact_commit_sum + xact_rollback_sum)::numeric / nullif(total_seconds, 0) as xact_per_s,
+    tup_returned_sum::numeric / nullif(xact_commit_sum + xact_rollback_sum, 0) as rows_returned_per_xact,
+    tup_mutated_sum::numeric / nullif(xact_commit_sum + xact_rollback_sum, 0) as rows_mutated_per_xact,
+    db_size_bytes,
+
+    -- Self-accounting (footnote-grade; see consumption_flows.recorder_overhead_fraction)
+    (recorder_blks_hit_sum + recorder_blks_read_sum)::numeric / nullif(blks_hit_sum + blks_read_sum, 0) as recorder_overhead_fraction
+from pgfr_record.consumption_daily_rollups;
+
+comment on view pgfr_record.consumption_daily_flows is
+'Daily-grain ratios reconstructed from consumption_daily_rollups'' summed '
+'components -- the same Σnum/Σden reconstruction consumption_flows does at '
+'per-tick grain, one tier up. Covers Issue #83''s metric basket and '
+'workload-shape guard indicators. A NULL ratio means its day''s underlying '
+'sum was itself NULL (reset-excluded) or the denominator was zero -- both '
+'nullif-guarded, never a division error. See Issue #83.';
