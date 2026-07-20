@@ -2,7 +2,7 @@
 -- Copyright 2026 David A. Ventimiglia
 
 --------------------------------------------------------------------------------
--- Consumption trend engine, 90-day window, phase B of 4 (Issue #92).
+-- Consumption trend engine, 90-day window, phases B and C of 4 (Issue #92).
 --
 -- _refresh_consumption_trends_weekly() is a genuine sibling to
 -- _refresh_consumption_trends() (see 11_consumption_trends.sql), not a
@@ -15,11 +15,15 @@
 -- risks destabilizing already-working, already-well-tested code for the sake
 -- of avoiding some duplication.
 --
--- This phase deliberately does NOT include the composition-drift guard --
--- that's phase C, mirroring how #83 shipped Theil-Sen slope + step/drift/
--- stable classification (phase 2) before composition (phase 3). Every row
--- written here has composition_change = false: not "checked and clear," but
--- "not evaluated yet at this grain."
+-- Phase C adds the composition-drift guard at this grain, the same way and
+-- reusing the same _pct_shift_exceeds() primitive as the daily engine: two
+-- FIXED halves of the window (6 weeks vs. 6 weeks, i.e. the same
+-- v_as_of_date - v_window_days/2 split point the daily engine uses, just
+-- with v_window_days=84), not a searched split -- workload shape is a
+-- property of the window, not of any one metric, so one flag applies to
+-- every metric's row for that window. Same ordering rule too: composition
+-- only overrides a *detected* movement (insufficient_data -> stable ->
+-- composition -> step/drift), never relabels an already-stable metric.
 --------------------------------------------------------------------------------
 
 -- ---------------------------------------------------------------------------
@@ -73,16 +77,18 @@ create or replace function pgfr_analyze._refresh_consumption_trends_weekly()
 returns void
 language plpgsql as $$
 declare
-    v_as_of_date     date := current_date;
-    v_window_days    constant integer := 84;
-    v_basket_version constant integer := 1;
-    v_min_weeks      integer;
-    v_min_r2         numeric;
-    v_step_r2_margin numeric;
+    v_as_of_date      date := current_date;
+    v_window_days     constant integer := 84;
+    v_basket_version  constant integer := 1;
+    v_min_weeks       integer;
+    v_min_r2          numeric;
+    v_step_r2_margin  numeric;
+    v_shape_guard_pct numeric;
 begin
-    v_min_weeks      := coalesce(pgfr_record._get_config('consumption_trend_min_weeks', '8')::integer, 8);
-    v_min_r2         := coalesce(pgfr_record._get_config('consumption_trend_min_r2', '0.3')::numeric, 0.3);
-    v_step_r2_margin := coalesce(pgfr_record._get_config('consumption_trend_step_r2_margin', '0.15')::numeric, 0.15);
+    v_min_weeks       := coalesce(pgfr_record._get_config('consumption_trend_min_weeks', '8')::integer, 8);
+    v_min_r2          := coalesce(pgfr_record._get_config('consumption_trend_min_r2', '0.3')::numeric, 0.3);
+    v_step_r2_margin  := coalesce(pgfr_record._get_config('consumption_trend_step_r2_margin', '0.15')::numeric, 0.15);
+    v_shape_guard_pct := coalesce(pgfr_record._get_config('consumption_trend_shape_guard_pct', '25')::numeric, 25);
 
     with window_points as (
         select
@@ -102,6 +108,43 @@ begin
             ('ckpt_requested_fraction'), ('rollback_fraction'),
             ('autovacuum_write_share'),  ('cache_hit_fraction')
         ) as m(metric_name)
+    ),
+    -- Workload-shape guard (see 11_consumption_trends.sql's shape_halves for
+    -- the daily-grain original): two FIXED halves of the window, not a
+    -- searched split. At 84 days that's 6 weeks vs. 6 weeks.
+    shape_halves as (
+        select
+            f.datname,
+            count(*) as sample_count,
+            avg(f.read_write_tuple_ratio) filter (where f.week_end_date <= v_as_of_date - v_window_days / 2) as rwtr_before,
+            avg(f.read_write_tuple_ratio) filter (where f.week_end_date >  v_as_of_date - v_window_days / 2) as rwtr_after,
+            avg(f.xact_per_s)             filter (where f.week_end_date <= v_as_of_date - v_window_days / 2) as xps_before,
+            avg(f.xact_per_s)             filter (where f.week_end_date >  v_as_of_date - v_window_days / 2) as xps_after,
+            avg(f.rows_returned_per_xact) filter (where f.week_end_date <= v_as_of_date - v_window_days / 2) as rrpx_before,
+            avg(f.rows_returned_per_xact) filter (where f.week_end_date >  v_as_of_date - v_window_days / 2) as rrpx_after,
+            avg(f.rows_mutated_per_xact)  filter (where f.week_end_date <= v_as_of_date - v_window_days / 2) as rmpx_before,
+            avg(f.rows_mutated_per_xact)  filter (where f.week_end_date >  v_as_of_date - v_window_days / 2) as rmpx_after,
+            avg(f.db_size_bytes)          filter (where f.week_end_date <= v_as_of_date - v_window_days / 2) as size_before,
+            avg(f.db_size_bytes)          filter (where f.week_end_date >  v_as_of_date - v_window_days / 2) as size_after
+        from pgfr_record.consumption_weekly_flows f
+        where f.week_end_date > v_as_of_date - v_window_days
+          and f.week_end_date <= v_as_of_date
+        group by f.datname
+    ),
+    composition_flag as (
+        select
+            datname,
+            (
+                sample_count >= v_min_weeks
+                and (
+                    pgfr_analyze._pct_shift_exceeds(rwtr_before, rwtr_after, v_shape_guard_pct)
+                    or pgfr_analyze._pct_shift_exceeds(xps_before, xps_after, v_shape_guard_pct)
+                    or pgfr_analyze._pct_shift_exceeds(rrpx_before, rrpx_after, v_shape_guard_pct)
+                    or pgfr_analyze._pct_shift_exceeds(rmpx_before, rmpx_after, v_shape_guard_pct)
+                    or pgfr_analyze._pct_shift_exceeds(size_before, size_after, v_shape_guard_pct)
+                )
+            ) as composition_change
+        from shape_halves
     ),
     group_stats as (
         select
@@ -169,19 +212,23 @@ begin
             coalesce(gs.sample_count, 0) as sample_count,
             gs.median_value, gs.r2_line, gs.tss,
             sc.median_slope,
-            bs.split_date, bs.r2_step
+            bs.split_date, bs.r2_step,
+            coalesce(cf.composition_change, false) as composition_change
         from all_combos ac
-        left join group_stats gs on gs.datname = ac.datname and gs.metric_name = ac.metric_name
-        left join slope_calc  sc on sc.datname = ac.datname and sc.metric_name = ac.metric_name
-        left join best_split  bs on bs.datname = ac.datname and bs.metric_name = ac.metric_name
+        left join group_stats gs      on gs.datname = ac.datname and gs.metric_name = ac.metric_name
+        left join slope_calc  sc      on sc.datname = ac.datname and sc.metric_name = ac.metric_name
+        left join best_split  bs      on bs.datname = ac.datname and bs.metric_name = ac.metric_name
+        left join composition_flag cf on cf.datname = ac.datname
     ),
     classified as (
         select
             datname, metric_name, sample_count, median_value, median_slope, split_date,
+            composition_change,
             case
                 when sample_count < v_min_weeks then 'insufficient_data'
                 when coalesce(tss, 0) = 0 then 'stable'
                 when coalesce(r2_step, 0) < v_min_r2 and coalesce(r2_line, 0) < v_min_r2 then 'stable'
+                when composition_change then 'composition'
                 when coalesce(r2_step, 0) >= coalesce(r2_line, 0) + v_step_r2_margin then 'step'
                 else 'drift'
             end as classification
@@ -202,7 +249,7 @@ begin
         end,
         classification,
         case when classification = 'step' then split_date else null end,
-        false  -- composition guard not evaluated at this grain yet (phase C)
+        composition_change
     from classified
     on conflict (as_of_date, datname, metric_name, window_days)
     do update set
@@ -224,11 +271,11 @@ comment on function pgfr_analyze._refresh_consumption_trends_weekly() is
 'Weekly-grain sibling of _refresh_consumption_trends(): recomputes and '
 'upserts today''s consumption_trends row (window_days=84) for every '
 '(datname, basket metric), on consumption_weekly_metric_series points '
-'instead of daily ones. Same Theil-Sen slope + step/drift/stable '
-'classification logic, deliberately duplicated rather than unified with the '
-'daily engine (see file header). composition_change is always false here --'
-'not evaluated at this grain yet, phase C''s job. Gated by '
-'consumption_trend_min_weeks (default 8); reuses consumption_trend_min_r2 '
-'and consumption_trend_step_r2_margin from the daily engine (grain-agnostic '
-'thresholds). Non-fatal on failure (wrapped in EXCEPTION, emits WARNING). '
-'See Issue #92.';
+'instead of daily ones. Same Theil-Sen slope + R2-based step/drift/stable '
+'classification, and the same composition-drift guard (two fixed 6-week '
+'halves instead of two fixed 14-day halves), deliberately duplicated rather '
+'than unified with the daily engine (see file header). Gated by '
+'consumption_trend_min_weeks (default 8); reuses consumption_trend_min_r2, '
+'consumption_trend_step_r2_margin, and consumption_trend_shape_guard_pct '
+'from the daily engine (grain-agnostic thresholds). Non-fatal on failure '
+'(wrapped in EXCEPTION, emits WARNING). See Issue #92.';
