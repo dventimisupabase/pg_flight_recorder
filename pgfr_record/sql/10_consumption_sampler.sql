@@ -158,6 +158,20 @@ comment on column pgfr_record.consumption_snapshots_v2.recorder_blks_hit is
 'schemaname=pgfr_record), summed. Feeds recorder_overhead_fraction in '
 'consumption_flows: the instrument itemizing its own overhead.';
 
+comment on column pgfr_record.consumption_snapshots_v2.io_reads_total is
+'Block read requests issued to the OS (pg_stat_io, object=relation, PG16+), '
+'summed across backend types. This is Postgres asking the OS for a block, not '
+'confirmed disk I/O: the OS page cache may satisfy the request without ever '
+'reaching physical storage, and Postgres has no way to tell which happened. '
+'See consumption_flows.os_read_blocks_per_s.';
+
+comment on column pgfr_record.consumption_snapshots_v2.io_writes_total is
+'Block write requests issued to the OS, summed across backend types. PG16+ from '
+'pg_stat_io; PG15 falls back to bgwriter/checkpointer buffer counters (no '
+'pg_stat_io equivalent). Same caveat as io_reads_total: an OS write request, not '
+'confirmation the block reached physical storage. See '
+'consumption_flows.os_write_blocks_per_s.';
+
 -- ---------------------------------------------------------------------------
 -- 3. Pre-create today's + tomorrow's partition (mirrors 09_phase3_snapshots_v2.sql
 --    §4 — pre-creating tomorrow's covers cron jobs running at day's end).
@@ -462,9 +476,9 @@ select
     sample_ts, captured_at, pg_version, datname, interval_seconds,
 
     -- Flows (per second)
-    case when interval_seconds > 0 then (blks_hit_delta + blks_read_delta) / interval_seconds end as logical_blocks_per_s,
-    case when interval_seconds > 0 then coalesce(io_reads_total_delta, blks_read_delta) / interval_seconds end as physical_read_blocks_per_s,
-    case when interval_seconds > 0 then io_writes_total_delta / interval_seconds end as physical_write_blocks_per_s,
+    case when interval_seconds > 0 then (blks_hit_delta + blks_read_delta) / interval_seconds end as block_demand_per_s,
+    case when interval_seconds > 0 then coalesce(io_reads_total_delta, blks_read_delta) / interval_seconds end as os_read_blocks_per_s,
+    case when interval_seconds > 0 then io_writes_total_delta / interval_seconds end as os_write_blocks_per_s,
     case when interval_seconds > 0 then wal_bytes_delta / interval_seconds end as wal_bytes_per_s,
     case when interval_seconds > 0 then tup_returned_delta / interval_seconds end as rows_returned_per_s,
     case when interval_seconds > 0 then tup_mutated_delta / interval_seconds end as rows_mutated_per_s,
@@ -494,4 +508,26 @@ comment on view pgfr_record.consumption_flows is
 'consumption_snapshots_v2 rows. wal_bytes_per_s uses the wal_lsn odometer '
 '(ledger of record, valid across a pg_stat_reset()); every other flow/ratio is '
 'built on pgfr_record._reset_guarded_delta() and is NULL for any interval where '
-'its source counters regressed or their stats were reset. See Issue #81.';
+'its source counters regressed or their stats were reset. See Issue #81. '
+'Deliberately avoids "logical"/"physical" I/O labels -- see '
+'os_read_blocks_per_s and os_write_blocks_per_s below for why.';
+
+comment on column pgfr_record.consumption_flows.block_demand_per_s is
+'Total block accesses through the buffer pool per second (blks_hit + blks_read), '
+'hit or miss. Not "logical" as opposed to some other kind -- just the total '
+'demand the executor placed on the buffer pool, independent of how each access '
+'was satisfied.';
+
+comment on column pgfr_record.consumption_flows.os_read_blocks_per_s is
+'Block read requests issued to the OS per second (buffer pool misses): from '
+'pg_stat_io (object=relation, PG16+) or pg_stat_database.blks_read as fallback. '
+'NOT confirmed disk I/O -- Postgres calls the OS for these blocks and neither '
+'knows nor cares whether the OS serves the request from its own page cache or '
+'from physical storage. Calling this "physical" I/O (as Issue #81 originally '
+'did) overstates what is actually measurable from inside Postgres.';
+
+comment on column pgfr_record.consumption_flows.os_write_blocks_per_s is
+'Block write requests issued to the OS per second (from pg_stat_io, PG16+; NULL '
+'on PG15). Same caveat as os_read_blocks_per_s: this is Postgres asking the OS '
+'to write a block, not confirmation the block reached physical storage -- the '
+'OS may hold it in page cache until its own writeback policy flushes it.';
