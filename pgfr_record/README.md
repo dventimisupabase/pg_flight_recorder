@@ -73,6 +73,7 @@ SELECT * FROM pgfr_record.deltas;
 | `pgfr_record.consumption_flows`          | Reset-guarded block/WAL/tuple flow rates and efficiency ratios |
 | `pgfr_record.consumption_deltas`         | Reset-guarded per-tick component deltas backing `consumption_flows` and the daily rollup |
 | `pgfr_record.consumption_daily_flows`    | Daily-grain ratios reconstructed from `consumption_daily_rollups` |
+| `pgfr_record.consumption_weekly_flows`   | Weekly-grain ratios (rolling 7-day buckets), one tier up |
 
 ## Consumption ledger
 
@@ -156,9 +157,18 @@ than corrupting them).
 `pgfr_record.consumption_daily_flows` is the daily-grain sibling of
 `consumption_flows`: it reconstructs ratios from `consumption_daily_rollups`'
 summed components, the same Σnum/Σden reconstruction one tier up. It's the
-input `pgfr_analyze`'s consumption trend engine reads (in progress -- see
-Issue #83); a NULL ratio here means its day's underlying sum was itself NULL
-(reset-excluded) or a denominator was zero, never a division error.
+input `pgfr_analyze`'s consumption trend engine reads (see Issue #83); a NULL
+ratio here means its day's underlying sum was itself NULL (reset-excluded) or
+a denominator was zero, never a division error.
+
+`pgfr_record.consumption_weekly_flows` is the weekly-grain sibling, one tier
+further up (Issue #92, in progress): the same components re-summed into
+rolling 7-day buckets counting backward from today (week 0 = today back to 6
+days ago, not an ISO calendar week -- the most recent ISO week is usually
+partial, and a partial week's sum next to full weeks' sums would reintroduce
+the exact naive distortion aggregating exists to avoid). No physical weekly
+table: `consumption_daily_rollups` never expires, so re-aggregating it fresh
+on every read is cheap and always current.
 
 ## Ring rollups
 
