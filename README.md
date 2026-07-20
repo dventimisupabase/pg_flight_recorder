@@ -14,12 +14,12 @@ pg_flight_recorder continuously samples PostgreSQL system state in the backgroun
 
 Flight Recorder collects two types of data:
 
-| System               | What it captures                       | Frequency | Retention                         |
-|----------------------|----------------------------------------|-----------|-----------------------------------|
-| **Sampled Activity** | Wait events, sessions, locks           | 1 min     | Ring buffer: 2h, Archives: 7d     |
-| **Snapshots**        | WAL, checkpoints, I/O, tables, indexes | 1 min     | 30 days                           |
+| System               | What it captures                       | Frequency | Retention        |
+|----------------------|-----------------------------------------|-----------|-------------------|
+| **Sampled Activity** | Wait events, sessions, locks           | 1 min     | Ring buffer: 2h   |
+| **Snapshots**        | WAL, checkpoints, I/O, tables, indexes | 1 min     | 30 days           |
 
-Sampled activity flows through ring buffers (hot, low-overhead) into durable archives and aggregates (cold, long-retention). Snapshots are written directly into retention tables -- no ring buffer in the path. Safety mechanisms -- circuit breaker, load shedding, per-section timeouts, and pg_cron job timeouts -- prevent the recorder from impacting production workloads.
+Sampled activity lives entirely in UNLOGGED ring buffers (hot, low-overhead) and rotates out via TRUNCATE on a fixed schedule -- there is no downstream archive or aggregate tier. Snapshots are written directly into daily-partitioned retention tables -- no ring buffer in the path, and retention is enforced by partition drop rather than DELETE. Safety mechanisms -- circuit breaker, load shedding, per-section timeouts, and pg_cron job timeouts -- prevent the recorder from impacting production workloads.
 
 ## Extensions
 

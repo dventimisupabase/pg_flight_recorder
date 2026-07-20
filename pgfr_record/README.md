@@ -4,15 +4,15 @@ Core flight recorder extension for PostgreSQL. Continuously samples database sta
 
 ## What it does
 
-pgfr_record installs a set of tables, views, and pg_cron jobs that continuously capture PostgreSQL system state. It uses UNLOGGED ring buffers for high-frequency sampling of wait events, active sessions, and locks, and durable snapshot tables for periodic capture of WAL activity, checkpoints, I/O, table and index stats, query stats, replication state, and configuration. Data flows from ring buffers into archives and aggregates for longer retention.
+pgfr_record installs a set of tables, views, and pg_cron jobs that continuously capture PostgreSQL system state. It uses UNLOGGED ring buffers for high-frequency sampling of wait events, active sessions, and locks, and durable snapshot tables for periodic capture of WAL activity, checkpoints, I/O, table and index stats, query stats, replication state, and configuration. Ring buffers rotate out via TRUNCATE on a fixed schedule -- there is no downstream archive or aggregate tier. Snapshot tables carry their own long-term retention via daily partition drop.
 
 ## Key features
 
 - **Continuous background sampling** via pg_cron -- no external agents or sidecars
-- **Ring buffers** (UNLOGGED) for real-time wait events, active sessions, and lock contention
+- **Ring buffers** (UNLOGGED) for real-time wait events, active sessions, and lock contention -- TRUNCATE-rotated on a fixed schedule (default 2h), no downstream archive or aggregate tier
 - **Durable snapshots** every minute: WAL, checkpoints, I/O, tables, indexes, statements, replication, configuration
 - **xmin horizon attribution**: captures who is pinning the xmin horizon (long-running txns, stale replication slots, hot-standby-feedback, prepared xacts) so wraparound forensics isn't reduced to live-querying four catalogs after the offender has disconnected
-- **Aggregates and archives** for longer retention (7 days for archives, 30 days for snapshots)
+- **Partition-based retention** for snapshot tables (default 30 days), enforced via partition drop rather than DELETE
 - **Safety mechanisms**: circuit breaker, load shedding
 - **Collection modes**: normal, light, emergency, kill
 - **Configurable profiles**: default, production_safe, development, troubleshooting, minimal_overhead
