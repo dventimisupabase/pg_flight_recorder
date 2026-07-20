@@ -1,15 +1,18 @@
 -- =============================================================================
--- pgfr_analyze pgTAP Tests — Consumption Trend Report (Issue #83, phase 4/4)
+-- pgfr_analyze pgTAP Tests — Consumption Trend Report (Issue #83 phase 4/4,
+-- Issue #92 phase D/4)
 -- =============================================================================
 -- Tests _sparkline() in isolation, then the full report renderer: section
--- headers using the issue's own vocabulary, explicit baseline declaration,
--- factual phrasing for every classification (insufficient_data, stable,
--- composition, step, drift), and -- rendered across all of the above -- an
--- absence of the issue's banned vocabulary anywhere in the output.
+-- headers using the issue's own vocabulary, explicit per-window baseline
+-- declarations (28-day/daily and 84-day/weekly, Issue #92 phase D), factual
+-- phrasing for every classification (insufficient_data, stable, composition,
+-- step, drift) and for both grains' insufficient-data unit wording ("days" vs
+-- "weeks"), and -- rendered across all of the above -- an absence of the
+-- issue's banned vocabulary anywhere in the output.
 -- =============================================================================
 
 BEGIN;
-SELECT plan(18);
+SELECT plan(22);
 
 -- -----------------------------------------------------------------------------
 -- 1. Schema (3 tests)
@@ -17,8 +20,8 @@ SELECT plan(18);
 
 SELECT has_function('pgfr_analyze', '_sparkline',
     '_sparkline() exists');
-SELECT has_function('pgfr_analyze', '_render_consumption_trend_metric',
-    '_render_consumption_trend_metric() exists');
+SELECT has_function('pgfr_analyze', '_render_consumption_trend_window',
+    '_render_consumption_trend_window() exists');
 SELECT has_function('pgfr_analyze', 'consumption_trend_report',
     'consumption_trend_report() exists');
 
@@ -59,7 +62,12 @@ SELECT matches(
 
 -- -----------------------------------------------------------------------------
 -- 4. Fixtures: three datnames covering composition/stable/insufficient_data,
---    step, and drift respectively
+--    step, and drift respectively. All three are exactly 28 days (4 complete
+--    weekly buckets) -- enough for the daily window's 14-day minimum but
+--    below the weekly window's 8-week minimum, so every metric's 84-day block
+--    renders insufficient_data regardless of what its 28-day block shows.
+--    That's deliberate: it's what exercises the weekly grain's "weeks"
+--    wording and proves the two windows are judged independently.
 -- -----------------------------------------------------------------------------
 
 -- Datname A: temp_bytes_per_xact steps AND the read_write_tuple_ratio shape
@@ -102,7 +110,7 @@ SELECT
 FROM generate_series(0, 27) AS i;
 
 -- -----------------------------------------------------------------------------
--- 5. Report structure and factual phrasing (9 tests)
+-- 5. Report structure and factual phrasing (13 tests)
 -- -----------------------------------------------------------------------------
 
 SELECT matches(
@@ -122,13 +130,33 @@ SELECT matches(
 );
 SELECT matches(
     pgfr_analyze.consumption_trend_report('__pgfr_test_report_a__'),
-    E'\\*\\*Baseline:\\*\\* \\d{4}-\\d{2}-\\d{2} -> \\d{4}-\\d{2}-\\d{2}',
-    'report declares its baseline window explicitly'
+    E'\\*\\*28-day baseline:\\*\\* \\d{4}-\\d{2}-\\d{2} -> \\d{4}-\\d{2}-\\d{2}',
+    'report declares its 28-day/daily baseline window explicitly'
+);
+SELECT matches(
+    pgfr_analyze.consumption_trend_report('__pgfr_test_report_a__'),
+    E'\\*\\*84-day baseline:\\*\\* \\d{4}-\\d{2}-\\d{2} -> \\d{4}-\\d{2}-\\d{2}',
+    'report declares its 84-day/weekly baseline window explicitly, alongside the daily one'
+);
+SELECT matches(
+    pgfr_analyze.consumption_trend_report('__pgfr_test_report_a__'),
+    E'\\*\\*28-day window\\*\\*',
+    'each metric shows an explicit 28-day window label'
+);
+SELECT matches(
+    pgfr_analyze.consumption_trend_report('__pgfr_test_report_a__'),
+    E'\\*\\*84-day window\\*\\*',
+    'each metric shows an explicit 84-day window label, alongside the 28-day one'
 );
 SELECT matches(
     pgfr_analyze.consumption_trend_report('__pgfr_test_report_a__'),
     'Insufficient data: 14 days required, 0 collected',
-    'an unpopulated metric states insufficient data explicitly, never silently omitted'
+    'an unpopulated metric states insufficient data explicitly at the daily grain, never silently omitted'
+);
+SELECT matches(
+    pgfr_analyze.consumption_trend_report('__pgfr_test_report_a__'),
+    'Insufficient data: 8 weeks required, 4 collected',
+    'the same 28-day fixture reports insufficient data at the weekly grain too, in weeks rather than days'
 );
 SELECT matches(
     pgfr_analyze.consumption_trend_report('__pgfr_test_report_a__'),
@@ -143,12 +171,12 @@ SELECT matches(
 SELECT matches(
     pgfr_analyze.consumption_trend_report('__pgfr_test_report_b__'),
     ('Level shift detected on ' || (current_date - 14)::text),
-    'a step (no composition) states the exact changepoint date'
+    'a step (no composition) states the exact changepoint date at the daily grain'
 );
 SELECT matches(
     pgfr_analyze.consumption_trend_report('__pgfr_test_report_c__'),
     'Classification: drift',
-    'a gradual ramp is reported as drift'
+    'a gradual ramp is reported as drift at the daily grain'
 );
 
 -- -----------------------------------------------------------------------------
