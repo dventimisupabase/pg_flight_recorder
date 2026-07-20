@@ -71,6 +71,7 @@ SELECT * FROM pgfr_record.deltas;
 | `pgfr_record.recent_vacuum_progress`     | Vacuum operations in progress    |
 | `pgfr_record.archiver_status`            | WAL archiving status             |
 | `pgfr_record.consumption_flows`          | Reset-guarded block/WAL/tuple flow rates and efficiency ratios |
+| `pgfr_record.consumption_deltas`         | Reset-guarded per-tick component deltas backing `consumption_flows` and the daily rollup |
 
 ## Consumption ledger
 
@@ -123,15 +124,33 @@ is treated as the ledger of record for WAL volume. `pg_stat_wal`'s own
   have to join in from outside the database. Out of scope here.
 - **No per-statement attribution.** This is a cluster/database-level ledger;
   `pg_stat_statements`-based drill-down is a separate concern.
-- **No hourly/daily rollup tier.** Unlike the daily RANGE partitioning used
-  for retention throughout this schema, there is no pre-aggregated rollup
-  tier for the consumption ledger -- `consumption_flows` computes flows live
-  from raw rows. Retention follows the same `retention_snapshots_days` tier
-  as the other `_v2` snapshot tables.
 - **`recorder_overhead_fraction`.** A footnote-grade self-accounting figure in
   `consumption_flows`: the recorder's own block footprint
   (`pg_statio_user_tables` for the `pgfr_record` schema) as a fraction of the
   ledger's total block demand for that interval.
+
+### Daily rollups
+
+`consumption_snapshots_v2` retains 30 days; trend analysis over longer windows
+needs something that survives past that. `pgfr_record.consumption_daily_rollups`
+is a daily-grain durable rollup -- one row per calendar day per `datname` --
+populated by `_rollup_consumption_daily()` from the existing daily `pgfr_cleanup`
+cron job (no separate schedule). It stores summed numerator/denominator
+components, not pre-computed ratios, matching this schema's Σnum/Σden rollup
+convention: ratios are reconstructed from sums, never averaged from
+finer-grained ratios.
+
+Unlike every other durable table in this schema, it's deliberately **not**
+partitioned and has **no retention/cleanup**: at one row per day it stays tiny
+indefinitely (a decade is ~3,650 rows), so the bloat problem partition-drop
+retention exists to solve can't occur here.
+
+`consumption_deltas` -- the reset-guarded per-tick component view that used to
+be an inline part of `consumption_flows` -- is now its own view, shared by both
+`consumption_flows` (live per-tick ratios) and the daily rollup (`SUM()` across
+a day; NULLs from a reset-invalidated tick are skipped by `SUM()` automatically,
+so a mid-day `pg_stat_reset()` excludes that tick from the affected sums rather
+than corrupting them).
 
 ## Ring rollups
 
