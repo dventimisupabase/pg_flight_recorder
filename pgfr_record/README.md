@@ -72,6 +72,7 @@ SELECT * FROM pgfr_record.deltas;
 | `pgfr_record.archiver_status`            | WAL archiving status             |
 | `pgfr_record.consumption_flows`          | Reset-guarded block/WAL/tuple flow rates and efficiency ratios |
 | `pgfr_record.consumption_deltas`         | Reset-guarded per-tick component deltas backing `consumption_flows` and the daily rollup |
+| `pgfr_record.consumption_daily_flows`    | Daily-grain ratios reconstructed from `consumption_daily_rollups` |
 
 ## Consumption ledger
 
@@ -151,6 +152,13 @@ be an inline part of `consumption_flows` -- is now its own view, shared by both
 a day; NULLs from a reset-invalidated tick are skipped by `SUM()` automatically,
 so a mid-day `pg_stat_reset()` excludes that tick from the affected sums rather
 than corrupting them).
+
+`pgfr_record.consumption_daily_flows` is the daily-grain sibling of
+`consumption_flows`: it reconstructs ratios from `consumption_daily_rollups`'
+summed components, the same Σnum/Σden reconstruction one tier up. It's the
+input `pgfr_analyze`'s consumption trend engine reads (in progress -- see
+Issue #83); a NULL ratio here means its day's underlying sum was itself NULL
+(reset-excluded) or a denominator was zero, never a division error.
 
 ## Ring rollups
 
