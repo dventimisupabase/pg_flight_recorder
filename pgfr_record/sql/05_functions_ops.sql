@@ -204,7 +204,8 @@ BEGIN
         -- they exist from an older install. The v2 path (pgfr_sample_ring,
         -- pgfr_rotate_ring, scheduled below) is the canonical sampler now.
         PERFORM cron.schedule('pgfr_cleanup', '0 3 * * *',
-            'SET statement_timeout = ''60s''; SELECT * FROM pgfr_record.cleanup(''30 days''::interval);');
+            'SET statement_timeout = ''60s''; SELECT * FROM pgfr_record.cleanup(''30 days''::interval); '
+            'SELECT pgfr_record._rollup_consumption_daily();');
         v_scheduled := v_scheduled + 1;
         -- One-time rename migration (#59): unschedule old hyphenated job names
         -- if a prior install left them. Self-healing on next enable().

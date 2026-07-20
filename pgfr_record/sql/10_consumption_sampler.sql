@@ -132,7 +132,8 @@ create table if not exists pgfr_record.consumption_snapshots_v2 (
     -- Self-accounting: pgfr_record's own block footprint (pg_statio_user_tables,
     -- schemaname='pgfr_record'), reset-guarded by db_stats_reset like the rest of
     -- the per-database lanes. Footnote-grade per Issue #81; exposed as
-    -- recorder_overhead_fraction in consumption_flows rather than a daily rollup.
+    -- recorder_overhead_fraction in consumption_flows and summed into
+    -- consumption_daily_rollups (Issue #83) so it survives past 30 days too.
     recorder_blks_hit       bigint,
     recorder_blks_read      bigint
 ) partition by range (sample_ts);
@@ -379,9 +380,12 @@ comment on function pgfr_record._snapshot_v2_trigger() is
 'Non-invasive integration with existing snapshot() function. See Issue #81.';
 
 -- ---------------------------------------------------------------------------
--- 6. consumption_flows — reset-guarded differencing view.
---    Flows (per second) and efficiency ratios, derived from consecutive raw
---    rows per datname. wal_bytes_delta uses the LSN odometer directly (always
+-- 6. consumption_deltas — reset-guarded per-tick component deltas.
+--    Split out as its own view (rather than an inline CTE inside
+--    consumption_flows) so both the live per-tick flow view and the daily
+--    rollup's SUM()-based aggregation (see consumption_daily_rollups below)
+--    share one source of truth for the reset-guard wiring, instead of
+--    duplicating it. wal_bytes_delta uses the LSN odometer directly (always
 --    valid on a primary); every other delta goes through
 --    _reset_guarded_delta(), grouped by the reset-sentinel of its source view
 --    (db_stats_reset for pg_stat_database-sourced lanes, wal_stats_reset for
@@ -389,7 +393,7 @@ comment on function pgfr_record._snapshot_v2_trigger() is
 --    no exposed reset sentinel; a reset there still shows up as a regression
 --    against the prior tick, which _reset_guarded_delta() also catches.
 -- ---------------------------------------------------------------------------
-create or replace view pgfr_record.consumption_flows as
+create or replace view pgfr_record.consumption_deltas as
 with pairs as (
     select
         cur.sample_ts, cur.captured_at, cur.pg_version, cur.datname,
@@ -431,47 +435,59 @@ with pairs as (
                 where p.datname = cur.datname
                   and p.sample_ts < cur.sample_ts
               )
-),
-deltas as (
-    select
-        sample_ts, captured_at, pg_version, datname,
-        (sample_ts - prev_sample_ts) as interval_seconds,
-
-        -- WAL ledger of record: LSN diff, not stats-reset-guarded (monotonic on
-        -- a primary). Defensive GREATEST(0, ...) floors any unexpected regression.
-        case when prev_wal_lsn is null then null
-             else greatest(0, pg_wal_lsn_diff(wal_lsn, prev_wal_lsn))
-        end as wal_bytes_delta,
-
-        pgfr_record._reset_guarded_delta(tup_returned, prev_tup_returned, db_stats_reset, prev_db_stats_reset) as tup_returned_delta,
-        pgfr_record._reset_guarded_delta(tup_inserted, prev_tup_inserted, db_stats_reset, prev_db_stats_reset)
-            + pgfr_record._reset_guarded_delta(tup_updated, prev_tup_updated, db_stats_reset, prev_db_stats_reset)
-            + pgfr_record._reset_guarded_delta(tup_deleted, prev_tup_deleted, db_stats_reset, prev_db_stats_reset) as tup_mutated_delta,
-        pgfr_record._reset_guarded_delta(xact_commit, prev_xact_commit, db_stats_reset, prev_db_stats_reset) as xact_commit_delta,
-        pgfr_record._reset_guarded_delta(xact_rollback, prev_xact_rollback, db_stats_reset, prev_db_stats_reset) as xact_rollback_delta,
-        pgfr_record._reset_guarded_delta(blks_hit, prev_blks_hit, db_stats_reset, prev_db_stats_reset) as blks_hit_delta,
-        pgfr_record._reset_guarded_delta(blks_read, prev_blks_read, db_stats_reset, prev_db_stats_reset) as blks_read_delta,
-        pgfr_record._reset_guarded_delta(temp_bytes, prev_temp_bytes, db_stats_reset, prev_db_stats_reset) as temp_bytes_delta,
-        pgfr_record._reset_guarded_delta(recorder_blks_hit, prev_recorder_blks_hit, db_stats_reset, prev_db_stats_reset) as recorder_blks_hit_delta,
-        pgfr_record._reset_guarded_delta(recorder_blks_read, prev_recorder_blks_read, db_stats_reset, prev_db_stats_reset) as recorder_blks_read_delta,
-
-        pgfr_record._reset_guarded_delta(wal_records, prev_wal_records, wal_stats_reset, prev_wal_stats_reset) as wal_records_delta,
-        pgfr_record._reset_guarded_delta(wal_fpi, prev_wal_fpi, wal_stats_reset, prev_wal_stats_reset) as wal_fpi_delta,
-        pgfr_record._reset_guarded_delta(wal_bytes, prev_wal_bytes, wal_stats_reset, prev_wal_stats_reset) as wal_bytes_advisory_delta,
-
-        pgfr_record._reset_guarded_delta(ckpt_num_timed, prev_ckpt_num_timed, ckpt_stats_reset, prev_ckpt_stats_reset) as ckpt_num_timed_delta,
-        pgfr_record._reset_guarded_delta(ckpt_num_requested, prev_ckpt_num_requested, ckpt_stats_reset, prev_ckpt_stats_reset) as ckpt_num_requested_delta,
-
-        -- pg_stat_io has no exposed reset sentinel; regression-only guard (NULL sentinels).
-        pgfr_record._reset_guarded_delta(io_reads_client, prev_io_reads_client) as io_reads_client_delta,
-        pgfr_record._reset_guarded_delta(io_writes_client, prev_io_writes_client) as io_writes_client_delta,
-        pgfr_record._reset_guarded_delta(io_writes_autovacuum, prev_io_writes_autovacuum) as io_writes_autovacuum_delta,
-        pgfr_record._reset_guarded_delta(io_writes_checkpointer, prev_io_writes_checkpointer) as io_writes_checkpointer_delta,
-        pgfr_record._reset_guarded_delta(io_writes_bgwriter, prev_io_writes_bgwriter) as io_writes_bgwriter_delta,
-        pgfr_record._reset_guarded_delta(io_reads_total, prev_io_reads_total) as io_reads_total_delta,
-        pgfr_record._reset_guarded_delta(io_writes_total, prev_io_writes_total) as io_writes_total_delta
-    from pairs
 )
+select
+    sample_ts, captured_at, pg_version, datname,
+    (sample_ts - prev_sample_ts) as interval_seconds,
+
+    -- WAL ledger of record: LSN diff, not stats-reset-guarded (monotonic on
+    -- a primary). Defensive GREATEST(0, ...) floors any unexpected regression.
+    case when prev_wal_lsn is null then null
+         else greatest(0, pg_wal_lsn_diff(wal_lsn, prev_wal_lsn))
+    end as wal_bytes_delta,
+
+    pgfr_record._reset_guarded_delta(tup_returned, prev_tup_returned, db_stats_reset, prev_db_stats_reset) as tup_returned_delta,
+    pgfr_record._reset_guarded_delta(tup_inserted, prev_tup_inserted, db_stats_reset, prev_db_stats_reset)
+        + pgfr_record._reset_guarded_delta(tup_updated, prev_tup_updated, db_stats_reset, prev_db_stats_reset)
+        + pgfr_record._reset_guarded_delta(tup_deleted, prev_tup_deleted, db_stats_reset, prev_db_stats_reset) as tup_mutated_delta,
+    pgfr_record._reset_guarded_delta(xact_commit, prev_xact_commit, db_stats_reset, prev_db_stats_reset) as xact_commit_delta,
+    pgfr_record._reset_guarded_delta(xact_rollback, prev_xact_rollback, db_stats_reset, prev_db_stats_reset) as xact_rollback_delta,
+    pgfr_record._reset_guarded_delta(blks_hit, prev_blks_hit, db_stats_reset, prev_db_stats_reset) as blks_hit_delta,
+    pgfr_record._reset_guarded_delta(blks_read, prev_blks_read, db_stats_reset, prev_db_stats_reset) as blks_read_delta,
+    pgfr_record._reset_guarded_delta(temp_bytes, prev_temp_bytes, db_stats_reset, prev_db_stats_reset) as temp_bytes_delta,
+    pgfr_record._reset_guarded_delta(recorder_blks_hit, prev_recorder_blks_hit, db_stats_reset, prev_db_stats_reset) as recorder_blks_hit_delta,
+    pgfr_record._reset_guarded_delta(recorder_blks_read, prev_recorder_blks_read, db_stats_reset, prev_db_stats_reset) as recorder_blks_read_delta,
+
+    pgfr_record._reset_guarded_delta(wal_records, prev_wal_records, wal_stats_reset, prev_wal_stats_reset) as wal_records_delta,
+    pgfr_record._reset_guarded_delta(wal_fpi, prev_wal_fpi, wal_stats_reset, prev_wal_stats_reset) as wal_fpi_delta,
+    pgfr_record._reset_guarded_delta(wal_bytes, prev_wal_bytes, wal_stats_reset, prev_wal_stats_reset) as wal_bytes_advisory_delta,
+
+    pgfr_record._reset_guarded_delta(ckpt_num_timed, prev_ckpt_num_timed, ckpt_stats_reset, prev_ckpt_stats_reset) as ckpt_num_timed_delta,
+    pgfr_record._reset_guarded_delta(ckpt_num_requested, prev_ckpt_num_requested, ckpt_stats_reset, prev_ckpt_stats_reset) as ckpt_num_requested_delta,
+
+    -- pg_stat_io has no exposed reset sentinel; regression-only guard (NULL sentinels).
+    pgfr_record._reset_guarded_delta(io_reads_client, prev_io_reads_client) as io_reads_client_delta,
+    pgfr_record._reset_guarded_delta(io_writes_client, prev_io_writes_client) as io_writes_client_delta,
+    pgfr_record._reset_guarded_delta(io_writes_autovacuum, prev_io_writes_autovacuum) as io_writes_autovacuum_delta,
+    pgfr_record._reset_guarded_delta(io_writes_checkpointer, prev_io_writes_checkpointer) as io_writes_checkpointer_delta,
+    pgfr_record._reset_guarded_delta(io_writes_bgwriter, prev_io_writes_bgwriter) as io_writes_bgwriter_delta,
+    pgfr_record._reset_guarded_delta(io_reads_total, prev_io_reads_total) as io_reads_total_delta,
+    pgfr_record._reset_guarded_delta(io_writes_total, prev_io_writes_total) as io_writes_total_delta
+from pairs;
+
+comment on view pgfr_record.consumption_deltas is
+'Reset-guarded per-tick component deltas for the consumption ledger -- shared '
+'base for consumption_flows (live per-tick ratios) and '
+'consumption_daily_rollups (SUM()-based daily aggregation via '
+'_rollup_consumption_daily(); SUM() skips NULLs, so a reset-invalidated tick '
+'is excluded from a day''s sum automatically). See Issue #81, #83.';
+
+-- ---------------------------------------------------------------------------
+-- 7. consumption_flows — flow rates and efficiency ratios derived from
+--    consumption_deltas. Purely a reshaping of consumption_deltas into rates
+--    and ratios; the reset-guard wiring itself lives there, not here.
+-- ---------------------------------------------------------------------------
+create or replace view pgfr_record.consumption_flows as
 select
     sample_ts, captured_at, pg_version, datname, interval_seconds,
 
@@ -501,16 +517,16 @@ select
 
     -- Self-accounting (footnote-grade; see Issue #81 "Self-accounting")
     (recorder_blks_hit_delta + recorder_blks_read_delta) / nullif(blks_hit_delta + blks_read_delta, 0) as recorder_overhead_fraction
-from deltas;
+from pgfr_record.consumption_deltas;
 
 comment on view pgfr_record.consumption_flows is
-'Reset-guarded flow rates and efficiency ratios derived from consecutive '
-'consumption_snapshots_v2 rows. wal_bytes_per_s uses the wal_lsn odometer '
-'(ledger of record, valid across a pg_stat_reset()); every other flow/ratio is '
-'built on pgfr_record._reset_guarded_delta() and is NULL for any interval where '
-'its source counters regressed or their stats were reset. See Issue #81. '
-'Deliberately avoids "logical"/"physical" I/O labels -- see '
-'os_read_blocks_per_s and os_write_blocks_per_s below for why.';
+'Flow rates and efficiency ratios computed from pgfr_record.consumption_deltas. '
+'wal_bytes_per_s uses the wal_lsn odometer (ledger of record, valid across a '
+'pg_stat_reset()); every other flow/ratio is NULL for any interval where its '
+'source counters regressed or their stats were reset (see consumption_deltas '
+'and pgfr_record._reset_guarded_delta()). See Issue #81. Deliberately avoids '
+'"logical"/"physical" I/O labels -- see os_read_blocks_per_s and '
+'os_write_blocks_per_s below for why.';
 
 comment on column pgfr_record.consumption_flows.block_demand_per_s is
 'Total block accesses through the buffer pool per second (blks_hit + blks_read), '
@@ -531,3 +547,167 @@ comment on column pgfr_record.consumption_flows.os_write_blocks_per_s is
 'on PG15). Same caveat as os_read_blocks_per_s: this is Postgres asking the OS '
 'to write a block, not confirmation the block reached physical storage -- the '
 'OS may hold it in page cache until its own writeback policy flushes it.';
+
+--------------------------------------------------------------------------------
+-- consumption_daily_rollups (Issue #83 prerequisite): a daily-grain durable
+-- rollup of the consumption ledger, so trend analysis over windows longer
+-- than consumption_snapshots_v2's 30-day retention (Issue #83 wants 28d/90d
+-- Theil-Sen windows) has something to read once the raw ticks age out.
+--
+-- Deliberately NOT partitioned and NOT subject to any retention/cleanup: at
+-- one row per calendar day per datname, this table is tiny by construction
+-- (a decade is ~3,650 rows) -- the same reasoning Issue #83 itself gives for
+-- keeping trend rows indefinitely applies here first. The partition-drop
+-- machinery elsewhere in this schema solves a bloat problem that cannot occur
+-- at this row count, so it isn't reused here.
+--
+-- Stores summed numerator/denominator components, not pre-computed ratios --
+-- same Σnum/Σden discipline as the rest of this schema's rollup convention:
+-- ratios are reconstructed from sums, never averaged from finer-grained
+-- ratios. Scope is exactly Issue #83's metric basket plus the existing
+-- recorder_overhead_fraction self-accounting figure (already a real signal in
+-- consumption_flows; omitting it here would just be another way to lose it
+-- once raw data ages out, the exact failure mode this table exists to avoid).
+-- basket_version is NOT stored here: that concept belongs to the eventual
+-- trend table (Issue #83's own deliverable), which versions which metrics get
+-- trended -- this table just stores facts.
+--------------------------------------------------------------------------------
+
+create table if not exists pgfr_record.consumption_daily_rollups (
+    rollup_date                 date    not null,
+    datname                     text    not null,
+
+    -- Coverage / transparency, not assumed to be a fixed 86400s/day: an
+    -- interval is attributed to the calendar day of its END timestamp (the
+    -- tick that closed it), so a day with a gap (recorder downtime) or a
+    -- partial first/last day naturally has a smaller total_seconds and
+    -- valid_tick_count rather than a silently wrong rate.
+    total_seconds                integer not null,
+    valid_tick_count             integer not null,
+
+    -- pg_stat_database-scoped sums (guarded by db_stats_reset in consumption_deltas)
+    blks_hit_sum                 bigint,
+    blks_read_sum                 bigint,
+    tup_returned_sum              bigint,
+    tup_mutated_sum               bigint,
+    xact_commit_sum               bigint,
+    xact_rollback_sum             bigint,
+    temp_bytes_sum                bigint,
+    recorder_blks_hit_sum         bigint,
+    recorder_blks_read_sum        bigint,
+
+    -- WAL ledger + advisory decomposition (LSN-based sum is not stats-reset-guarded)
+    wal_bytes_sum                 numeric,
+    wal_fpi_sum                   bigint,
+    wal_bytes_advisory_sum        numeric,
+
+    -- Checkpointer/bgwriter-scoped sums (guarded by ckpt_stats_reset)
+    ckpt_num_timed_sum            bigint,
+    ckpt_num_requested_sum        bigint,
+
+    -- pg_stat_io-scoped sums (PG16+; NULL on PG15, regression-only guarded)
+    io_writes_autovacuum_sum      bigint,
+    io_writes_total_sum           bigint,
+
+    -- Gauge, not a flow: the day's last observed value, not a sum
+    db_size_bytes                 bigint,
+
+    primary key (rollup_date, datname)
+);
+
+comment on table pgfr_record.consumption_daily_rollups is
+'Daily-grain durable rollup of the consumption ledger: one row per calendar '
+'day per datname, populated by _rollup_consumption_daily() from the daily '
+'pgfr_cleanup cron job (no separate job). Stores summed components, not '
+'ratios -- reconstruct ratios via SUM-of-sums, matching the rest of this '
+'schema''s rollup convention. Not partitioned, no retention: at one row/day '
+'this table stays tiny indefinitely, so the bloat problem partition-drop '
+'exists to solve cannot occur here. See Issue #83.';
+
+comment on column pgfr_record.consumption_daily_rollups.total_seconds is
+'Sum of interval_seconds across the day''s valid ticks (from '
+'consumption_deltas). Use as the denominator for daily "_per_s" rates instead '
+'of assuming 86400 -- a day with a recorder outage or a partial first/last '
+'day has a proportionally smaller total_seconds, not a silently wrong rate.';
+
+comment on column pgfr_record.consumption_daily_rollups.valid_tick_count is
+'Count of ticks that contributed to this row. A low count relative to the '
+'configured sample interval is the same signal Issue #83''s reporting '
+'requirements call for making explicit ("14 days required, 6 collected") '
+'rather than silently omitting. Counts intervals present, not per-metric '
+'validity: a reset-invalidated scope (e.g. a mid-day pg_stat_reset()) can '
+'still leave some *_sum columns NULL for a day counted here.';
+
+-- ---------------------------------------------------------------------------
+-- _rollup_consumption_daily() — populates consumption_daily_rollups.
+-- Idempotent: rolls up every calendar day that has consumption_deltas data
+-- but no rollup row yet, up to (and excluding) the current day, so it catches
+-- up gaps (e.g. after downtime) rather than only ever handling "yesterday".
+-- Never rolls up the current day: a day in progress is never a candidate, so
+-- a rollup row always covers a fully-closed day.
+-- ---------------------------------------------------------------------------
+create or replace function pgfr_record._rollup_consumption_daily()
+returns void
+language plpgsql as $$
+declare
+    v_day date;
+begin
+    for v_day in
+        select distinct (pgfr_record.epoch() + d.sample_ts * interval '1 second')::date as day
+        from pgfr_record.consumption_deltas d
+        where (pgfr_record.epoch() + d.sample_ts * interval '1 second')::date < current_date
+          and not exists (
+              select 1 from pgfr_record.consumption_daily_rollups r
+              where r.rollup_date = (pgfr_record.epoch() + d.sample_ts * interval '1 second')::date
+                and r.datname = d.datname
+          )
+        order by day
+    loop
+        insert into pgfr_record.consumption_daily_rollups (
+            rollup_date, datname, total_seconds, valid_tick_count,
+            blks_hit_sum, blks_read_sum,
+            tup_returned_sum, tup_mutated_sum,
+            xact_commit_sum, xact_rollback_sum,
+            temp_bytes_sum,
+            recorder_blks_hit_sum, recorder_blks_read_sum,
+            wal_bytes_sum, wal_fpi_sum, wal_bytes_advisory_sum,
+            ckpt_num_timed_sum, ckpt_num_requested_sum,
+            io_writes_autovacuum_sum, io_writes_total_sum,
+            db_size_bytes
+        )
+        select
+            v_day, d.datname,
+            sum(d.interval_seconds)::integer, count(d.interval_seconds)::integer,
+            sum(d.blks_hit_delta), sum(d.blks_read_delta),
+            sum(d.tup_returned_delta), sum(d.tup_mutated_delta),
+            sum(d.xact_commit_delta), sum(d.xact_rollback_delta),
+            sum(d.temp_bytes_delta),
+            sum(d.recorder_blks_hit_delta), sum(d.recorder_blks_read_delta),
+            sum(d.wal_bytes_delta), sum(d.wal_fpi_delta), sum(d.wal_bytes_advisory_delta),
+            sum(d.ckpt_num_timed_delta), sum(d.ckpt_num_requested_delta),
+            sum(d.io_writes_autovacuum_delta), sum(d.io_writes_total_delta),
+            (
+                select s.db_size_bytes
+                from pgfr_record.consumption_snapshots_v2 s
+                where s.datname = d.datname
+                  and (pgfr_record.epoch() + s.sample_ts * interval '1 second')::date = v_day
+                order by s.sample_ts desc
+                limit 1
+            )
+        from pgfr_record.consumption_deltas d
+        where (pgfr_record.epoch() + d.sample_ts * interval '1 second')::date = v_day
+        group by d.datname
+        on conflict (rollup_date, datname) do nothing;
+    end loop;
+exception when others then
+    raise warning 'pgfr_record: _rollup_consumption_daily failed: %', sqlerrm;
+end;
+$$;
+
+comment on function pgfr_record._rollup_consumption_daily() is
+'Populates consumption_daily_rollups from consumption_deltas: one row per '
+'calendar day per datname, summed components (Σnum/Σden discipline). '
+'Idempotent and catch-up capable -- rolls up any day with data but no rollup '
+'row yet, up to (excluding) the current day. Called from the daily '
+'pgfr_cleanup cron job, not a separate schedule. Non-fatal on failure '
+'(wrapped in EXCEPTION, emits WARNING). See Issue #83.';
