@@ -18,14 +18,15 @@ pgfr_analyze reads the snapshot and ring buffer data collected by pgfr_record an
 
 ## Consumption trend engine (in progress)
 
-A multi-phase feature tracking specific-consumption drift in `pgfr_record`'s consumption ledger against the database's own history (see the top-level repo's Issue #83). Phase 3 of 4 lands here:
+A multi-phase feature tracking specific-consumption drift in `pgfr_record`'s consumption ledger against the database's own history (see the top-level repo's Issue #83). All four phases have landed:
 
 - `consumption_metric_series` -- long-format unpivot of the 8 basket metrics from `pgfr_record.consumption_daily_flows`
 - `consumption_trends` -- persisted trend assessments (one row per day per metric, kept indefinitely -- tiny by construction)
 - `_refresh_consumption_trends()` -- Theil-Sen slope (robust to outliers) plus a classification distinguishing a genuine level shift (`step`) from a gradual change (`drift`) from noise (`stable`), via model-fit comparison (line vs. best-fitting two-level step) rather than a shift-magnitude threshold, which can't reliably tell the two shapes apart
-- **Composition-drift guard** (phase 3): a `step` or `drift` classification is overridden to `composition` when the window's workload-shape indicators (`read_write_tuple_ratio`, `xact_per_s`, etc.) also moved beyond threshold between the window's two halves -- the honesty check preventing a workload change (new feature, traffic mix shift) from being reported as a fitness change (bloat, decay). A metric that never moved stays `stable` regardless of workload shape, since there's nothing to misattribute. See `composition_change` on `consumption_trends`.
+- **Composition-drift guard**: a `step` or `drift` classification is overridden to `composition` when the window's workload-shape indicators (`read_write_tuple_ratio`, `xact_per_s`, etc.) also moved beyond threshold between the window's two halves -- the honesty check preventing a workload change (new feature, traffic mix shift) from being reported as a fitness change (bloat, decay). A metric that never moved stays `stable` regardless of workload shape, since there's nothing to misattribute. See `composition_change` on `consumption_trends`.
+- **`consumption_trend_report(datname)`** -- the report entry point. Refreshes `consumption_trends` first (no cron dependency, same as every other function here), then renders a markdown report with `Specific consumption` / `Amplification factors` / `Substrate` sections (Issue #83's own vocabulary, used verbatim), an explicit declared baseline window, a sparkline per metric, and purely factual classification language throughout -- no adjectives, ever, not even for unflagged drift.
 
-28-day window only for now; no report-rendering entry point yet (phase 4) -- call `_refresh_consumption_trends()` directly and query `consumption_trends` in the meantime.
+28-day window only for now; a 90-day/weekly-aggregated window (for real seasonality handling) would be a future addition to the same engine.
 
 ## Requirements
 
@@ -101,6 +102,7 @@ SELECT * FROM pgfr_analyze.capacity_summary('7 days');
 | `performance_report(start, end)` | Performance-focused report       |
 | `anomaly_report(start, end)`     | Detailed anomaly analysis        |
 | `check_alerts()`                 | Check active alert conditions    |
+| `consumption_trend_report(datname)` | Specific-consumption drift report against the database's own history |
 
 ### Forensics
 
