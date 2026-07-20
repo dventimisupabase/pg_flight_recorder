@@ -70,6 +70,58 @@ SELECT * FROM pgfr_record.deltas;
 | `pgfr_record.recent_replication`         | Replication status               |
 | `pgfr_record.recent_vacuum_progress`     | Vacuum operations in progress    |
 | `pgfr_record.archiver_status`            | WAL archiving status             |
+| `pgfr_record.consumption_flows`          | Reset-guarded block/WAL/tuple flow rates and efficiency ratios |
+
+## Consumption ledger
+
+`pgfr_record.consumption_snapshots_v2` records the database's cumulative block,
+WAL, and tuple activity counters once per snapshot tick (piggybacked on the
+existing per-minute snapshot trigger -- no extra pg_cron job). `consumption_flows`
+derives per-second flow rates and efficiency ratios from consecutive rows: how
+much work the database is doing, measured in blocks moved and WAL bytes
+generated rather than milliseconds, so the numbers stay comparable across
+different hardware.
+
+### Reset handling
+
+Flows and ratios are reset-guarded via `pgfr_record._reset_guarded_delta()`, a
+generic primitive: an interval is discarded (NULL) if its source counters
+regressed or their `pg_stat_*` view was reset between ticks. Guarding is
+per-source, not per-row -- a `pg_stat_reset()` invalidates only the
+`pg_stat_database`-scoped flows (rows returned/mutated, transactions, cache
+hit fraction) for that interval, and a `pg_stat_reset_shared('wal')`
+invalidates only the `pg_stat_wal`-scoped ones (WAL record/FPI decomposition).
+`wal_bytes_per_s` is the exception: it's derived from `pg_current_wal_lsn()`
+directly, which is monotonic on a primary regardless of any stats reset, and
+is treated as the ledger of record for WAL volume. `pg_stat_wal`'s own
+`wal_bytes` counter is advisory decomposition only.
+
+### Scope and caveats
+
+- **Primary only.** The collector no-ops under `pg_is_in_recovery()`: several
+  source views (`pg_current_wal_lsn()`, `pg_stat_checkpointer`) are absent,
+  zero, or misleading on a hot standby. A gap in `consumption_snapshots_v2`
+  during a known recovery window is expected, not a bug.
+- **Cluster vs. database scope.** `tup_*`, `xact_*`, `blks_*`, `temp_*`, and
+  `db_*` columns are scoped to `current_database()`; WAL, I/O-by-agent, and
+  checkpointer/bgwriter columns are cluster-wide. On single-database
+  deployments this distinction is cosmetic but the schema carries it honestly.
+- **`track_io_timing`.** `blk_read_time_ms` / `blk_write_time_ms` are `0` (not
+  NULL) for the entire history when `track_io_timing` is off -- treat a
+  persistent `0` there as "unknown", not "instant".
+- **No CPU.** Core Postgres exposes wall-clock, not cycles; CPU-seconds would
+  have to join in from outside the database. Out of scope here.
+- **No per-statement attribution.** This is a cluster/database-level ledger;
+  `pg_stat_statements`-based drill-down is a separate concern.
+- **No hourly/daily rollup tier.** Unlike the daily RANGE partitioning used
+  for retention throughout this schema, there is no pre-aggregated rollup
+  tier for the consumption ledger -- `consumption_flows` computes flows live
+  from raw rows. Retention follows the same `retention_snapshots_days` tier
+  as the other `_v2` snapshot tables.
+- **`recorder_overhead_fraction`.** A footnote-grade self-accounting figure in
+  `consumption_flows`: the recorder's own block footprint
+  (`pg_statio_user_tables` for the `pgfr_record` schema) as a fraction of the
+  ledger's total logical blocks for that interval.
 
 ## Ring rollups
 
