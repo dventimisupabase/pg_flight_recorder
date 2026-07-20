@@ -21,6 +21,7 @@
 --   09_phase3_snapshots_v2.sql snapshots_v2 partitioned tables + dual-write trigger
 --   10_consumption_sampler.sql consumption ledger: block/WAL/tuple flow + reset-guarded deltas
 --   11_ring_rollups.sql      durable wait/lock/activity rollups fed from rotate_ring()
+--   12_consumption_weekly_flows.sql weekly-grain ratio reconstruction for the 90-day trend window
 
 \ir sql/01_schema.sql
 \ir sql/02_tables.sql
@@ -34,6 +35,7 @@
 \ir sql/09_phase3_snapshots_v2.sql
 \ir sql/10_consumption_sampler.sql
 \ir sql/11_ring_rollups.sql
+\ir sql/12_consumption_weekly_flows.sql
 
 -- Post-install: migrate deprecated config key aliases to canonical names.
 -- Idempotent; safe on fresh install (keys won't exist yet) and upgrades.
