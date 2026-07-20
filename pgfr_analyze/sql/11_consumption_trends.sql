@@ -91,26 +91,44 @@ comment on view pgfr_analyze.consumption_metric_series is
 --    to be kept indefinitely (it IS the long-term memory, per Issue #83).
 -- ---------------------------------------------------------------------------
 create table if not exists pgfr_analyze.consumption_trends (
-    as_of_date        date        not null,
-    datname           text        not null,
-    metric_name       text        not null,
-    window_days       integer     not null,
-    basket_version    integer     not null,
+    as_of_date          date        not null,
+    datname             text        not null,
+    metric_name         text        not null,
+    window_days         integer     not null,
+    basket_version      integer     not null,
 
-    sample_count      integer     not null,
-    baseline_start    date        not null,
-    baseline_end      date        not null,
+    sample_count        integer     not null,
+    baseline_start      date        not null,
+    baseline_end        date        not null,
 
-    slope_pct_per_30d numeric,
-    classification    text        not null
-        check (classification in ('insufficient_data', 'stable', 'drift', 'step')),
-    changepoint_date  date,
+    slope_pct_per_30d   numeric,
+    classification      text        not null
+        check (classification in ('insufficient_data', 'stable', 'drift', 'step', 'composition')),
+    changepoint_date    date,
     check ((classification = 'step') = (changepoint_date is not null)),
+    composition_change  boolean     not null default false,
 
-    computed_at       timestamptz not null default now(),
+    computed_at         timestamptz not null default now(),
 
     primary key (as_of_date, datname, metric_name, window_days)
 );
+
+-- Additive upgrade path for installs from phase 2 (before composition_change
+-- and the 'composition' classification value existed). SET LOCAL silences the
+-- "does not exist, skipping" notice on fresh installs where these are already
+-- correct from the CREATE TABLE above. CHECK constraints can't be altered in
+-- place, so the classification constraint is dropped and recreated.
+do $$
+begin
+    set local client_min_messages = warning;
+    alter table pgfr_analyze.consumption_trends
+        add column if not exists composition_change boolean not null default false;
+    alter table pgfr_analyze.consumption_trends
+        drop constraint if exists consumption_trends_classification_check;
+    alter table pgfr_analyze.consumption_trends
+        add constraint consumption_trends_classification_check
+        check (classification in ('insufficient_data', 'stable', 'drift', 'step', 'composition'));
+end $$;
 
 comment on table pgfr_analyze.consumption_trends is
 'Persisted trend assessments for the consumption ledger''s metric basket '
@@ -138,29 +156,79 @@ comment on column pgfr_analyze.consumption_trends.classification is
 'drift: a material change, but gradual -- a line fits the window at least as '
 'well as any single step does. step: a genuine level shift -- the '
 'best-fitting two-level step explains the window''s variance meaningfully '
-'better than the best-fitting line (see changepoint_date). Not a magnitude '
-'threshold: distinguishing step from drift requires comparing model fit, not '
-'shift size -- a clean step and a linear ramp over the same window can '
-'produce the same shift-magnitude-to-variability ratio.';
+'better than the best-fitting line (see changepoint_date). composition: a '
+'movement was detected (would otherwise be step or drift) but the window''s '
+'workload-shape indicators also moved beyond threshold between the window''s '
+'halves (see composition_change) -- no fitness inference is safe, so no '
+'changepoint_date either. A metric that never moved (stable) stays stable '
+'even if the workload shape also changed that window: there''s nothing to '
+'misattribute in the first place. Not a magnitude threshold for step vs '
+'drift: distinguishing them requires comparing model fit, not shift size -- '
+'a clean step and a linear ramp over the same window can produce the same '
+'shift-magnitude-to-variability ratio.';
+
+comment on column pgfr_analyze.consumption_trends.composition_change is
+'True when this window''s workload-shape indicators (read_write_tuple_ratio, '
+'xact_per_s, rows_returned_per_xact, rows_mutated_per_xact, db_size_bytes) '
+'moved beyond consumption_trend_shape_guard_pct between the window''s two '
+'fixed halves. One value per (datname, as_of_date, window_days), applied to '
+'every metric''s row for that window -- workload shape is a property of the '
+'window, not of any one metric. Issue #83''s composition-drift confound: a '
+'ratio can move because the database got less fit, or because the workload '
+'mix changed; this is the honesty flag preventing the latter from being '
+'reported as the former.';
 
 -- ---------------------------------------------------------------------------
--- 3. _refresh_consumption_trends() — always recomputes and upserts today's
+-- 3. _pct_shift_exceeds() — generic, testable percent-shift check used by the
+--    workload-shape guard below. NULL-safe (either input missing means no
+--    signal, not an error) and treats a 0-to-nonzero shift as automatically
+--    exceeding: a metric going from "never happens" to "happens" (or back)
+--    has an undefined percentage change, but is still a real shape shift.
+-- ---------------------------------------------------------------------------
+create or replace function pgfr_analyze._pct_shift_exceeds(
+    p_before        numeric,
+    p_after         numeric,
+    p_threshold_pct numeric
+)
+returns boolean
+language sql
+immutable
+as $$
+    select case
+        when p_before is null or p_after is null then false
+        when p_before = 0 and p_after = 0 then false
+        when p_before = 0 then true
+        else abs(p_after - p_before) / abs(p_before) * 100 > p_threshold_pct
+    end
+$$;
+
+comment on function pgfr_analyze._pct_shift_exceeds(numeric, numeric, numeric) is
+'Generic percent-shift check: true if p_after differs from p_before by more '
+'than p_threshold_pct percent. NULL-safe (false if either side is unknown); '
+'a 0-to-nonzero shift always exceeds (percentage change is undefined, but '
+'"never happens" becoming "happens" is a real shift). Used by the workload-'
+'shape guard in _refresh_consumption_trends(). See Issue #83.';
+
+-- ---------------------------------------------------------------------------
+-- 4. _refresh_consumption_trends() — always recomputes and upserts today's
 --    row for every (datname, basket metric) combination, 28-day window.
 -- ---------------------------------------------------------------------------
 create or replace function pgfr_analyze._refresh_consumption_trends()
 returns void
 language plpgsql as $$
 declare
-    v_as_of_date     date := current_date;
-    v_window_days    constant integer := 28;
-    v_basket_version constant integer := 1;
-    v_min_days       integer;
-    v_min_r2         numeric;
-    v_step_r2_margin numeric;
+    v_as_of_date      date := current_date;
+    v_window_days     constant integer := 28;
+    v_basket_version  constant integer := 1;
+    v_min_days        integer;
+    v_min_r2          numeric;
+    v_step_r2_margin  numeric;
+    v_shape_guard_pct numeric;
 begin
-    v_min_days       := coalesce(pgfr_record._get_config('consumption_trend_min_days', '14')::integer, 14);
-    v_min_r2         := coalesce(pgfr_record._get_config('consumption_trend_min_r2', '0.3')::numeric, 0.3);
-    v_step_r2_margin := coalesce(pgfr_record._get_config('consumption_trend_step_r2_margin', '0.15')::numeric, 0.15);
+    v_min_days        := coalesce(pgfr_record._get_config('consumption_trend_min_days', '14')::integer, 14);
+    v_min_r2          := coalesce(pgfr_record._get_config('consumption_trend_min_r2', '0.3')::numeric, 0.3);
+    v_step_r2_margin  := coalesce(pgfr_record._get_config('consumption_trend_step_r2_margin', '0.15')::numeric, 0.15);
+    v_shape_guard_pct := coalesce(pgfr_record._get_config('consumption_trend_shape_guard_pct', '25')::numeric, 25);
 
     with window_points as (
         select
@@ -183,6 +251,47 @@ begin
             ('ckpt_requested_fraction'), ('rollback_fraction'),
             ('autovacuum_write_share'),  ('cache_hit_fraction')
         ) as m(metric_name)
+    ),
+    -- Workload-shape guard (Issue #83's composition-drift confound): compare
+    -- each shape indicator's mean between the window's two FIXED halves --
+    -- not a searched split like the step/drift check below. The issue's own
+    -- wording is "the trend window's halves," a 50/50 split, not "the best
+    -- split we can find." One flag per datname, applied to every metric's row
+    -- for that window: workload shape is a property of the window, not of
+    -- any one metric.
+    shape_halves as (
+        select
+            f.datname,
+            count(*) as sample_count,
+            avg(f.read_write_tuple_ratio) filter (where f.rollup_date <= v_as_of_date - v_window_days / 2) as rwtr_before,
+            avg(f.read_write_tuple_ratio) filter (where f.rollup_date >  v_as_of_date - v_window_days / 2) as rwtr_after,
+            avg(f.xact_per_s)             filter (where f.rollup_date <= v_as_of_date - v_window_days / 2) as xps_before,
+            avg(f.xact_per_s)             filter (where f.rollup_date >  v_as_of_date - v_window_days / 2) as xps_after,
+            avg(f.rows_returned_per_xact) filter (where f.rollup_date <= v_as_of_date - v_window_days / 2) as rrpx_before,
+            avg(f.rows_returned_per_xact) filter (where f.rollup_date >  v_as_of_date - v_window_days / 2) as rrpx_after,
+            avg(f.rows_mutated_per_xact)  filter (where f.rollup_date <= v_as_of_date - v_window_days / 2) as rmpx_before,
+            avg(f.rows_mutated_per_xact)  filter (where f.rollup_date >  v_as_of_date - v_window_days / 2) as rmpx_after,
+            avg(f.db_size_bytes)          filter (where f.rollup_date <= v_as_of_date - v_window_days / 2) as size_before,
+            avg(f.db_size_bytes)          filter (where f.rollup_date >  v_as_of_date - v_window_days / 2) as size_after
+        from pgfr_record.consumption_daily_flows f
+        where f.rollup_date > v_as_of_date - v_window_days
+          and f.rollup_date <= v_as_of_date
+        group by f.datname
+    ),
+    composition_flag as (
+        select
+            datname,
+            (
+                sample_count >= v_min_days
+                and (
+                    pgfr_analyze._pct_shift_exceeds(rwtr_before, rwtr_after, v_shape_guard_pct)
+                    or pgfr_analyze._pct_shift_exceeds(xps_before, xps_after, v_shape_guard_pct)
+                    or pgfr_analyze._pct_shift_exceeds(rrpx_before, rrpx_after, v_shape_guard_pct)
+                    or pgfr_analyze._pct_shift_exceeds(rmpx_before, rmpx_after, v_shape_guard_pct)
+                    or pgfr_analyze._pct_shift_exceeds(size_before, size_after, v_shape_guard_pct)
+                )
+            ) as composition_change
+        from shape_halves
     ),
     group_stats as (
         select
@@ -262,15 +371,18 @@ begin
             coalesce(gs.sample_count, 0) as sample_count,
             gs.median_value, gs.r2_line, gs.tss,
             sc.median_slope,
-            bs.split_date, bs.r2_step
+            bs.split_date, bs.r2_step,
+            coalesce(cf.composition_change, false) as composition_change
         from all_combos ac
-        left join group_stats gs on gs.datname = ac.datname and gs.metric_name = ac.metric_name
-        left join slope_calc  sc on sc.datname = ac.datname and sc.metric_name = ac.metric_name
-        left join best_split  bs on bs.datname = ac.datname and bs.metric_name = ac.metric_name
+        left join group_stats gs      on gs.datname = ac.datname and gs.metric_name = ac.metric_name
+        left join slope_calc  sc      on sc.datname = ac.datname and sc.metric_name = ac.metric_name
+        left join best_split  bs      on bs.datname = ac.datname and bs.metric_name = ac.metric_name
+        left join composition_flag cf on cf.datname = ac.datname
     ),
     classified as (
         select
             datname, metric_name, sample_count, median_value, median_slope, split_date,
+            composition_change,
             case
                 when sample_count < v_min_days then 'insufficient_data'
                 -- Zero variance: nothing to detect. Handled explicitly rather
@@ -278,6 +390,10 @@ begin
                 -- constant series -- see the comment on group_stats.r2_line.
                 when coalesce(tss, 0) = 0 then 'stable'
                 when coalesce(r2_step, 0) < v_min_r2 and coalesce(r2_line, 0) < v_min_r2 then 'stable'
+                -- Composition only overrides a *detected* movement (a metric
+                -- that's already stable has nothing to misattribute), so this
+                -- check sits after both stable checks and before step/drift.
+                when composition_change then 'composition'
                 when coalesce(r2_step, 0) >= coalesce(r2_line, 0) + v_step_r2_margin then 'step'
                 else 'drift'
             end as classification
@@ -286,7 +402,7 @@ begin
     insert into pgfr_analyze.consumption_trends (
         as_of_date, datname, metric_name, window_days, basket_version,
         sample_count, baseline_start, baseline_end,
-        slope_pct_per_30d, classification, changepoint_date
+        slope_pct_per_30d, classification, changepoint_date, composition_change
     )
     select
         v_as_of_date, datname, metric_name, v_window_days, v_basket_version,
@@ -297,18 +413,20 @@ begin
             else median_slope * 30 / abs(median_value) * 100
         end,
         classification,
-        case when classification = 'step' then split_date else null end
+        case when classification = 'step' then split_date else null end,
+        composition_change
     from classified
     on conflict (as_of_date, datname, metric_name, window_days)
     do update set
-        basket_version    = excluded.basket_version,
-        sample_count      = excluded.sample_count,
-        baseline_start    = excluded.baseline_start,
-        baseline_end      = excluded.baseline_end,
-        slope_pct_per_30d = excluded.slope_pct_per_30d,
-        classification    = excluded.classification,
-        changepoint_date  = excluded.changepoint_date,
-        computed_at       = now();
+        basket_version     = excluded.basket_version,
+        sample_count       = excluded.sample_count,
+        baseline_start     = excluded.baseline_start,
+        baseline_end       = excluded.baseline_end,
+        slope_pct_per_30d  = excluded.slope_pct_per_30d,
+        classification     = excluded.classification,
+        changepoint_date   = excluded.changepoint_date,
+        composition_change = excluded.composition_change,
+        computed_at        = now();
 exception when others then
     raise warning 'pgfr_analyze: _refresh_consumption_trends failed: %', sqlerrm;
 end;
@@ -316,9 +434,12 @@ $$;
 
 comment on function pgfr_analyze._refresh_consumption_trends() is
 'Recomputes and upserts today''s consumption_trends row for every (datname, '
-'basket metric), 28-day window on raw daily points. Always fully recomputes '
-'(no staleness tracking -- cheap enough not to need it). Thresholds '
-'(consumption_trend_min_days default 14, consumption_trend_min_r2 default '
-'0.3, consumption_trend_step_r2_margin default 0.15) are pgfr_record.config '
-'keys read via _get_config(), never written by pgfr_analyze. Non-fatal on '
-'failure (wrapped in EXCEPTION, emits WARNING). See Issue #83.';
+'basket metric), 28-day window on raw daily points. Also evaluates the '
+'workload-shape guard (composition_change) once per datname from the '
+'window''s two fixed halves, applied to every metric''s row. Always fully '
+'recomputes (no staleness tracking -- cheap enough not to need it). '
+'Thresholds (consumption_trend_min_days default 14, consumption_trend_min_r2 '
+'default 0.3, consumption_trend_step_r2_margin default 0.15, '
+'consumption_trend_shape_guard_pct default 25) are pgfr_record.config keys '
+'read via _get_config(), never written by pgfr_analyze. Non-fatal on failure '
+'(wrapped in EXCEPTION, emits WARNING). See Issue #83.';
