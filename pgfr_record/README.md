@@ -4,12 +4,12 @@ Core flight recorder extension for PostgreSQL. Continuously samples database sta
 
 ## What it does
 
-pgfr_record installs a set of tables, views, and pg_cron jobs that continuously capture PostgreSQL system state. It uses UNLOGGED ring buffers for high-frequency sampling of wait events, active sessions, and locks, and durable snapshot tables for periodic capture of WAL activity, checkpoints, I/O, table and index stats, query stats, replication state, and configuration. Ring buffers rotate out via TRUNCATE on a fixed schedule -- there is no downstream archive or aggregate tier. Snapshot tables carry their own long-term retention via daily partition drop.
+pgfr_record installs a set of tables, views, and pg_cron jobs that continuously capture PostgreSQL system state. It uses UNLOGGED ring buffers for high-frequency sampling of wait events, active sessions, and locks, and durable snapshot tables for periodic capture of WAL activity, checkpoints, I/O, table and index stats, query stats, replication state, and configuration. Ring buffers rotate out via TRUNCATE on a fixed schedule, rolling up wait/lock/activity data into durable summary tables just before each rotation for trend visibility beyond the ring's window. Snapshot tables carry their own long-term retention via daily partition drop.
 
 ## Key features
 
 - **Continuous background sampling** via pg_cron -- no external agents or sidecars
-- **Ring buffers** (UNLOGGED) for real-time wait events, active sessions, and lock contention -- TRUNCATE-rotated on a fixed schedule (default 2h), no downstream archive or aggregate tier
+- **Ring buffers** (UNLOGGED) for real-time wait events, active sessions, and lock contention -- TRUNCATE-rotated on a fixed schedule (default 2h), rolling up into durable wait/lock/activity rollup tables just before each rotation
 - **Durable snapshots** every minute: WAL, checkpoints, I/O, tables, indexes, statements, replication, configuration
 - **xmin horizon attribution**: captures who is pinning the xmin horizon (long-running txns, stale replication slots, hot-standby-feedback, prepared xacts) so wraparound forensics isn't reduced to live-querying four catalogs after the offender has disconnected
 - **Partition-based retention** for snapshot tables (default 30 days), enforced via partition drop rather than DELETE
@@ -70,6 +70,26 @@ SELECT * FROM pgfr_record.deltas;
 | `pgfr_record.recent_replication`         | Replication status               |
 | `pgfr_record.recent_vacuum_progress`     | Vacuum operations in progress    |
 | `pgfr_record.archiver_status`            | WAL archiving status             |
+
+## Ring rollups
+
+Just before `rotate_ring()` truncates a ring buffer slot, that slot's wait/lock/activity
+data is rolled up into three durable tables for trend visibility beyond the ring's 2h
+window -- no separate cron job, no persisted flush watermark, just an in-place rollup at
+the exact moment the data would otherwise be destroyed.
+
+- **`wait_event_rollups_archive_v2`**: one row per (backend_type, wait_event_type,
+  wait_event) per rotation window -- sample counts, waiter counts, percentage of samples.
+- **`lock_rollups_archive_v2`**: one row per (lock_type, locked relation) per rotation
+  window -- occurrence counts and blocked-duration stats.
+- **`activity_rollups_archive_v2`**: one row per (backend_type, state, duration_bucket)
+  per rotation window -- how long sessions had been running their current query when
+  sampled, bucketed rather than grouped by raw query text (that's what
+  `pgfr_record.statement_snapshots_v2`'s real `queryid`-based stats are for).
+
+All three are daily RANGE-partitioned by `sample_ts` and named `*_archive_v2` so they
+fall under `_partition_inventory()`'s existing archive-tier retention
+(`retention_archive_days`, default 7 days) with no separate config key.
 
 ## Key functions
 
