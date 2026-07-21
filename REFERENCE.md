@@ -86,6 +86,7 @@ The legacy `ring_buffer_health()`, `rebuild_ring_buffers()`, and
 | `pgfr_analyze.performance_report(start timestamptz, end timestamptz)` | `record` | Performance-focused report |
 | `pgfr_analyze.anomaly_report(start timestamptz, end timestamptz)` | `record` | Anomaly analysis: checkpoints, buffer pressure, temp spills, locks, XID + MultiXID wraparound risk, xmin horizon stalls (data + catalog, four severity tiers; cause precedes wraparound symptom) |
 | `pgfr_analyze.check_alerts()` | `record` | Check active alert conditions |
+| `pgfr_analyze.consumption_trend_report(datname text default current_database())` | `text` | Specific-consumption drift report against the database's own baseline: both the 28-day/daily and 84-day/weekly windows, per basket metric |
 
 ### Forensics
 
@@ -152,12 +153,18 @@ The legacy `ring_buffer_health()`, `rebuild_ring_buffers()`, and
 | `pgfr_record.recent_replication` | Snapshots | Replication status: lag, LSN positions |
 | `pgfr_record.recent_vacuum_progress` | Snapshots | Vacuum operations in progress with % scanned/vacuumed |
 | `pgfr_record.archiver_status` | Snapshots | WAL archiver status with delta calculations |
+| `pgfr_record.consumption_deltas` | `consumption_snapshots_v2` | Reset-guarded per-tick component deltas backing `consumption_flows` and the daily rollup |
+| `pgfr_record.consumption_flows` | `consumption_deltas` | Live per-tick flow rates and efficiency ratios (reset-guarded) |
+| `pgfr_record.consumption_daily_flows` | `consumption_daily_rollups` | Daily-grain ratios reconstructed from summed components (Σnum/Σden, never averaged from daily ratios) |
+| `pgfr_record.consumption_weekly_flows` | `consumption_daily_rollups` | Weekly-grain ratios, rolling 7-day buckets counting back from `current_date`, one tier up from the daily flows |
 
 ### pgfr_analyze
 
 | View | Source | Description |
 |------|--------|-------------|
 | `pgfr_analyze.capacity_dashboard` | Snapshots | Resource utilization overview: connections, disk, WAL, transactions |
+| `pgfr_analyze.consumption_metric_series` | `consumption_daily_flows` | Long-format `(rollup_date, datname, metric_name, value)` unpivot of the 8 basket metrics |
+| `pgfr_analyze.consumption_weekly_metric_series` | `consumption_weekly_flows` | Long-format `(week_end_date, datname, metric_name, value)` unpivot, weekly grain |
 
 ## Tables
 
@@ -214,6 +221,48 @@ Decode `data` via `pgfr_record.wait_event_map` to get `(state, type, event)` per
 The v2 ring drops the legacy per-row `usename`/`app_name`/`query_preview` for
 lock samples — only `pid` and lookup ids are stored. Use `pgfr_analyze.recent_locks_current()`
 for a column-compatible reader (lost columns return NULL).
+
+### Ring rollups (RANGE-partitioned by `sample_ts`, archive-tier retention)
+
+Durable, bounded-size summaries of ring buffer data beyond the ring's 2h window, written by `_flush_ring_slot_to_rollups()` from `rotate_ring()` right before it TRUNCATEs the slot being rotated out -- no separate cron job, no persisted flush watermark. The `_archive_v2` name gives these `retention_archive_days`-tier retention from `_partition_inventory()` (default 7 days) with no new shared infrastructure; despite the name, these are bounded aggregates, not full-resolution archives.
+
+**`pgfr_record.wait_event_rollups_archive_v2`** -- one row per `(backend_type, wait_event_type, wait_event)` per rotation window
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `sample_ts` | int4 | Window end, seconds since `epoch()`; RANGE partition key |
+| `start_time` / `end_time` | timestamptz | Rotation window bounds |
+| `backend_type` | text | Sourced from `wait_event_map.state` |
+| `wait_event_type` / `wait_event` | text | Wait event category and name |
+| `sample_count` | integer | Distinct samples this wait group appeared in |
+| `total_waiters` / `avg_waiters` / `max_waiters` | bigint / numeric / integer | Waiter count stats over the window |
+| `pct_of_samples` | numeric | Share of the window's total samples |
+
+**`pgfr_record.lock_rollups_archive_v2`** -- one row per `(lock_type, locked_relation_oid)` per rotation window
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `sample_ts` | int4 | Window end, seconds since `epoch()`; RANGE partition key |
+| `start_time` / `end_time` | timestamptz | Rotation window bounds |
+| `lock_type` | text | Decoded via `lock_type_map` |
+| `locked_relation_oid` | oid | OID of the locked relation |
+| `occurrence_count` | integer | Samples this pair appeared in |
+| `max_duration` / `avg_duration` | interval | Blocked-duration stats over the window |
+
+No `blocked_user`/`blocking_user`/`sample_query` columns: the v2 ring's `lock_samples` stores pids and lookup ids, not usernames or query text.
+
+**`pgfr_record.activity_rollups_archive_v2`** -- one row per `(backend_type, state, duration_bucket)` per rotation window
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `sample_ts` | int4 | Window end, seconds since `epoch()`; RANGE partition key |
+| `start_time` / `end_time` | timestamptz | Rotation window bounds |
+| `backend_type` / `state` | text | Backend type and state |
+| `duration_bucket` | text | `<1s` / `1s-10s` / `10s-60s` / `1m-10m` / `10m+`, how long the session had been running its current query at sample time |
+| `occurrence_count` | integer | Samples in this bucket |
+| `max_duration` / `avg_duration` | interval | Running-time stats over the window |
+
+Grouped by concurrency/duration profile rather than raw `query_preview` text (unbounded cardinality, and redundant with `statement_snapshots_v2`'s queryid-based stats).
 
 ### Snapshots (durable, 30-day default retention)
 
@@ -417,6 +466,81 @@ for a column-compatible reader (lost columns return NULL).
 | `index_vacuum_count` | bigint | Index vacuum passes |
 | `max_dead_tuples` | bigint | Max dead tuples per pass |
 | `num_dead_tuples` | bigint | Current dead tuples found |
+
+### Consumption ledger
+
+**`pgfr_record.consumption_snapshots_v2`** -- global block/WAL/tuple flow ledger, daily RANGE-partitioned by `sample_ts`, one row per `snapshot()` tick. No FK (`snapshot_id` is a logical reference to `snapshots_v2`). Primary-only -- no rows are written while `pg_is_in_recovery()`.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `snapshot_id` | bigint | Logical reference to `snapshots_v2.snapshot_id` (no FK) |
+| `sample_ts` | int4 | Seconds since `epoch()`; RANGE partition key |
+| `captured_at` | timestamptz | Capture timestamp |
+| `pg_version` | int | PostgreSQL major version |
+| `datname` | text | Scope label for the per-database lanes below |
+| `wal_lsn` | pg_lsn | `pg_current_wal_lsn()` -- ledger of record, valid across stats resets |
+| `tup_returned` / `tup_fetched` / `tup_inserted` / `tup_updated` / `tup_deleted` | bigint | Cumulative tuple flow (`pg_stat_database`, per-database) |
+| `xact_commit` / `xact_rollback` | bigint | Cumulative transactions (per-database) |
+| `blks_hit` / `blks_read` | bigint | Cumulative block demand (per-database) |
+| `blk_read_time_ms` / `blk_write_time_ms` | float8 | Cumulative block I/O time; 0 (not NULL) when `track_io_timing` is off |
+| `temp_files` / `temp_bytes` | bigint | Cumulative temp file spill (per-database) |
+| `wal_records` / `wal_fpi` / `wal_buffers_full` | bigint | WAL decomposition (`pg_stat_wal`, cluster-wide, advisory vs. `wal_lsn`) |
+| `wal_bytes` | numeric | Advisory WAL byte decomposition (cluster-wide) |
+| `wal_stats_reset` | timestamptz | Reset sentinel for the `wal_*` lane |
+| `io_reads_client` / `io_writes_client` / `io_extends_client` / `io_fsyncs_client` | bigint | Client-backend I/O (`pg_stat_io`, object=relation, PG16+) |
+| `io_reads_autovacuum` / `io_writes_autovacuum` | bigint | Autovacuum-worker I/O |
+| `io_writes_checkpointer` / `io_fsyncs_checkpointer` | bigint | Checkpointer I/O |
+| `io_writes_bgwriter` | bigint | Background writer I/O |
+| `io_reads_total` / `io_writes_total` / `io_extends_total` | bigint | Cluster-wide totals across backend types; `io_reads_total` NULL on PG15 (no `pg_stat_io`) |
+| `ckpt_num_timed` / `ckpt_num_requested` / `ckpt_buffers_written` | bigint | Checkpoint counters (`pg_stat_checkpointer` PG17+, `pg_stat_bgwriter` PG15-16) |
+| `bgw_buffers_clean` / `bgw_maxwritten_clean` / `bgw_buffers_alloc` | bigint | Background writer counters |
+| `ckpt_stats_reset` | timestamptz | Reset sentinel for the checkpointer/bgwriter lane |
+| `db_stats_reset` | timestamptz | Reset sentinel for the per-database lane |
+| `db_size_bytes` | bigint | `pg_database_size()` at capture time |
+| `recorder_blks_hit` / `recorder_blks_read` | bigint | pgfr_record's own block footprint (self-accounting) |
+
+`io_reads_total` is a request issued to the OS, not confirmed disk I/O -- the OS page cache may satisfy it. See `consumption_flows.os_read_blocks_per_s` / `os_write_blocks_per_s`.
+
+**`pgfr_record.consumption_daily_rollups`** -- durable daily-grain rollup, one row per calendar day per `datname`, populated by `_rollup_consumption_daily()` from the daily `pgfr_cleanup` cron job (no separate job). Not partitioned, no retention -- tiny by construction (a decade is ~3,650 rows), meant to be kept indefinitely. Stores summed components, not ratios (see `consumption_daily_flows`).
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `rollup_date` | date | Calendar day (PK, with `datname`) |
+| `datname` | text | Database name (PK) |
+| `total_seconds` | int | Sum of valid tick intervals; use as the daily "_per_s" denominator instead of assuming 86400 |
+| `valid_tick_count` | int | Count of ticks that contributed to this row |
+| `blks_hit_sum` / `blks_read_sum` | bigint | Summed block demand |
+| `tup_returned_sum` / `tup_mutated_sum` | bigint | Summed tuple flow (`tup_mutated` = inserted + updated + deleted) |
+| `xact_commit_sum` / `xact_rollback_sum` | bigint | Summed transactions |
+| `temp_bytes_sum` | bigint | Summed temp spill |
+| `recorder_blks_hit_sum` / `recorder_blks_read_sum` | bigint | Summed self-accounting block footprint |
+| `wal_bytes_sum` | numeric | Summed WAL bytes (LSN-diff based, ledger of record) |
+| `wal_fpi_sum` | bigint | Summed WAL full-page images |
+| `wal_bytes_advisory_sum` | numeric | Summed advisory WAL byte decomposition |
+| `ckpt_num_timed_sum` / `ckpt_num_requested_sum` | bigint | Summed checkpoint counts |
+| `io_writes_autovacuum_sum` / `io_writes_total_sum` | bigint | Summed write I/O (PG16+; NULL on PG15) |
+| `db_size_bytes` | bigint | Day's last-observed database size (gauge, not a sum) |
+
+### Consumption trends (pgfr_analyze)
+
+**`pgfr_analyze.consumption_trends`** -- persisted trend assessments for the consumption ledger's 8-metric basket, one row per `(as_of_date, datname, metric_name, window_days)`, upserted on every refresh so history accumulates across days rather than being overwritten. Not partitioned, no retention -- tiny by construction, meant to be kept indefinitely.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `as_of_date` | date | Date this assessment was computed (PK) |
+| `datname` | text | Database name (PK) |
+| `metric_name` | text | One of the 8 basket metrics (PK): `blocks_per_row_returned`, `wal_bytes_per_row_mutated`, `temp_bytes_per_xact`, `fpi_fraction`, `ckpt_requested_fraction`, `rollback_fraction`, `autovacuum_write_share`, `cache_hit_fraction` |
+| `window_days` | integer | `28` (daily engine) or `84` (weekly engine) (PK) |
+| `basket_version` | integer | Metric-basket schema version |
+| `sample_count` | integer | Count of non-NULL periods (days or weeks) in the window |
+| `baseline_start` / `baseline_end` | date | The window's fixed date range |
+| `slope_pct_per_30d` | numeric | Theil-Sen slope (median of pairwise slopes), normalized to %/30d relative to the window's median value; NULL when `insufficient_data` |
+| `classification` | text | `insufficient_data` / `stable` / `drift` / `step` / `composition` -- see below |
+| `changepoint_date` | date | Set only when `classification = 'step'` |
+| `composition_change` | boolean | Whether workload-shape indicators (`read_write_tuple_ratio`, `xact_per_s`, `rows_returned_per_xact`, `rows_mutated_per_xact`, `db_size_bytes`) shifted beyond `consumption_trend_shape_guard_pct` between the window's two fixed halves |
+| `computed_at` | timestamptz | Timestamp of this row's (re)computation |
+
+`classification` values: `stable` (no line or step fits meaningfully better than noise), `drift` (a gradual change -- a line fits at least as well as any step), `step` (a genuine level shift -- a two-level step fits meaningfully better than a line, by `consumption_trend_step_r2_margin`), `composition` (a step or drift was detected, but the workload shape also moved -- no fitness inference is safe), `insufficient_data` (fewer than `consumption_trend_min_days` / `consumption_trend_min_weeks` periods collected). Distinguishing `step` from `drift` compares model fit (R²), not shift magnitude -- a clean step and a linear ramp can produce the same shift-magnitude-to-variability ratio.
 
 ### Internal
 
@@ -671,6 +795,18 @@ order by captured_at;
 | `capacity_planning_enabled` | `true` | Enable capacity planning |
 | `capacity_thresholds_warning_pct` | `60` | Capacity warning threshold (%) |
 | `capacity_thresholds_critical_pct` | `80` | Capacity critical threshold (%) |
+
+### Consumption trend engine
+
+Thresholds for `pgfr_analyze.consumption_trend_report()` / `_refresh_consumption_trends()` / `_refresh_consumption_trends_weekly()` -- classifying each basket metric's trend against the database's own baseline. `consumption_trend_min_r2`, `consumption_trend_step_r2_margin`, and `consumption_trend_shape_guard_pct` are generic statistical properties shared by both the 28-day/daily and 84-day/weekly engines; `consumption_trend_min_days` and `consumption_trend_min_weeks` are each engine's own minimum-data gate.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `consumption_trend_min_days` | `14` | Minimum days of data before the 28-day/daily engine classifies past `insufficient_data` |
+| `consumption_trend_min_weeks` | `8` | Minimum weeks of data before the 84-day/weekly engine classifies past `insufficient_data` |
+| `consumption_trend_min_r2` | `0.3` | Minimum R² for a line or step model to count as a real fit rather than noise (below this: `stable`) |
+| `consumption_trend_step_r2_margin` | `0.15` | Margin by which a step model's R² must beat a line's R² to classify `step` instead of `drift` |
+| `consumption_trend_shape_guard_pct` | `25` | Percent shift in a workload-shape indicator, between a window's two fixed halves, that triggers `composition` |
 
 ## Configuration profiles
 
