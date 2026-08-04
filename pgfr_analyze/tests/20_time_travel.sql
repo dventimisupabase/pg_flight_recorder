@@ -6,7 +6,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(45);
+SELECT plan(46);
 
 -- =============================================================================
 -- 1. FUNCTION EXISTENCE (3 tests)
@@ -413,7 +413,8 @@ SELECT ok(
         WHERE event_type NOT IN (
             'checkpoint', 'wal_archived', 'archive_failed',
             'query_started', 'transaction_started', 'connection_opened',
-            'lock_contention', 'wait_spike', 'snapshot'
+            'lock_contention', 'wait_spike', 'snapshot',
+            'coverage'  -- Issue #102: the window's coverage disclosure event
         )
     ),
     'incident_timeline event_type should be one of the expected values'
@@ -433,6 +434,16 @@ SELECT ok(
 -- =============================================================================
 -- CLEANUP
 -- =============================================================================
+
+-- Issue #102: the reconstruction states its ring coverage in the notes
+SELECT ok(
+    EXISTS (
+        SELECT 1 FROM pgfr_analyze.what_happened_at(now()) w,
+             unnest(w.data_quality_notes) AS note
+        WHERE note ILIKE '%coverage%'
+    ),
+    'what_happened_at states ring sample coverage in data_quality_notes'
+);
 
 SELECT * FROM finish();
 ROLLBACK;

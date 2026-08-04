@@ -87,9 +87,9 @@ SELECT lives_ok(
 SELECT lives_ok(
     $$SELECT queryid, query_fingerprint, severity, baseline_avg_ms, current_avg_ms,
              change_pct, baseline_avg_buffers, current_avg_buffers, buffer_change_pct,
-             detection_metric, probable_causes
+             detection_metric, probable_causes, z_score, baseline_samples, current_samples
       FROM pgfr_analyze.detect_regressions()$$,
-    'detect_regressions() should return expected columns'
+    'detect_regressions() should return expected columns (including the #102 effect-size and sample-count disclosures)'
 );
 
 -- Test _diagnose_regression_causes returns text array

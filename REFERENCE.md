@@ -69,7 +69,7 @@ The legacy `ring_buffer_health()`, `rebuild_ring_buffers()`, and
 | Function | Returns | Description |
 |----------|---------|-------------|
 | `pgfr_analyze.compare(start timestamptz, end timestamptz)` | `record` | Compare two snapshots side-by-side with deltas |
-| `pgfr_analyze.wait_summary(start timestamptz, end timestamptz)` | `record` | Wait event breakdown over a time range |
+| `pgfr_analyze.wait_summary(start timestamptz, end timestamptz)` | `record` | Wait event breakdown over a time range; `window_samples` carries the denominator of `pct_of_samples` |
 | `pgfr_analyze.statement_compare(start timestamptz, end timestamptz, min_delta_ms float8, limit int)` | `record` | Query performance changes between two points |
 | `pgfr_analyze.activity_at(ts timestamptz)` | `record` | Activity snapshot closest to a timestamp |
 | `pgfr_analyze.recent_waits_current()` | `record` | Current wait event data from the v2 ring (decoded via wait_event_map) |
@@ -103,8 +103,8 @@ The legacy `ring_buffer_health()`, `rebuild_ring_buffers()`, and
 
 | Function | Returns | Description |
 |----------|---------|-------------|
-| `pgfr_analyze.detect_query_storms(interval, threshold numeric)` | `record` | Find queries with abnormal execution counts. Classifies: RETRY_STORM, CACHE_MISS, SPIKE, NORMAL. Severity: LOW, MEDIUM, HIGH, CRITICAL |
-| `pgfr_analyze.detect_regressions(interval, threshold numeric)` | `record` | Find performance regressions via buffer metrics or timing. Severity: LOW (<200%), MEDIUM (<500%), HIGH (<1000%), CRITICAL (>1000%) |
+| `pgfr_analyze.detect_query_storms(interval, threshold numeric)` | `record` | Find queries with abnormal execution counts. Classifies: RETRY_STORM, CACHE_MISS, SPIKE, NORMAL. Severity: LOW, MEDIUM, HIGH, CRITICAL. The multiplier compares per-tick rates on both sides and travels with `recent_samples`/`baseline_samples` |
+| `pgfr_analyze.detect_regressions(interval, threshold numeric)` | `record` | Find performance regressions via buffer metrics or timing. Severity: LOW (<200%), MEDIUM (<500%), HIGH (<1000%), CRITICAL (>1000%). Returns the `z_score` effect size plus `baseline_samples`/`current_samples` |
 | `pgfr_analyze.table_hotspots(start timestamptz, end timestamptz)` | `record` | Tables with highest activity (scans, modifications, dead tuples) |
 | `pgfr_analyze.table_compare(start timestamptz, end timestamptz, top_n int)` | `record` | Table stats changes over a time range |
 | `pgfr_analyze.index_efficiency(start timestamptz, end timestamptz, top_n int)` | `record` | Index usage analysis: scan counts, tuple fetches, sizes |

@@ -112,6 +112,8 @@ DECLARE
     v_cmp RECORD;
     v_wait_pct NUMERIC;
     v_lock_count INTEGER;
+    v_lock_ticks BIGINT;
+    v_window_ticks BIGINT;
     v_max_block_duration INTERVAL;
     v_datfrozenxid_age INTEGER;
     v_datminmxid_age INTEGER;
@@ -208,12 +210,21 @@ BEGIN
         recommendation := 'Increase work_mem for affected sessions or globally';
         RETURN NEXT;
     END IF;
-    -- Lock contention from v2 ring (legacy fallback retired).
+    -- Lock contention from v2 ring (legacy fallback retired). The tick
+    -- counts carry the Mode A denominator (Issue #102): blocked sessions are
+    -- point samples, so the claim is time-in-state over k of n sampled
+    -- ticks, never an event count.
     SELECT count(DISTINCT ls.blocked_pid),
-           max(ls.blocked_duration_s * interval '1 second')
-      INTO v_lock_count, v_max_block_duration
+           max(ls.blocked_duration_s * interval '1 second'),
+           count(DISTINCT ls.sample_ts)
+      INTO v_lock_count, v_max_block_duration, v_lock_ticks
       FROM pgfr_record.lock_samples ls
      WHERE pgfr_record.epoch() + ls.sample_ts * interval '1 second'
+           BETWEEN p_start_time AND p_end_time;
+    SELECT count(DISTINCT ws.sample_ts)
+      INTO v_window_ticks
+      FROM pgfr_record.wait_samples ws
+     WHERE pgfr_record.epoch() + ws.sample_ts * interval '1 second'
            BETWEEN p_start_time AND p_end_time;
     IF v_lock_count > 0 THEN
         anomaly_type := 'LOCK_CONTENTION';
@@ -223,8 +234,8 @@ BEGIN
             ELSE 'low'
         END;
         description := 'Lock contention detected';
-        metric_value := format('%s blocked sessions, max duration: %s',
-                              v_lock_count, v_max_block_duration);
+        metric_value := format('%s blocked sessions observed in %s of %s sampled ticks, max duration: %s (as of sample instants)',
+                              v_lock_count, v_lock_ticks, v_window_ticks, v_max_block_duration);
         threshold := 'Any lock contention';
         recommendation := 'Check recent_locks for blocking queries; consider shorter transactions';
         RETURN NEXT;
@@ -680,7 +691,8 @@ BEGIN
              ELSE 'medium' END;
         description := format('Replica %s: lag growing (+%ss), now %ss behind',
                v_row.application_name, round(v_row.lag_growth::numeric), round(v_row.current_lag::numeric));
-        metric_value := format('+%ss growth, %ss current', round(v_row.lag_growth::numeric), round(v_row.current_lag::numeric));
+        metric_value := format('+%ss growth, %ss current (over %s snapshots)',
+                              round(v_row.lag_growth::numeric), round(v_row.current_lag::numeric), v_row.samples);
         threshold := '>60s growth and >30s current lag';
         recommendation := 'Check replica capacity, network, and long-running queries on primary.';
         RETURN NEXT;
@@ -786,13 +798,15 @@ BEGIN
     RETURN NEXT;
     section := 'WAIT EVENTS';
     FOR v_top_wait IN
-        SELECT wait_event_type || ':' || wait_event AS we, total_waiters, pct_of_samples
+        SELECT wait_event_type || ':' || wait_event AS we, total_waiters, pct_of_samples,
+               sample_count, window_samples
         FROM pgfr_analyze.wait_summary(p_start_time, p_end_time)
         LIMIT 5
     LOOP
         metric := v_top_wait.we;
-        value := format('%s total waiters (%s%% of samples)',
-                       v_top_wait.total_waiters, v_top_wait.pct_of_samples);
+        value := format('%s total waiters, seen in %s of %s sampled ticks (%s%%)',
+                       v_top_wait.total_waiters, v_top_wait.sample_count,
+                       v_top_wait.window_samples, v_top_wait.pct_of_samples);
         interpretation := CASE
             WHEN v_top_wait.we LIKE 'Lock:%' THEN 'Lock contention'
             WHEN v_top_wait.we LIKE 'LWLock:Buffer%' THEN 'Buffer contention'

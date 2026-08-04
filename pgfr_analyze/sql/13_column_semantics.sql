@@ -123,3 +123,30 @@ Output columns:
   units: [dimension] [text] Units of measure as declared in the annotation (bytes, blocks/s, percent, count, text, ...).
   interval_basis: [dimension] [text] For rates and levels: interval-mean or instantaneous; NULL when not applicable.
   notes: [dimension] [text] Prose remainder of the annotation, including denominator disclosure for proportions.';
+
+
+-- Renderer helper (Issue #102): unit and interval-basis string for a column,
+-- sourced from the registry so report prose cannot drift from the schema
+-- annotations. p_fallback covers the dbdev channel, where COMMENT ON is
+-- stripped and the registry is empty (see the header caveat above).
+create or replace function pgfr_analyze._interval_basis(
+    p_relation text,
+    p_column   text,
+    p_fallback text
+)
+returns text
+language sql
+stable
+as $$
+    select coalesce(
+        (select cs.units
+                || case when cs.interval_basis is not null
+                        then ', ' || cs.interval_basis else '' end
+         from pgfr_analyze.column_semantics() cs
+         where cs.relation = p_relation and cs.column_name = p_column
+         limit 1),
+        p_fallback)
+$$;
+
+comment on function pgfr_analyze._interval_basis(text, text, text) is
+'Units and interval basis of a column as a display string (e.g. count/s, interval-mean), read from column_semantics() with a literal fallback for comment-stripped installs. Keeps report prose in sync with the registry.';

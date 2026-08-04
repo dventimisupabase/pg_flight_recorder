@@ -275,6 +275,7 @@ DECLARE
     v_gap_count INTEGER;
     v_gap_list TEXT;
     v_mnar BOOLEAN;
+    v_wait_denominator BIGINT;
 BEGIN
     -- Get schema version from config
     SELECT value INTO v_version FROM pgfr_record.config WHERE key = 'schema_version';
@@ -366,10 +367,17 @@ BEGIN
     -- ==========================================================================
     v_result := v_result || '## Wait Event Summary' || E'\n\n';
 
-    SELECT count(*) INTO v_count FROM pgfr_analyze.wait_summary(p_start_time, p_end_time);
+    SELECT count(*), max(window_samples) INTO v_count, v_wait_denominator
+    FROM pgfr_analyze.wait_summary(p_start_time, p_end_time);
     IF v_count = 0 THEN
         v_result := v_result || '(no wait events recorded)' || E'\n\n';
     ELSE
+        -- The denominator travels with the estimates (Issue #102): Samples
+        -- and % below are out of this many sampled ticks, and sample counts
+        -- estimate time-in-state, never event counts (see STATISTICS.md).
+        v_result := v_result || format(
+            'Denominator: %s sampled ticks in window. Sample counts estimate time-in-state, never event counts (see STATISTICS.md).',
+            v_wait_denominator) || E'\n\n';
         v_result := v_result || '| Backend | Event Type | Event | Samples | Avg Waiters | Max | % |' || E'\n';
         v_result := v_result || '|---------|------------|-------|---------|-------------|-----|---|' || E'\n';
         FOR v_row IN SELECT * FROM pgfr_analyze.wait_summary(p_start_time, p_end_time) LOOP

@@ -645,7 +645,8 @@ returns table (
     total_waiters   bigint,
     avg_waiters     numeric,
     max_waiters     integer,
-    pct_of_samples  numeric
+    pct_of_samples  numeric,
+    window_samples  bigint   -- the denominator of pct_of_samples (Issue #102)
 )
 language sql stable as $$
     with bounds as (
@@ -685,7 +686,8 @@ language sql stable as $$
         g.total_waiters,
         g.avg_waiters,
         g.max_waiters::integer,
-        round(100.0 * g.sample_count / nullif(t.cnt, 0), 1) as pct_of_samples
+        round(100.0 * g.sample_count / nullif(t.cnt, 0), 1) as pct_of_samples,
+        t.cnt as window_samples
     from grouped g
     cross join total_samples t
     join pgfr_record.wait_event_map wem on wem.id = g.wait_id
@@ -705,5 +707,6 @@ Output columns:
   total_waiters: [point-sample] [count] Sum of per-tick waiter counts over the ticks where this wait appeared; a duration-weighted volume measure across point samples, not a count of distinct sessions or wait events.
   avg_waiters: [point-sample] [count] Mean waiters per tick over the ticks where this wait was present (total_waiters / sample_count), rounded to 2 decimals; ticks where the wait was absent are not in the denominator.
   max_waiters: [point-sample] [count] Largest single-tick waiter count observed for this wait in the window.
-  pct_of_samples: [point-sample] [percent] 100 times the distinct ticks where this wait appeared (the numerator, exposed as sample_count) over the distinct ticks in the window that recorded any wait (the denominator); a binomial-error time-in-state share (0 to 100), never event frequency.';
+  pct_of_samples: [point-sample] [percent] 100 times the distinct ticks where this wait appeared (the numerator, exposed as sample_count) over the distinct ticks in the window that recorded any wait (the denominator, exposed as window_samples); a binomial-error time-in-state share (0 to 100), never event frequency.
+  window_samples: [point-sample] [count] The denominator of pct_of_samples: distinct sampling ticks in the window that recorded any wait data. No proportion travels without its denominator (STATISTICS.md); the binomial standard error of pct_of_samples/100 is sqrt(p * (1-p) / window_samples).';
 
