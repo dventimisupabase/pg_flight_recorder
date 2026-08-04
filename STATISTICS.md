@@ -105,11 +105,30 @@ The recorder keeps these events as first-class data in `pgfr_record.discontinuit
 
 ### 4. Detection limits are stated in advance
 
-The instrument's blind spots are computable before any data arrives, and stating them converts "the report did not show it" into "no detection above threshold X":
+The instrument's blind spots are computable before any data arrives, and stating them converts "the report did not show it" into "no detection above threshold X". The resolution tables below are computed for the operative cadence, which is a fixed 60 seconds for both cron jobs (hardcoded `* * * * *`; the `sample_interval_seconds` config key does not change it).
 
-- A single occurrence of a condition needs duration of about `T/2` (30 seconds at the 60 s cadence) for a 50% chance of appearing in at least one sample; about `2.3 * T` worth of cumulative occurrence time in a window gives roughly 90%.
-- A condition consuming a steady fraction `p` of the window needs `n` large enough that `p` clears a few standard errors: at `p = 0.05` over one hour (`n = 60`), the standard error is about `0.028`, so 5% presence is barely two SEs from zero; over 24 hours (`n = 1440`) the same presence is unmistakable.
-- Trend and changepoint layers have a minimum detectable effect fixed by their configured sensitivity; the layer should state it rather than let silence imply stability. This is tracked, together with the self-overhead budget, in [issue #103](https://github.com/dventimisupabase/pg_flight_recorder/issues/103).
+#### Mode A resolution: event duration to detection probability
+
+Per occurrence, `P(detect) = min(d/T, 1)` for duration `d` at cadence `T = 60 s`. For `m` occurrences, `P(at least one) = 1 - (1 - d/T)^m`; for a condition active a steady fraction `p` of a window of `n` ticks, `P = 1 - (1 - p)^n`.
+
+| What is happening | Detection probability at 60 s cadence |
+|---|---|
+| One 6-second lock wait | about 10% |
+| One 30-second lock wait | 50% (the coin-flip point is `d = T/2`) |
+| One 57-second lock wait | about 95% |
+| Ten 6-second lock waits in the window | about 65% (`1 - 0.9^10`) |
+| A condition active 5% of the time, over one hour (`n = 60`) | about 95% (`1 - 0.95^60`) |
+| A condition active 5% of the time, over 24 hours (`n = 1440`) | indistinguishable from certain |
+
+So the direct answer to "what is the shortest lock storm this will reliably see?": a single continuous wait needs about 30 seconds for even odds and about 57 seconds for 95%; a recurring storm needs to be active about 5% of the time for an hour to be seen with 95% probability. Anything shorter and rarer is below the instrument's resolution, and its absence from a report means nothing.
+
+Estimation precision after detection follows the binomial error: a condition seen in `k` of `n` ticks has `p_hat = k/n` with standard error `sqrt(p_hat (1 - p_hat) / n)`; at `p = 0.05` over one hour the SE is about `0.028`, so 5% presence is barely two SEs from zero, while over 24 hours the same presence is measured to about a tenth of its value.
+
+#### Trend-layer resolution: minimum detectable movement
+
+The consumption trend engines are fit-gated, not magnitude-gated, and their sensitivity is fixed by configuration: `consumption_trend_min_days = 14` (daily) and `consumption_trend_min_weeks = 8` (weekly) before anything is classified at all; `consumption_trend_min_r2 = 0.3` before any movement is flagged; a step must beat the best line by an R-squared margin of `consumption_trend_step_r2_margin = 0.15`; each step segment needs at least 3 points; and the composition guard vetoes attribution when the workload-shape indicators move more than `consumption_trend_shape_guard_pct = 25%` between the window's fixed halves. Slopes are Theil-Sen medians normalized to percent per 30 days.
+
+The `R^2 >= 0.3` gate translates to a magnitude: a linear drift is flaggable once its total movement over the window reaches about `2.2` times the point-to-point noise standard deviation (from `R^2 = signal/(signal + noise)`, a clean ramp over `n` evenly spaced points needs total drift `(n-1) * sigma * sqrt((0.3/0.7) * 12/(n^2-1))`, which is about `2.2 sigma` at both `n = 28` daily and `n = 12` weekly points). Movements smaller than that classify `stable`, and `stable` therefore means "no movement above about two noise standard deviations", not "nothing changed". Recorded restarts and stats resets enter as known segment boundaries (`discontinuity` classification), never as discovered changepoints.
 
 ## Worked example: reading a wait report
 
@@ -119,6 +138,17 @@ The instrument's blind spots are computable before any data arrives, and stating
 - **Uncertainty:** `p_hat = 3/60 = 0.05` with binomial standard error `sqrt(0.05 * 0.95 / 60)`, about `0.028`. The 95% Wilson interval is roughly `[0.017, 0.137]`, so the true time-in-state is plausibly anywhere from about 1 minute to about 8 minutes of the hour. Three samples is a weak signal; treat it as "lock waits were present, roughly minutes not seconds," not as a precise figure.
 - **What you cannot conclude:** the number of distinct lock waits. Three samples is equally consistent with one 3-minute wait, three unrelated waits of a minute each, or dozens of shorter waits that mostly fell between ticks (each 6-second wait had only a 10% chance of being seen). Mode A estimates time, never frequency. If you need event counts, you need a different instrument (for example `log_lock_waits`), with its own observer costs.
 - **Before trusting it:** check coverage for the window. If several of the 60 expected ticks are missing, the gaps are more likely during the stress you care about (catalog item 4), and 3-of-57 over a gappy hour reads differently from 3-of-60 over a clean one.
+
+## The instrument's own cost
+
+Observer effect is part of the error model, and stating it is the strongest credibility signal available. The budget is self-measured and queryable at any time: `pgfr_analyze.self_overhead()` returns each figure with the exact method used to compute it, from the recorder's own tables, so the numbers below are re-derivable on any install rather than trusted from a benchmark.
+
+- **Collection time per tick.** Every run's wall time lands in `collection_stats.duration_ms`; `self_overhead()` reports the 24-hour average per collector. Hard ceilings are enforced by the cron jobs' statement timeouts: 500 ms for the ring sampler, 10 s for the snapshot. The circuit breaker turns a sustained budget overrun (average of the last 3 runs above `circuit_breaker_threshold_ms`, default 1000 ms) into skipped ticks rather than added load, so the cost is bounded under exactly the conditions where it would matter most.
+- **Buffer traffic.** `consumption_snapshots_v2.recorder_blks_hit`/`recorder_blks_read` isolate block traffic against the recorder's own schema, and `consumption_flows.recorder_overhead_fraction` reports it as a share of the database's total block demand each tick; `self_overhead()` reports the 24-hour average share.
+- **Its own queries.** The recorder's statements appear in `pg_stat_statements` like everyone else's; `self_overhead()` reports the pgfr-attributed share of total execution time since the last statistics reset. This share is part of the population the statement snapshots sample, and it is not filtered out: the instrument appears in its own reports.
+- **Storage.** Total on-disk footprint of both schemas, including indexes and TOAST. Retention settings bound it (ring rotation, `retention_snapshots_days`, `retention_archive_days`), so it converges instead of growing without limit; the exceptions with no retention (`consumption_trends`, `discontinuities`) are tiny by construction.
+
+The structural point: a fixed-cadence instrument costs the same at idle and under load. Exhaustive logging's cost scales with the workload and peaks exactly when the system can least afford it; the recorder's per-tick cost is constant, capped, and self-reported.
 
 ## Glossary
 
