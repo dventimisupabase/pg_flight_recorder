@@ -11,6 +11,7 @@
 -- Files:
 --   01_schema.sql            extension check, schema, search_path
 --   02_tables.sql            heap tables: snapshots, aggregates, archives, legacy-ring DROPs
+--   02b_discontinuities.sql  censoring-event ledger + _record_discontinuity, _detect_restart (Issue #101)
 --   03_functions_util.sql    helpers: _pg_version, epoch, _get_config, circuit breakers
 --   04a_functions_sample.sql wait/lock/activity ring samplers (old UPDATE pattern)
 --   04b_functions_snapshot.sql snapshot(), _collect_* collectors
@@ -25,6 +26,7 @@
 
 \ir sql/01_schema.sql
 \ir sql/02_tables.sql
+\ir sql/02b_discontinuities.sql
 \ir sql/03_functions_util.sql
 \ir sql/04a_functions_sample.sql
 \ir sql/04b_functions_snapshot.sql

@@ -160,6 +160,23 @@ begin
 
         if v_last_dealloc is not null and v_curr_dealloc > v_last_dealloc then
             v_dealloc_warning := true;
+            -- Discontinuity event (Issue #101): dealloc churn right-censors
+            -- the low-frequency query stratum. Promoted from the per-row
+            -- pgss_dealloc_warning flag to a queryable event, rate-limited to
+            -- one per hour so sustained saturation does not flood the ledger
+            -- (the per-row flag still marks every affected tick).
+            if not exists (
+                select 1 from pgfr_record.discontinuities d
+                where d.event_kind = 'pgss_eviction_pressure'
+                  and d.detected_at > now() - interval '1 hour'
+            ) then
+                perform pgfr_record._record_discontinuity(
+                    'pgss_eviction_pressure', 'pg_stat_statements',
+                    jsonb_build_object(
+                        'dealloc_previous', v_last_dealloc,
+                        'dealloc_current',  v_curr_dealloc,
+                        'evicted_since_last_tick', v_curr_dealloc - v_last_dealloc));
+            end if;
         end if;
         -- Store current dealloc for next tick comparison
         insert into pgfr_record.config (key, value, updated_at)
@@ -191,6 +208,19 @@ begin
                     set value = (coalesce(pgfr_record.config.value, '0')::bigint + 1)::text,
                         updated_at = EXCLUDED.updated_at;
                 return;
+            end if;
+            -- Discontinuity event (Issue #101): record the reset that forced
+            -- this rebuild. Only condition (b) is a pg_stat_statements reset;
+            -- condition (a), an empty last_state, is crash recovery of the
+            -- UNLOGGED side table (the restart event covers that) or a fresh
+            -- install, neither of which is a PGSS reset.
+            if v_orig_last_ts is not null then
+                perform pgfr_record._record_discontinuity(
+                    'pgss_reset', 'pg_stat_statements',
+                    jsonb_build_object(
+                        'stats_reset', v_pgss_reset,
+                        'last_state_through',
+                            pgfr_record.epoch() + v_orig_last_ts * interval '1 second'));
             end if;
             perform pgfr_record._rebuild_statement_last_state(v_sample_ts);
             -- After rebuild, re-read last_sample_ts for boundary check below

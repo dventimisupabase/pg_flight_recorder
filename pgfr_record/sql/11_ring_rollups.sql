@@ -231,6 +231,14 @@ begin
         from grouped g
         join pgfr_record.wait_event_map wem on wem.id = g.wait_id;
     exception when others then
+        -- Issue #101: this section's aggregate is lost when the slot is
+        -- truncated after rotation; record the censoring event.
+        perform pgfr_record._record_discontinuity(
+            'rollup_flush_failed', 'wait_event_rollups_archive_v2',
+            jsonb_build_object(
+                'slot', p_slot, 'error', sqlerrm,
+                'window_start', v_start_time, 'window_end', v_end_time,
+                'total_samples', v_total_samples));
         raise warning 'pgfr_record: wait_event_rollups_archive_v2 flush failed for slot %: %',
             p_slot, sqlerrm;
     end;
@@ -257,6 +265,14 @@ begin
         where ls.slot = p_slot
         group by ltm.lock_type, ls.locked_relation_oid;
     exception when others then
+        -- Issue #101: this section's aggregate is lost when the slot is
+        -- truncated after rotation; record the censoring event.
+        perform pgfr_record._record_discontinuity(
+            'rollup_flush_failed', 'lock_rollups_archive_v2',
+            jsonb_build_object(
+                'slot', p_slot, 'error', sqlerrm,
+                'window_start', v_start_time, 'window_end', v_end_time,
+                'total_samples', v_total_samples));
         raise warning 'pgfr_record: lock_rollups_archive_v2 flush failed for slot %: %',
             p_slot, sqlerrm;
     end;
@@ -301,6 +317,14 @@ begin
         from durations d
         group by d.backend_type, d.state, duration_bucket;
     exception when others then
+        -- Issue #101: this section's aggregate is lost when the slot is
+        -- truncated after rotation; record the censoring event.
+        perform pgfr_record._record_discontinuity(
+            'rollup_flush_failed', 'activity_rollups_archive_v2',
+            jsonb_build_object(
+                'slot', p_slot, 'error', sqlerrm,
+                'window_start', v_start_time, 'window_end', v_end_time,
+                'total_samples', v_total_samples));
         raise warning 'pgfr_record: activity_rollups_archive_v2 flush failed for slot %: %',
             p_slot, sqlerrm;
     end;

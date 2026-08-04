@@ -17,7 +17,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(15);
+SELECT plan(16);
 
 -- -----------------------------------------------------------------------------
 -- Fixtures
@@ -188,6 +188,43 @@ SELECT is(
         pgfr_record.epoch() + 600000 * interval '1 second',
         'retention_horizon'),
     'the 30 minutes before the oldest retained ring tick report retention_horizon');
+
+-- -----------------------------------------------------------------------------
+-- 4b. Recorded restart events drive gap attribution (Issue #101): W3 =
+--     [800400, 801000), ring ticks observed for minutes 0-3 and 8-9, a
+--     restart discontinuity recorded at minute 8. The unobserved run leading
+--     into it (minutes 4-7) attributes to restart.
+-- -----------------------------------------------------------------------------
+
+DO $$
+DECLARE
+    v_epoch timestamptz := pgfr_record.epoch();
+    v_wid   smallint;
+    v_i     integer;
+BEGIN
+    v_wid := pgfr_record._register_wait('active', '__pgfr_cov__', '__wait__');
+    FOR v_i IN 0..9 LOOP
+        IF v_i NOT IN (4, 5, 6, 7) THEN
+            INSERT INTO pgfr_record.wait_samples (sample_ts, datid, active_count, data, slot)
+            VALUES (800400 + v_i * 60 + 1, 0, 1, ARRAY[-v_wid, 1, 0], 0);
+        END IF;
+    END LOOP;
+    INSERT INTO pgfr_record.discontinuities (detected_at, event_kind, scope, evidence)
+    VALUES (v_epoch + (800400 + 8 * 60 + 1) * interval '1 second', 'restart', 'postmaster',
+            '{"previous_start": "coverage fixture"}'::jsonb);
+END $$;
+
+SELECT is(
+    (SELECT format('%s|%s|%s', gap_start, gap_end, attributed_reason)
+     FROM pgfr_analyze.coverage_gaps(
+        pgfr_record.epoch() + 800400 * interval '1 second',
+        pgfr_record.epoch() + 801000 * interval '1 second')
+     WHERE collector = 'sample'),
+    format('%s|%s|%s',
+        pgfr_record.epoch() + 800640 * interval '1 second',
+        pgfr_record.epoch() + 800880 * interval '1 second',
+        'restart'),
+    'the unobserved run leading into a recorded restart event attributes to restart');
 
 -- -----------------------------------------------------------------------------
 -- 5. report() carries the coverage header and qualifies gappy windows

@@ -99,7 +99,9 @@ Every windowed estimate should be readable alongside `observed_samples / expecte
 
 ### 3. Censoring is flagged, not smoothed
 
-Counter resets, `pg_stat_statements` evictions, restarts, and ring flush failures are censoring events. A delta that spans one is not a noisy measurement; it is not a measurement. The correct output is NULL with an attributed reason, never an interpolated value. First-class discontinuity events are tracked in [issue #101](https://github.com/dventimisupabase/pg_flight_recorder/issues/101).
+Counter resets, `pg_stat_statements` evictions, restarts, and ring flush failures are censoring events. A delta that spans one is not a noisy measurement; it is not a measurement. The correct output is NULL with an attributed reason, never an interpolated value.
+
+The recorder keeps these events as first-class data in `pgfr_record.discontinuities` (one row per detected reset, restart, eviction-pressure episode, or ring flush failure, with machine-readable evidence). The `*_activity_v2` readers return NULL deltas with a `censored_reason` column (`no_baseline` or `counter_regression`) instead of clamped or lifetime-counter values; the trend engines classify a level shift that lands on a recorded restart or reset as `discontinuity` (a known instrument boundary) rather than a discovered changepoint; and `coverage_gaps()` attributes blackout runs to recorded restarts.
 
 ### 4. Detection limits are stated in advance
 

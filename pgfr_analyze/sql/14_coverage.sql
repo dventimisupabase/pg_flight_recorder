@@ -19,12 +19,15 @@
 --   circuit_breaker /  a collection_stats skip row covers the tick's minute
 --   load_shedding      (enumerated skip_kind; legacy prose classified via
 --                      pgfr_record._skip_kind())
---   restart            the tick falls in the unobserved run leading into
---                      pg_postmaster_start_time(): the server was plausibly
---                      down. collection_stats is UNLOGGED, so a crash also
---                      destroys the skip evidence; post-crash gaps land here
---                      rather than claiming clean coverage. Event-based
---                      restart detection is Issue #101.
+--   restart            the tick falls in the unobserved run leading into a
+--                      recorded restart discontinuity (Issue #101;
+--                      pgfr_record.discontinuities carries every detected
+--                      restart, so multiple restarts per window attribute
+--                      correctly), or, as a fallback for installs without
+--                      recorded events, into pg_postmaster_start_time().
+--                      collection_stats is UNLOGGED, so a crash also destroys
+--                      the skip evidence; post-crash gaps land here rather
+--                      than claiming clean coverage.
 --   cron_inactive      the collector's cron job is currently missing or
 --                      deactivated (cron.job may be unreadable on managed
 --                      platforms; attribution degrades to unknown)
@@ -161,6 +164,16 @@ grid as (
     cross join ticks t
     left join observed o on o.collector = c.collector and o.m = t.tick
 ),
+restart_events as (
+    -- Recorded restart discontinuities (Issue #101) whose blackout can touch
+    -- the window. An event detected shortly after the window end still
+    -- explains trailing gaps, hence the slack.
+    select d.detected_at
+    from pgfr_record.discontinuities d, bounds b
+    where d.event_kind = 'restart'
+      and d.detected_at >  b.w_start
+      and d.detected_at <= b.w_end + interval '1 hour'
+),
 last_obs as (
     -- newest observed tick before the postmaster start, per collector: the
     -- unobserved run between it and pm_start is the plausible down window
@@ -176,8 +189,22 @@ select g.collector,
            when g.observed then null
            when g.tick < f.floor_ts then 'retention_horizon'
            when sk.kind is not null then sk.kind
-           when g.tick < b.pm_start
-                and (lo.last_before_pm is null or g.tick > lo.last_before_pm)
+           when exists (
+                    -- the tick sits in the unobserved run leading into a
+                    -- recorded restart: no observed tick of this collector
+                    -- between it and the event. The event is detected AT the
+                    -- first successful tick after recovery, so that tick's
+                    -- own minute does not count as "the server was up".
+                    select 1 from restart_events re
+                    where re.detected_at > g.tick
+                      and not exists (
+                          select 1 from grid g2
+                          where g2.collector = g.collector
+                            and g2.observed
+                            and g2.tick > g.tick
+                            and g2.tick < date_trunc('minute', re.detected_at)))
+                or (g.tick < b.pm_start
+                    and (lo.last_before_pm is null or g.tick > lo.last_before_pm))
                then 'restart'
            when pgfr_analyze._cron_job_active(
                     case g.collector when 'sample' then 'pgfr_sample_ring'
@@ -289,7 +316,7 @@ Output columns:
   gap_start: [dimension] [timestamp] First missing minute tick of the gap, inclusive.
   gap_end: [dimension] [timestamp] End of the gap, exclusive (the minute after the last missing tick).
   duration: [derived] [duration] gap_end minus gap_start; one minute per missing tick.
-  attributed_reason: [derived] [text] Why the ticks are missing: retention_horizon (predates oldest retained evidence), circuit_breaker or load_shedding (skip evidence in collection_stats), restart (unobserved run leading into pg_postmaster_start_time()), cron_inactive (job missing or deactivated), or unknown.';
+  attributed_reason: [derived] [text] Why the ticks are missing: retention_horizon (predates oldest retained evidence), circuit_breaker or load_shedding (skip evidence in collection_stats), restart (unobserved run leading into a recorded restart discontinuity, or the pg_postmaster_start_time() fallback), cron_inactive (job missing or deactivated), or unknown.';
 
 create or replace function pgfr_analyze.coverage_gaps(p_interval interval)
 returns table (

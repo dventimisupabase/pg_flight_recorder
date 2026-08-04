@@ -20,6 +20,43 @@ Output columns:
   ts_end: [dimension] [epoch-seconds] Window end converted to seconds since pgfr_record.epoch(), same int4 sample_ts encoding; used as the upper bound of the sample_ts range predicate (exclusive in the *_activity_v2 readers).';
 
 
+-- Censoring-aware delta primitive for the v2 readers (Issue #101). Deltas
+-- spanning a discontinuity are invalid measurements, not noisy ones:
+--   - no baseline row before the window (first-ever observation): the "delta"
+--     would be the lifetime counter, potentially months of activity
+--     attributed to the window;
+--   - counter regression (reset between the two snapshots): the naive
+--     difference is negative, and clamping it to zero silently absorbs the
+--     reset.
+-- Both return NULL here; the reader's censored_reason column says why.
+create or replace function pgfr_analyze._censored_delta(
+    p_end   numeric,
+    p_start numeric
+)
+returns numeric
+language sql
+immutable
+as $$
+    select case
+        when p_end is null or p_start is null then null
+        when p_end < p_start then null
+        else p_end - p_start
+    end
+$$;
+
+comment on function pgfr_analyze._censored_delta(numeric, numeric) is
+'NULL-with-reason delta primitive for the v2 readers: NULL when the baseline is missing (first-ever observation) or the counter regressed (reset between snapshots), never a clamped zero and never a lifetime counter. The calling reader exposes the reason in its censored_reason column.';
+
+-- Issue #101: the three *_activity_v2 readers gained a censored_reason output
+-- column, which changes their return types; CREATE OR REPLACE cannot do that.
+do $$
+begin
+    set local client_min_messages = warning;
+    drop function if exists pgfr_analyze.statement_activity_v2(timestamptz, timestamptz, integer);
+    drop function if exists pgfr_analyze.table_activity_v2(timestamptz, timestamptz, integer);
+    drop function if exists pgfr_analyze.index_activity_v2(timestamptz, timestamptz, integer);
+end $$;
+
 -- Returns top queries by total_exec_time delta over the specified time window,
 -- reading directly from the v2 partitioned table using int4 sample_ts ranges.
 -- JIT is disabled at entry to avoid planning regressions on partitioned tables.
@@ -41,7 +78,8 @@ returns table(
     shared_blks_read_delta   bigint,
     temp_blks_written_delta  bigint,
     hit_ratio_pct            numeric,
-    pgss_reset_warning       boolean  -- true if any row flagged a cluster-wide PGSS eviction/reset
+    pgss_reset_warning       boolean, -- true if any row flagged a cluster-wide PGSS eviction/reset
+    censored_reason          text     -- no_baseline | counter_regression | NULL (valid deltas)
 )
 language plpgsql volatile as $$
 declare
@@ -81,34 +119,55 @@ begin
           and se.sample_ts <  v_ts_end
         order by se.queryid, se.dbid, se.userid, se.toplevel, se.sample_ts desc
     )
-    select
-        e.queryid,
-        e.dbid,
-        e.userid,
-        e.toplevel,
-        greatest(0, e.calls - coalesce(s.calls, 0))             as calls_delta,
-        greatest(0, e.total_exec_time - coalesce(s.total_exec_time, 0)) as total_exec_time_delta_ms,
-        e.mean_exec_time                                         as mean_exec_time_ms,
-        greatest(0, e.rows - coalesce(s.rows, 0))               as rows_delta,
-        greatest(0, e.shared_blks_hit  - coalesce(s.shared_blks_hit, 0))  as shared_blks_hit_delta,
-        greatest(0, e.shared_blks_read - coalesce(s.shared_blks_read, 0)) as shared_blks_read_delta,
-        greatest(0, e.temp_blks_written - coalesce(s.temp_blks_written, 0)) as temp_blks_written_delta,
-        case
-            when (greatest(0, e.shared_blks_hit - coalesce(s.shared_blks_hit, 0))
-                + greatest(0, e.shared_blks_read - coalesce(s.shared_blks_read, 0))) > 0
-            then round(
-                100.0 * greatest(0, e.shared_blks_hit - coalesce(s.shared_blks_hit, 0))::numeric
-                / (greatest(0, e.shared_blks_hit - coalesce(s.shared_blks_hit, 0))
-                 + greatest(0, e.shared_blks_read - coalesce(s.shared_blks_read, 0))),
-                1
-            )
-            else null
-        end as hit_ratio_pct,
-        coalesce(e.pgss_dealloc_warning, false) as pgss_reset_warning
-    from snap_end e
-    left join snap_start s using (queryid, dbid, userid, toplevel)
-    where greatest(0, e.total_exec_time - coalesce(s.total_exec_time, 0)) > 0
-    order by total_exec_time_delta_ms desc
+    select * from (
+        select
+            e.queryid,
+            e.dbid,
+            e.userid,
+            e.toplevel,
+            pgfr_analyze._censored_delta(e.calls, s.calls)::bigint as calls_delta,
+            pgfr_analyze._censored_delta(e.total_exec_time::numeric, s.total_exec_time::numeric)::float8
+                as total_exec_time_delta_ms,
+            e.mean_exec_time as mean_exec_time_ms,
+            pgfr_analyze._censored_delta(e.rows, s.rows)::bigint as rows_delta,
+            pgfr_analyze._censored_delta(e.shared_blks_hit,  s.shared_blks_hit)::bigint
+                as shared_blks_hit_delta,
+            pgfr_analyze._censored_delta(e.shared_blks_read, s.shared_blks_read)::bigint
+                as shared_blks_read_delta,
+            pgfr_analyze._censored_delta(e.temp_blks_written, s.temp_blks_written)::bigint
+                as temp_blks_written_delta,
+            case
+                when pgfr_analyze._censored_delta(e.shared_blks_hit, s.shared_blks_hit) is null
+                  or pgfr_analyze._censored_delta(e.shared_blks_read, s.shared_blks_read) is null
+                    then null
+                when (pgfr_analyze._censored_delta(e.shared_blks_hit, s.shared_blks_hit)
+                    + pgfr_analyze._censored_delta(e.shared_blks_read, s.shared_blks_read)) > 0
+                    then round(
+                        100.0 * pgfr_analyze._censored_delta(e.shared_blks_hit, s.shared_blks_hit)
+                        / (pgfr_analyze._censored_delta(e.shared_blks_hit, s.shared_blks_hit)
+                         + pgfr_analyze._censored_delta(e.shared_blks_read, s.shared_blks_read)),
+                        1)
+                else null
+            end as hit_ratio_pct,
+            coalesce(e.pgss_dealloc_warning, false) as pgss_reset_warning,
+            case
+                when s.calls is null then 'no_baseline'
+                when e.calls < s.calls
+                  or e.total_exec_time < s.total_exec_time
+                  or e.rows < s.rows
+                  or e.shared_blks_hit < s.shared_blks_hit
+                  or e.shared_blks_read < s.shared_blks_read
+                  or e.temp_blks_written < s.temp_blks_written
+                    then 'counter_regression'
+                else null
+            end as censored_reason
+        from snap_end e
+        left join snap_start s using (queryid, dbid, userid, toplevel)
+    ) x
+    -- censored rows stay visible (NULL deltas sort last) so a reset is
+    -- distinguishable from absence; valid rows still need positive time
+    where x.censored_reason is not null or x.total_exec_time_delta_ms > 0
+    order by x.total_exec_time_delta_ms desc nulls last
     limit p_limit;
 end;
 $$;
@@ -125,15 +184,16 @@ Output columns:
   dbid: [dimension] [oid] OID of the database the statement ran in; part of the pg_stat_statements identity key.
   userid: [dimension] [oid] OID of the role that executed the statement; part of the pg_stat_statements identity key.
   toplevel: [dimension] [boolean] True when the statement executed at top level, false when nested inside a function or DO block; part of the pg_stat_statements identity key.
-  calls_delta: [counter-delta] [count] Executions over the window: difference in cumulative pg_stat_statements.calls between the last snapshot before the window and the last snapshot inside it, clamped at zero. Exact total for the interval, modulo counter resets (see pgss_reset_warning).
-  total_exec_time_delta_ms: [counter-delta] [milliseconds] Execution time over the window: difference in cumulative total_exec_time between the same snapshot pair, clamped at zero. Rows are ordered by this column descending.
+  calls_delta: [counter-delta] [count] Executions over the window: difference in cumulative pg_stat_statements.calls between the last snapshot before the window and the last snapshot inside it. Exact total for the interval; NULL when censored (see censored_reason), never a clamped zero and never a lifetime counter.
+  total_exec_time_delta_ms: [counter-delta] [milliseconds] Execution time over the window: difference in cumulative total_exec_time between the same snapshot pair. Rows are ordered by this column descending (censored NULLs last). NULL when censored.
   mean_exec_time_ms: [derived] [milliseconds] Lifetime mean execution time as reported by pg_stat_statements at the last snapshot inside the window: numerator is cumulative total_exec_time and denominator is cumulative calls, both since the last statistics reset. NOT the within-window mean; compute total_exec_time_delta_ms / calls_delta for that.
-  rows_delta: [counter-delta] [count] Rows returned or affected over the window: difference in cumulative rows between the two snapshots, clamped at zero.
-  shared_blks_hit_delta: [counter-delta] [blocks] Shared-buffer hits over the window: difference in cumulative shared_blks_hit between the two snapshots, clamped at zero.
-  shared_blks_read_delta: [counter-delta] [blocks] Shared blocks read from the OS (buffer-pool misses) over the window: difference in cumulative shared_blks_read between the two snapshots, clamped at zero.
-  temp_blks_written_delta: [counter-delta] [blocks] Temp blocks written over the window: difference in cumulative temp_blks_written between the two snapshots, clamped at zero.
-  hit_ratio_pct: [derived] [percent] 100 * shared_blks_hit_delta / (shared_blks_hit_delta + shared_blks_read_delta), rounded to 1 decimal; the denominator is total shared block accesses over the window. NULL when that denominator is zero. A ratio of two exact deltas, so exact for the interval.
-  pgss_reset_warning: [derived] [boolean] Censoring flag: true when the end snapshot recorded a cluster-wide pg_stat_statements eviction (pgss_dealloc_warning) during the window. When set, deltas may be understated and statements absent from this result may be censored by eviction, not absent from the workload.';
+  rows_delta: [counter-delta] [count] Rows returned or affected over the window: difference in cumulative rows between the two snapshots; NULL when censored.
+  shared_blks_hit_delta: [counter-delta] [blocks] Shared-buffer hits over the window: difference in cumulative shared_blks_hit between the two snapshots; NULL when censored.
+  shared_blks_read_delta: [counter-delta] [blocks] Shared blocks read from the OS (buffer-pool misses) over the window: difference in cumulative shared_blks_read between the two snapshots; NULL when censored.
+  temp_blks_written_delta: [counter-delta] [blocks] Temp blocks written over the window: difference in cumulative temp_blks_written between the two snapshots; NULL when censored.
+  hit_ratio_pct: [derived] [percent] 100 * shared_blks_hit_delta / (shared_blks_hit_delta + shared_blks_read_delta), rounded to 1 decimal; the denominator is total shared block accesses over the window. NULL when that denominator is zero or either input delta is censored. A ratio of two exact deltas, so exact for the interval.
+  pgss_reset_warning: [derived] [boolean] Censoring flag: true when the end snapshot recorded a cluster-wide pg_stat_statements eviction (pgss_dealloc_warning) during the window. When set, deltas may be understated and statements absent from this result may be censored by eviction, not absent from the workload.
+  censored_reason: [derived] [text] Why this row''s deltas are NULL: no_baseline (no snapshot of this statement exists before the window, so a delta would be the lifetime counter) or counter_regression (a counter went backwards between the two snapshots: a reset occurred; see pgfr_record.discontinuities for the recorded event). NULL when the deltas are valid measurements.';
 
 
 -- Returns tables ordered by modification rate (n_tup_ins + n_tup_upd + n_tup_del delta)
@@ -157,7 +217,8 @@ returns table(
     n_live_tup              bigint,
     n_dead_tup              bigint,
     dead_tup_pct            numeric,
-    table_size_bytes        bigint
+    table_size_bytes        bigint,
+    censored_reason         text     -- no_baseline | counter_regression | NULL (valid deltas)
 )
 language plpgsql volatile as $$
 declare
@@ -198,15 +259,15 @@ begin
     select
         e.relid,
         e.dbid,
-        greatest(0, e.n_tup_ins - coalesce(s.n_tup_ins, 0))     as n_tup_ins_delta,
-        greatest(0, e.n_tup_upd - coalesce(s.n_tup_upd, 0))     as n_tup_upd_delta,
-        greatest(0, e.n_tup_del - coalesce(s.n_tup_del, 0))     as n_tup_del_delta,
-        greatest(0, e.n_tup_hot_upd - coalesce(s.n_tup_hot_upd, 0)) as n_tup_hot_upd_delta,
-        greatest(0, e.seq_scan - coalesce(s.seq_scan, 0))        as seq_scan_delta,
-        greatest(0, e.idx_scan - coalesce(s.idx_scan, 0))        as idx_scan_delta,
-        greatest(0, e.n_tup_ins - coalesce(s.n_tup_ins, 0))
-            + greatest(0, e.n_tup_upd - coalesce(s.n_tup_upd, 0))
-            + greatest(0, e.n_tup_del - coalesce(s.n_tup_del, 0)) as total_modifications,
+        pgfr_analyze._censored_delta(e.n_tup_ins, s.n_tup_ins)::bigint         as n_tup_ins_delta,
+        pgfr_analyze._censored_delta(e.n_tup_upd, s.n_tup_upd)::bigint         as n_tup_upd_delta,
+        pgfr_analyze._censored_delta(e.n_tup_del, s.n_tup_del)::bigint         as n_tup_del_delta,
+        pgfr_analyze._censored_delta(e.n_tup_hot_upd, s.n_tup_hot_upd)::bigint as n_tup_hot_upd_delta,
+        pgfr_analyze._censored_delta(e.seq_scan, s.seq_scan)::bigint           as seq_scan_delta,
+        pgfr_analyze._censored_delta(e.idx_scan, s.idx_scan)::bigint           as idx_scan_delta,
+        (pgfr_analyze._censored_delta(e.n_tup_ins, s.n_tup_ins)
+            + pgfr_analyze._censored_delta(e.n_tup_upd, s.n_tup_upd)
+            + pgfr_analyze._censored_delta(e.n_tup_del, s.n_tup_del))::bigint  as total_modifications,
         e.n_live_tup,
         e.n_dead_tup,
         case
@@ -218,10 +279,18 @@ begin
             )
             else 0::numeric
         end as dead_tup_pct,
-        e.table_size_bytes
+        e.table_size_bytes,
+        case
+            when s.n_tup_ins is null then 'no_baseline'
+            when e.n_tup_ins < s.n_tup_ins or e.n_tup_upd < s.n_tup_upd
+              or e.n_tup_del < s.n_tup_del or e.n_tup_hot_upd < s.n_tup_hot_upd
+              or e.seq_scan < s.seq_scan or e.idx_scan < s.idx_scan
+                then 'counter_regression'
+            else null
+        end as censored_reason
     from snap_end e
     left join snap_start s using (relid, dbid)
-    order by total_modifications desc
+    order by total_modifications desc nulls last
     limit p_limit;
 end;
 $$;
@@ -234,17 +303,18 @@ comment on function pgfr_analyze.table_activity_v2(timestamptz, timestamptz, int
 Output columns:
   relid: [dimension] [oid] OID of the table; identity key for the row.
   dbid: [dimension] [oid] OID of the database containing the table; part of the identity key.
-  n_tup_ins_delta: [counter-delta] [count] Rows inserted over the window: difference in cumulative pg_stat_all_tables.n_tup_ins between the last snapshot before the window and the last snapshot inside it, clamped at zero. Exact for the interval, modulo counter resets.
-  n_tup_upd_delta: [counter-delta] [count] Rows updated over the window (includes HOT updates): difference in cumulative n_tup_upd between the two snapshots, clamped at zero.
-  n_tup_del_delta: [counter-delta] [count] Rows deleted over the window: difference in cumulative n_tup_del between the two snapshots, clamped at zero.
-  n_tup_hot_upd_delta: [counter-delta] [count] HOT updates over the window: difference in cumulative n_tup_hot_upd between the two snapshots, clamped at zero.
-  seq_scan_delta: [counter-delta] [count] Sequential scans initiated over the window: difference in cumulative seq_scan between the two snapshots, clamped at zero.
-  idx_scan_delta: [counter-delta] [count] Index scans initiated on the table over the window: difference in cumulative idx_scan between the two snapshots, clamped at zero.
-  total_modifications: [counter-delta] [count] n_tup_ins_delta + n_tup_upd_delta + n_tup_del_delta; the ordering key of the result.
+  n_tup_ins_delta: [counter-delta] [count] Rows inserted over the window: difference in cumulative pg_stat_all_tables.n_tup_ins between the last snapshot before the window and the last snapshot inside it. Exact for the interval; NULL when censored (see censored_reason), never a clamped zero and never a lifetime counter.
+  n_tup_upd_delta: [counter-delta] [count] Rows updated over the window (includes HOT updates): difference in cumulative n_tup_upd between the two snapshots; NULL when censored.
+  n_tup_del_delta: [counter-delta] [count] Rows deleted over the window: difference in cumulative n_tup_del between the two snapshots; NULL when censored.
+  n_tup_hot_upd_delta: [counter-delta] [count] HOT updates over the window: difference in cumulative n_tup_hot_upd between the two snapshots; NULL when censored.
+  seq_scan_delta: [counter-delta] [count] Sequential scans initiated over the window: difference in cumulative seq_scan between the two snapshots; NULL when censored.
+  idx_scan_delta: [counter-delta] [count] Index scans initiated on the table over the window: difference in cumulative idx_scan between the two snapshots; NULL when censored.
+  total_modifications: [counter-delta] [count] n_tup_ins_delta + n_tup_upd_delta + n_tup_del_delta; the ordering key of the result (censored NULLs last). NULL when censored.
   n_live_tup: [gauge] [count] Estimated live tuples as of the last snapshot inside the window; instantaneous level, exact only at that tick and undefined between ticks.
   n_dead_tup: [gauge] [count] Estimated dead tuples as of the last snapshot inside the window; instantaneous level.
   dead_tup_pct: [derived] [percent] 100 * n_dead_tup / (n_live_tup + n_dead_tup) at the end snapshot, rounded to 1 decimal; the denominator is total estimated tuples (live plus dead). 0 when that denominator is zero. Inherits gauge semantics: describes the end-of-window instant only.
-  table_size_bytes: [gauge] [bytes] Table size as of the last snapshot inside the window.';
+  table_size_bytes: [gauge] [bytes] Table size as of the last snapshot inside the window.
+  censored_reason: [derived] [text] Why this row''s deltas are NULL: no_baseline (no snapshot of this table exists before the window) or counter_regression (a counter went backwards: stats reset between the snapshots; see pgfr_record.discontinuities). NULL when the deltas are valid measurements.';
 
 
 -- Returns indexes ordered by idx_scan delta over the specified time window,
@@ -263,7 +333,8 @@ returns table(
     idx_tup_read_delta bigint,
     idx_tup_fetch_delta bigint,
     index_size_bytes   bigint,
-    selectivity_pct    numeric
+    selectivity_pct    numeric,
+    censored_reason    text     -- no_baseline | counter_regression | NULL (valid deltas)
 )
 language plpgsql volatile as $$
 declare
@@ -302,19 +373,27 @@ begin
         e.relid,
         e.indexrelid,
         e.dbid,
-        greatest(0, e.idx_scan      - coalesce(s.idx_scan, 0))      as idx_scan_delta,
-        greatest(0, e.idx_tup_read  - coalesce(s.idx_tup_read, 0))  as idx_tup_read_delta,
-        greatest(0, e.idx_tup_fetch - coalesce(s.idx_tup_fetch, 0)) as idx_tup_fetch_delta,
+        pgfr_analyze._censored_delta(e.idx_scan, s.idx_scan)::bigint           as idx_scan_delta,
+        pgfr_analyze._censored_delta(e.idx_tup_read, s.idx_tup_read)::bigint   as idx_tup_read_delta,
+        pgfr_analyze._censored_delta(e.idx_tup_fetch, s.idx_tup_fetch)::bigint as idx_tup_fetch_delta,
         e.index_size_bytes,
         case
-            when greatest(0, e.idx_tup_read - coalesce(s.idx_tup_read, 0)) > 0
+            when coalesce(pgfr_analyze._censored_delta(e.idx_tup_read, s.idx_tup_read), 0) > 0
             then round(
-                100.0 * greatest(0, e.idx_tup_fetch - coalesce(s.idx_tup_fetch, 0))::numeric
-                / greatest(0, e.idx_tup_read - coalesce(s.idx_tup_read, 0)),
+                100.0 * pgfr_analyze._censored_delta(e.idx_tup_fetch, s.idx_tup_fetch)
+                / pgfr_analyze._censored_delta(e.idx_tup_read, s.idx_tup_read),
                 1
             )
             else null
-        end as selectivity_pct
+        end as selectivity_pct,
+        case
+            when s.idx_scan is null then 'no_baseline'
+            when e.idx_scan < s.idx_scan
+              or e.idx_tup_read < s.idx_tup_read
+              or e.idx_tup_fetch < s.idx_tup_fetch
+                then 'counter_regression'
+            else null
+        end as censored_reason
     from snap_end e
     left join snap_start s using (relid, indexrelid, dbid)
     order by idx_scan_delta desc
@@ -331,11 +410,12 @@ Output columns:
   relid: [dimension] [oid] OID of the table the index belongs to; part of the identity key.
   indexrelid: [dimension] [oid] OID of the index; identity key for the row.
   dbid: [dimension] [oid] OID of the database containing the index; part of the identity key.
-  idx_scan_delta: [counter-delta] [count] Index scans initiated over the window: difference in cumulative pg_stat_all_indexes.idx_scan between the last snapshot before the window and the last snapshot inside it, clamped at zero. Exact for the interval, modulo counter resets. The ordering key of the result.
-  idx_tup_read_delta: [counter-delta] [count] Index entries returned by scans over the window: difference in cumulative idx_tup_read between the two snapshots, clamped at zero.
-  idx_tup_fetch_delta: [counter-delta] [count] Live table rows fetched by simple index scans over the window: difference in cumulative idx_tup_fetch between the two snapshots, clamped at zero.
+  idx_scan_delta: [counter-delta] [count] Index scans initiated over the window: difference in cumulative pg_stat_all_indexes.idx_scan between the last snapshot before the window and the last snapshot inside it. Exact for the interval; NULL when censored (see censored_reason), never a clamped zero and never a lifetime counter. The ordering key of the result.
+  idx_tup_read_delta: [counter-delta] [count] Index entries returned by scans over the window: difference in cumulative idx_tup_read between the two snapshots; NULL when censored.
+  idx_tup_fetch_delta: [counter-delta] [count] Live table rows fetched by simple index scans over the window: difference in cumulative idx_tup_fetch between the two snapshots; NULL when censored.
   index_size_bytes: [gauge] [bytes] Index size as of the last snapshot inside the window; instantaneous level, undefined between ticks.
-  selectivity_pct: [derived] [percent] 100 * idx_tup_fetch_delta / idx_tup_read_delta, rounded to 1 decimal; the denominator is index entries read over the window. NULL when idx_tup_read_delta is zero. Low values mean many index entries read per live row fetched.';
+  selectivity_pct: [derived] [percent] 100 * idx_tup_fetch_delta / idx_tup_read_delta, rounded to 1 decimal; the denominator is index entries read over the window. NULL when idx_tup_read_delta is zero or censored. Low values mean many index entries read per live row fetched.
+  censored_reason: [derived] [text] Why this row''s deltas are NULL: no_baseline (no snapshot of this index exists before the window) or counter_regression (a counter went backwards: stats reset between the snapshots; see pgfr_record.discontinuities). NULL when the deltas are valid measurements.';
 
 --------------------------------------------------------------------------------
 -- ring buffer v2 reader functions

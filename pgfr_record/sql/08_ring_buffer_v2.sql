@@ -318,6 +318,12 @@ begin
         begin
             perform pgfr_record._flush_ring_slot_to_rollups(v_truncate_slot);
         exception when others then
+            -- The truncates below run regardless (ring safety over rollup
+            -- completeness), destroying this slot's Mode A samples. That is a
+            -- censoring event, not just a log line (Issue #101).
+            perform pgfr_record._record_discontinuity(
+                'rollup_flush_failed', 'ring_slot',
+                jsonb_build_object('slot', v_truncate_slot, 'error', sqlerrm));
             raise warning 'pgfr_record: _flush_ring_slot_to_rollups failed for slot %: %',
                 v_truncate_slot, sqlerrm;
         end;

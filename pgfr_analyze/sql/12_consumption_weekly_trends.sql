@@ -222,7 +222,20 @@ begin
             gs.median_value, gs.r2_line, gs.tss,
             sc.median_slope,
             bs.split_date, bs.r2_step,
-            coalesce(cf.composition_change, false) as composition_change
+            coalesce(cf.composition_change, false) as composition_change,
+            -- Known instrument boundary (Issue #101), weekly grain: split_date
+            -- is a week_end_date, so a recorded restart or stats reset
+            -- anywhere in that week's 7-day span (plus one day of slack for
+            -- detection lag) marks the split as the instrument's own baseline
+            -- moving, not a discovered workload changepoint.
+            (bs.split_date is not null and exists (
+                select 1
+                from pgfr_record.discontinuities d
+                where d.event_kind in ('restart', 'stats_reset')
+                  and d.detected_at::date between bs.split_date - 7 and bs.split_date + 1
+                  and d.detected_at::date >  v_as_of_date - v_window_days
+                  and d.detected_at::date <= v_as_of_date + 1
+            )) as split_on_boundary
         from all_combos ac
         left join group_stats gs      on gs.datname = ac.datname and gs.metric_name = ac.metric_name
         left join slope_calc  sc      on sc.datname = ac.datname and sc.metric_name = ac.metric_name
@@ -237,6 +250,10 @@ begin
                 when sample_count < v_min_weeks then 'insufficient_data'
                 when coalesce(tss, 0) = 0 then 'stable'
                 when coalesce(r2_step, 0) < v_min_r2 and coalesce(r2_line, 0) < v_min_r2 then 'stable'
+                -- Same precedence as the daily engine: a recorded
+                -- discontinuity outranks the composition shape heuristic.
+                when coalesce(r2_step, 0) >= coalesce(r2_line, 0) + v_step_r2_margin
+                     and split_on_boundary then 'discontinuity'
                 when composition_change then 'composition'
                 when coalesce(r2_step, 0) >= coalesce(r2_line, 0) + v_step_r2_margin then 'step'
                 else 'drift'
@@ -257,7 +274,7 @@ begin
             else median_slope * 30 / abs(median_value) * 100
         end,
         classification,
-        case when classification = 'step' then split_date else null end,
+        case when classification in ('step', 'discontinuity') then split_date else null end,
         composition_change
     from classified
     on conflict (as_of_date, datname, metric_name, window_days)

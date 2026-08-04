@@ -550,12 +550,12 @@ Grouped by concurrency/duration profile rather than raw `query_preview` text (un
 | `sample_count` | integer | Count of non-NULL periods (days or weeks) in the window |
 | `baseline_start` / `baseline_end` | date | The window's fixed date range |
 | `slope_pct_per_30d` | numeric | Theil-Sen slope (median of pairwise slopes), normalized to %/30d relative to the window's median value; NULL when `insufficient_data` |
-| `classification` | text | `insufficient_data` / `stable` / `drift` / `step` / `composition` -- see below |
-| `changepoint_date` | date | Set only when `classification = 'step'` |
+| `classification` | text | `insufficient_data` / `stable` / `drift` / `step` / `composition` / `discontinuity` -- see below |
+| `changepoint_date` | date | Set only when `classification` is `step` or `discontinuity` |
 | `composition_change` | boolean | Whether workload-shape indicators (`read_write_tuple_ratio`, `xact_per_s`, `rows_returned_per_xact`, `rows_mutated_per_xact`, `db_size_bytes`) shifted beyond `consumption_trend_shape_guard_pct` between the window's two fixed halves |
 | `computed_at` | timestamptz | Timestamp of this row's (re)computation |
 
-`classification` values: `stable` (no line or step fits meaningfully better than noise), `drift` (a gradual change -- a line fits at least as well as any step), `step` (a genuine level shift -- a two-level step fits meaningfully better than a line, by `consumption_trend_step_r2_margin`), `composition` (a step or drift was detected, but the workload shape also moved -- no fitness inference is safe), `insufficient_data` (fewer than `consumption_trend_min_days` / `consumption_trend_min_weeks` periods collected). Distinguishing `step` from `drift` compares model fit (R²), not shift magnitude -- a clean step and a linear ramp can produce the same shift-magnitude-to-variability ratio.
+`classification` values: `stable` (no line or step fits meaningfully better than noise), `drift` (a gradual change -- a line fits at least as well as any step), `step` (a genuine level shift -- a two-level step fits meaningfully better than a line, by `consumption_trend_step_r2_margin`), `composition` (a step or drift was detected, but the workload shape also moved -- no fitness inference is safe), `insufficient_data` (fewer than `consumption_trend_min_days` / `consumption_trend_min_weeks` periods collected), `discontinuity` (a level shift was detected but its split coincides with a recorded restart or stats reset in `pgfr_record.discontinuities` -- a known instrument boundary supplied as input, not a discovered changepoint). Distinguishing `step` from `drift` compares model fit (R²), not shift magnitude -- a clean step and a linear ramp can produce the same shift-magnitude-to-variability ratio.
 
 ### Internal
 
@@ -583,6 +583,16 @@ Grouped by concurrency/duration profile rather than raw `query_preview` text (un
 | `skip_kind` | text | Enumerated skip class (`circuit_breaker`, `load_shedding`); NULL for non-skips and pre-upgrade rows, which classify via `pgfr_record._skip_kind(skipped_reason)` |
 | `sections_total` | int | Total sections attempted |
 | `sections_succeeded` | int | Sections that succeeded |
+
+**`pgfr_record.discontinuities`** -- censoring-event ledger (see [STATISTICS.md](STATISTICS.md)); LOGGED, unpartitioned, no retention
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | bigint | Row ID |
+| `detected_at` | timestamptz | When the recorder noticed the event (the true event time lies between the previous tick and this one) |
+| `event_kind` | text | `stats_reset`, `pgss_reset`, `pgss_eviction_pressure`, `restart`, or `rollup_flush_failed` |
+| `scope` | text | Which counter family or subsystem the event censors (`pg_stat_database`, `pg_stat_wal`, `checkpointer_bgwriter`, `pg_stat_statements`, `postmaster`, or an archive rollup table name) |
+| `evidence` | jsonb | Machine-readable detail: previous/current sentinel values, error text, slot and window bounds, dealloc counts |
 
 **`pgfr_record.relation_names`** -- OID to relation name mappings (populated at export time)
 
