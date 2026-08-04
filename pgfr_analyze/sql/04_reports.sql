@@ -191,7 +191,7 @@ BEGIN
     FROM pgfr_record.collection_stats
     WHERE skipped = true
       AND started_at > now() - p_lookback_interval
-      AND skipped_reason LIKE '%Circuit breaker%';
+      AND COALESCE(skip_kind, pgfr_record._skip_kind(skipped_reason)) = 'circuit_breaker';
     IF v_cb_count >= v_cb_threshold THEN
         RETURN QUERY SELECT
             'CIRCUIT_BREAKER_TRIPS'::text,
@@ -270,17 +270,73 @@ DECLARE
     v_version TEXT;
     v_row RECORD;
     v_count INTEGER;
+    v_cov_line TEXT;
+    v_min_ratio NUMERIC;
+    v_gap_count INTEGER;
+    v_gap_list TEXT;
+    v_mnar BOOLEAN;
 BEGIN
     -- Get schema version from config
     SELECT value INTO v_version FROM pgfr_record.config WHERE key = 'schema_version';
     v_version := COALESCE(v_version, 'unknown');
+
+    -- Coverage for the window (Issue #100): expected vs observed ticks per
+    -- collector, plus gap attribution. Reports over gappy windows must not
+    -- render at full confidence.
+    -- v_min_ratio drives the qualification and is retention-adjusted: ticks
+    -- older than the collector's retained evidence are a resolution limit of
+    -- the instrument, not missed collection, so they do not count against
+    -- confidence (they still show as retention_horizon gaps in the list).
+    SELECT string_agg(format('%s/%s %s (%s%%)',
+                             c.observed_samples, c.expected_samples, c.collector,
+                             round(c.coverage_ratio * 100, 1)),
+                      ', '
+                      ORDER BY CASE c.collector WHEN 'sample' THEN 1
+                                                WHEN 'snapshot' THEN 2 ELSE 3 END),
+           min(c.observed_samples::numeric
+               / NULLIF(c.expected_samples - COALESCE(r.retention_ticks, 0), 0))
+    INTO v_cov_line, v_min_ratio
+    FROM pgfr_analyze.coverage(p_start_time, p_end_time) c
+    LEFT JOIN (
+        SELECT collector, (sum(extract(epoch from duration)) / 60)::int AS retention_ticks
+        FROM pgfr_analyze.coverage_gaps(p_start_time, p_end_time)
+        WHERE attributed_reason = 'retention_horizon'
+        GROUP BY collector
+    ) r ON r.collector = c.collector;
+
+    SELECT count(*),
+           bool_or(attributed_reason IN ('circuit_breaker', 'load_shedding'))
+    INTO v_gap_count, v_mnar
+    FROM pgfr_analyze.coverage_gaps(p_start_time, p_end_time);
+
+    SELECT string_agg(format('%s-%s %s (%s)',
+                             to_char(gap_start, 'HH24:MI'), to_char(gap_end, 'HH24:MI'),
+                             collector, attributed_reason), ', ')
+    INTO v_gap_list
+    FROM (SELECT * FROM pgfr_analyze.coverage_gaps(p_start_time, p_end_time)
+          ORDER BY gap_start LIMIT 3) g;
+    IF v_gap_count > 3 THEN
+        v_gap_list := v_gap_list || format(', and %s more', v_gap_count - 3);
+    END IF;
 
     -- Header
     v_result := v_result || '# PostgreSQL Flight Recorder Report' || E'\n\n';
     v_result := v_result || '**Generated:** ' || to_char(now(), 'YYYY-MM-DD HH24:MI:SS TZ') || E'\n';
     v_result := v_result || '**Version:** ' || v_version || E'\n';
     v_result := v_result || '**Range:** ' || to_char(p_start_time, 'YYYY-MM-DD HH24:MI:SS') ||
-                           ' to ' || to_char(p_end_time, 'YYYY-MM-DD HH24:MI:SS') || E'\n\n';
+                           ' to ' || to_char(p_end_time, 'YYYY-MM-DD HH24:MI:SS') || E'\n';
+    v_result := v_result || '**Coverage:** ' || COALESCE(v_cov_line, 'no expected ticks in window');
+    IF COALESCE(v_gap_count, 0) > 0 THEN
+        v_result := v_result || format('; %s gap(s): %s', v_gap_count, v_gap_list);
+    END IF;
+    v_result := v_result || E'\n';
+    IF v_min_ratio IS NOT NULL AND v_min_ratio < 0.9 THEN
+        v_result := v_result || 'Coverage is below 90% for this window; conclusions below are qualified accordingly (see STATISTICS.md).' || E'\n';
+    END IF;
+    IF COALESCE(v_mnar, false) THEN
+        v_result := v_result || 'Some gaps are attributed to the circuit breaker or load shedding: collection was skipped because the system was under stress, so absence of samples is not absence of activity.' || E'\n';
+    END IF;
+    v_result := v_result || E'\n';
     v_result := v_result || 'Analyze this data. The database may be healthy—only flag genuine issues.' || E'\n\n';
 
     -- ==========================================================================
@@ -972,7 +1028,7 @@ BEGIN
     SELECT count(*) INTO v_circuit_breaker_trips
     FROM pgfr_record.collection_stats
     WHERE skipped = true
-      AND skipped_reason LIKE '%Circuit breaker%'
+      AND COALESCE(skip_kind, pgfr_record._skip_kind(skipped_reason)) = 'circuit_breaker'
       AND started_at > now() - interval '90 days';
     IF v_circuit_breaker_trips = 0 THEN
         RETURN QUERY SELECT

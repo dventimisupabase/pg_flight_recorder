@@ -65,7 +65,7 @@ DECLARE
 BEGIN
     v_should_skip := pgfr_record._check_circuit_breaker('snapshot');
     IF v_should_skip THEN
-        PERFORM pgfr_record._record_collection_skip('snapshot', 'Circuit breaker tripped - last run exceeded threshold');
+        PERFORM pgfr_record._record_collection_skip('snapshot', 'Circuit breaker tripped - last run exceeded threshold', 'circuit_breaker');
         RAISE NOTICE 'pgfr_record: Skipping snapshot collection due to circuit breaker';
         RETURN v_captured_at;
     END IF;

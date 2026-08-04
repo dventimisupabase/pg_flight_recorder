@@ -93,7 +93,9 @@ For `k = 3`, `n = 60` this returns `p_hat = 0.05`, standard error about `0.028`,
 
 ### 2. Coverage is a reported quantity
 
-Every windowed estimate should be readable alongside `observed_samples / expected_samples` for its window, with the gap list and attributed reasons (circuit breaker, load shedding, cron miss, restart). A `pct_of_samples` computed over a window with 40% coverage is an estimate about the covered minutes only, and the missing minutes are biased toward stress (catalog item 4). A dedicated `pgfr_analyze.coverage()` accessor is tracked in [issue #100](https://github.com/dventimisupabase/pg_flight_recorder/issues/100).
+Every windowed estimate should be readable alongside `observed_samples / expected_samples` for its window, with the gap list and attributed reasons. A `pct_of_samples` computed over a window with 40% coverage is an estimate about the covered minutes only, and the missing minutes are biased toward stress (catalog item 4).
+
+`pgfr_analyze.coverage(start, end)` reports expected versus observed ticks per collector at the fixed one-minute cadence, and `pgfr_analyze.coverage_gaps(start, end)` lists each gap with an attributed reason: `retention_horizon` (the tick predates the oldest evidence still retained), `circuit_breaker` and `load_shedding` (skip evidence recorded at collection time), `restart` (the unobserved run leading into the postmaster start time), `cron_inactive`, or `unknown`. Report functions qualify their conclusions when any collector's retention-adjusted coverage falls below **90%** for the window (retention truncation is a resolution limit, not missed collection, so it does not count against confidence). Gaps attributed to the circuit breaker or load shedding always trigger the missing-not-at-random caveat regardless of the overall ratio: collection was skipped because the system was under stress, so absence of samples is not absence of activity.
 
 ### 3. Censoring is flagged, not smoothed
 
