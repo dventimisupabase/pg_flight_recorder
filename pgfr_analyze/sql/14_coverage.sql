@@ -6,7 +6,8 @@
 --
 -- Absence of samples and absence of activity are different facts. Both cron
 -- collectors run at a fixed one-minute cadence ('* * * * *', hardcoded in
--- enable(); sample_interval_seconds is inert, see Issue #106), so the expected
+-- enable(); the once-inert sample_interval_seconds key was retired by Issue
+-- #106, making the constant explicit), so the expected
 -- tick count for any window is well-defined: one tick per minute boundary.
 -- coverage() reports expected vs observed ticks per collector;
 -- coverage_gaps() lists each contiguous run of missing ticks with an

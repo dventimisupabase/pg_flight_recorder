@@ -163,7 +163,6 @@ RETURNS TABLE(
 )
 LANGUAGE sql STABLE AS $$
     SELECT * FROM (VALUES
-        ('default', 'sample_interval_seconds', '60', 'Sample every minute'),
         ('default', 'load_shedding_enabled', 'true', 'Skip during high load (>70% connections)'),
         ('default', 'circuit_breaker_enabled', 'true', 'Auto-skip if collections run slow'),
         ('default', 'enable_locks', 'true', 'Collect lock contention data'),
@@ -186,7 +185,6 @@ LANGUAGE sql STABLE AS $$
         ('default', 'statements_min_calls', '1', 'Include queries with >= 1 call'),
         ('default', 'statements_top_n', '50', 'Collect top 50 queries'),
         ('default', 'table_stats_top_n', '50', 'Track top 50 tables'),
-        ('production_safe', 'sample_interval_seconds', '300', 'Sample every 5 minutes (40% less overhead)'),
         ('production_safe', 'load_shedding_enabled', 'true', 'Skip during high load'),
         ('production_safe', 'load_shedding_active_pct', '60', 'More aggressive load shedding (60% vs 70%)'),
         ('production_safe', 'circuit_breaker_enabled', 'true', 'Auto-skip if slow'),
@@ -212,7 +210,6 @@ LANGUAGE sql STABLE AS $$
         ('production_safe', 'statements_min_calls', '5', 'Only queries with >= 5 calls'),
         ('production_safe', 'statements_top_n', '30', 'Collect top 30 queries'),
         ('production_safe', 'table_stats_top_n', '30', 'Track fewer tables'),
-        ('development', 'sample_interval_seconds', '60', 'Sample every minute'),
         ('development', 'load_shedding_enabled', 'true', 'Skip during high load'),
         ('development', 'circuit_breaker_enabled', 'true', 'Auto-skip if slow'),
         ('development', 'enable_locks', 'true', 'Collect lock data'),
@@ -235,7 +232,6 @@ LANGUAGE sql STABLE AS $$
         ('development', 'statements_min_calls', '1', 'Include all queries'),
         ('development', 'statements_top_n', '50', 'Collect top 50 queries'),
         ('development', 'table_stats_top_n', '50', 'Track top 50 tables'),
-        ('troubleshooting', 'sample_interval_seconds', '60', 'Sample every minute (detailed data)'),
         ('troubleshooting', 'load_shedding_enabled', 'false', 'Collect even under load'),
         ('troubleshooting', 'circuit_breaker_enabled', 'true', 'Keep circuit breaker enabled'),
         ('troubleshooting', 'circuit_breaker_threshold_ms', '2000', 'More lenient threshold - 2 seconds'),
@@ -265,7 +261,6 @@ LANGUAGE sql STABLE AS $$
         ('troubleshooting', 'statements_interval_minutes', '2', 'More frequent statement collection'),
         ('troubleshooting', 'statements_min_calls', '1', 'Include all queries'),
         ('troubleshooting', 'table_stats_top_n', '100', 'Track more tables'),
-        ('minimal_overhead', 'sample_interval_seconds', '300', 'Sample every 5 minutes'),
         ('minimal_overhead', 'load_shedding_enabled', 'true', 'Skip during high load'),
         ('minimal_overhead', 'load_shedding_active_pct', '50', 'Very aggressive (50%)'),
         ('minimal_overhead', 'circuit_breaker_enabled', 'true', 'Auto-skip if slow'),
@@ -318,7 +313,6 @@ INSERT INTO pgfr_record.config (key, value) VALUES
     ('schema_size_max_mb', '10000'),
     ('load_shedding_active_pct', '70'),
     ('archive_samples_enabled', 'true'),
-    ('archive_sample_frequency_minutes', '15'),
     ('archive_retention_days', '7'),
     ('archive_activity_samples', 'true'),
     ('archive_lock_samples', 'true'),
@@ -333,7 +327,6 @@ INSERT INTO pgfr_record.config (key, value) VALUES
     ('index_stats_enabled', 'true'),
     ('config_snapshots_enabled', 'true'),
     ('db_role_config_snapshots_enabled', 'true'),
-    ('ring_buffer_slots', '120'),
     ('vacuum_control_enabled', 'true'),
     ('vacuum_control_dead_tuple_budget_pct', '5'),
     ('vacuum_control_min_scale_factor', '0.001'),
@@ -581,6 +574,7 @@ returns table(old_key text, new_key text, action text)
 language plpgsql as $$
 declare
     v_alias text[];
+    v_retired text;
     v_aliases text[][] := array[
         ['retention_samples_days',   'retention_archive_days'],
         ['aggregate_retention_days', 'retention_archive_days']
@@ -601,20 +595,29 @@ begin
             return query select v_alias[1], v_alias[2], 'not present (skipped)'::text;
         end if;
     end loop;
+    -- Retired keys (Issue #106): the sampling cadence is a fixed design
+    -- constant, and the legacy ring's tuning keys control nothing in the v2
+    -- path. Remove leftovers from upgraded installs so the config table
+    -- stops advertising dead knobs.
+    foreach v_retired in array array['sample_interval_seconds', 'ring_buffer_slots', 'archive_sample_frequency_minutes'] loop
+        if exists (select 1 from pgfr_record.config where key = v_retired) then
+            delete from pgfr_record.config where key = v_retired;
+            return query select v_retired, null::text, 'deleted (retired, Issue #106)'::text;
+        end if;
+    end loop;
 end $$;
 comment on function pgfr_record.migrate_config_keys() is
 'Renames deprecated config key aliases to canonical names in pgfr_record.config. Idempotent.';
 
 -- Returns the configured ring buffer slot count, clamped to valid range (72-2880)
 -- Default is 120 slots for backwards compatibility
-CREATE OR REPLACE FUNCTION pgfr_record._get_ring_buffer_slots()
-RETURNS INTEGER
-LANGUAGE sql STABLE AS $$
-    SELECT GREATEST(72, LEAST(2880,
-        COALESCE(pgfr_record._get_config('ring_buffer_slots', '120')::integer, 120)
-    ))
-$$;
-COMMENT ON FUNCTION pgfr_record._get_ring_buffer_slots() IS 'Returns configured ring buffer slot count (72-2880 range). Default 120 for backwards compatibility. Use ring_buffer_slots config to change.';
+-- _get_ring_buffer_slots() retired (Issue #106): it read the legacy ring's
+-- ring_buffer_slots key, which controlled nothing in the v2 path.
+do $$
+begin
+    set local client_min_messages = warning;
+    drop function if exists pgfr_record._get_ring_buffer_slots();
+end $$;
 
 -- Sets statement timeout for section recording based on configuration, defaulting to 250ms
 CREATE OR REPLACE FUNCTION pgfr_record._set_section_timeout()
@@ -738,8 +741,13 @@ $$;
 COMMENT ON FUNCTION pgfr_record.validate_config() IS
 'Validates Flight Recorder configuration and reports on critical settings: section_timeout_ms, circuit_breaker, lock_timeout_ms, schema_size, skip_thresholds, and recent collection failures.';
 
--- Validates ring buffer configuration and returns diagnostic checks
--- Checks retention, batching efficiency, CPU overhead, and memory usage
+-- Validates the v2 ring buffer configuration and returns diagnostic checks.
+-- Issue #106 rewrote this: the previous version computed every figure from
+-- three retired keys (ring_buffer_slots, sample_interval_seconds,
+-- archive_sample_frequency_minutes) and fabricated constants, reporting a
+-- fictional retention for a ring that no longer existed. These checks read
+-- the live v2 state: ring_config, the ring tables themselves, and measured
+-- collection cost from collection_stats.
 CREATE OR REPLACE FUNCTION pgfr_record.validate_ring_configuration()
 RETURNS TABLE(
     check_name TEXT,
@@ -749,98 +757,111 @@ RETURNS TABLE(
 )
 LANGUAGE plpgsql AS $$
 DECLARE
-    v_slots INTEGER;
-    v_sample_interval INTEGER;
-    v_archive_interval INTEGER;
-    v_retention_hours NUMERIC;
-    v_samples_per_archive NUMERIC;
-    v_memory_mb NUMERIC;
-    v_cpu_pct NUMERIC;
+    v_num_slots INTEGER;
+    v_rotation_period INTERVAL;
+    v_rotated_at TIMESTAMPTZ;
+    v_window_hours NUMERIC;
+    v_since_rotation INTERVAL;
+    v_avg_sample_ms NUMERIC;
+    v_duty_pct NUMERIC;
+    v_ring_bytes NUMERIC;
 BEGIN
-    -- Get current configuration
-    v_slots := pgfr_record._get_ring_buffer_slots();
-    v_sample_interval := COALESCE(
-        pgfr_record._get_config('sample_interval_seconds', '60')::integer,
-        60
-    );
-    v_archive_interval := COALESCE(
-        pgfr_record._get_config('archive_sample_frequency_minutes', '15')::integer,
-        15
-    );
+    SELECT rc.num_slots, rc.rotation_period, rc.rotated_at
+    INTO v_num_slots, v_rotation_period, v_rotated_at
+    FROM pgfr_record.ring_config rc
+    WHERE rc.singleton;
 
-    -- Calculate derived metrics
-    v_retention_hours := (v_slots * v_sample_interval) / 3600.0;
-    v_samples_per_archive := (v_archive_interval * 60.0) / v_sample_interval;
-    v_memory_mb := v_slots * 0.09 * 1.5;  -- slots × 90KB × 1.5 overhead factor
-    v_cpu_pct := (25.0 / v_sample_interval) * 100.0 / 1000.0;  -- 25ms per collection
-
-    -- Check 1: Ring buffer retention
+    -- Check 1: Ring retention window (nominal; data on hand ranges between
+    -- (num_slots - 2) and (num_slots - 1) full rotation periods plus the
+    -- filling slot, since rotation truncates one slot ahead).
+    v_window_hours := v_num_slots * EXTRACT(EPOCH FROM v_rotation_period) / 3600.0;
     RETURN QUERY SELECT
         'ring_buffer_retention'::text,
         CASE
-            WHEN v_retention_hours < 1 THEN 'ERROR'
-            WHEN v_retention_hours < 2 THEN 'WARNING'
+            WHEN v_window_hours < 1 THEN 'ERROR'
+            WHEN v_window_hours < 2 THEN 'WARNING'
             ELSE 'OK'
         END::text,
-        format('%s hours retention (%s slots × %ss interval)',
-               ROUND(v_retention_hours, 1), v_slots, v_sample_interval)::text,
+        format('%s hours nominal window (%s slots x %s rotation); raw samples on hand span roughly the last %s to %s hours',
+               ROUND(v_window_hours, 1), v_num_slots, v_rotation_period,
+               ROUND(v_window_hours * (v_num_slots - 2)::numeric / v_num_slots, 1),
+               ROUND(v_window_hours * (v_num_slots - 1)::numeric / v_num_slots, 1))::text,
         CASE
-            WHEN v_retention_hours < 2 THEN
-                format('Consider increasing ring_buffer_slots to %s for 2-hour retention',
-                    CEIL((2 * 3600.0 / v_sample_interval))::integer)
-            ELSE 'Retention is adequate for most incident investigations'
+            WHEN v_window_hours < 2 THEN
+                'Increase ring_rotation_period or ring_buffer_partitions config (applied at install) for a longer raw-sample window; archive rollups already persist aggregates for retention_archive_days'
+            ELSE 'Window is adequate for most incident investigations; older windows live in the archive rollup tables'
         END::text;
 
-    -- Check 2: Batching efficiency (samples per archive)
+    -- Check 2: Rotation health. rotate_ring() runs on its own cron job;
+    -- a stale rotated_at means slots are not turning over and the oldest
+    -- slot will hold stale data past the nominal window.
+    v_since_rotation := now() - v_rotated_at;
     RETURN QUERY SELECT
-        'batching_efficiency'::text,
+        'ring_rotation'::text,
         CASE
-            WHEN v_samples_per_archive < 3 THEN 'WARNING'
-            WHEN v_samples_per_archive > 15 THEN 'WARNING'
+            WHEN v_since_rotation > 2 * v_rotation_period THEN 'WARNING'
             ELSE 'OK'
         END::text,
-        format('%s:1 samples per archive (%s min archive / %ss sample)',
-               ROUND(v_samples_per_archive, 1), v_archive_interval, v_sample_interval)::text,
+        format('last rotation %s ago (period %s)',
+               date_trunc('second', v_since_rotation), v_rotation_period)::text,
         CASE
-            WHEN v_samples_per_archive < 3 THEN
-                'Archive frequency too high relative to sampling—consider less frequent archiving'
-            WHEN v_samples_per_archive > 15 THEN
-                'Large data loss window on crash—consider more frequent archiving'
-            ELSE 'Batching ratio is optimal (3-15 samples per archive)'
+            WHEN v_since_rotation > 2 * v_rotation_period THEN
+                'Check that the pgfr_rotate_ring cron job is scheduled and succeeding (cron.job, collection warnings in the log)'
+            ELSE 'Rotation is keeping up'
         END::text;
 
-    -- Check 3: CPU overhead
+    -- Check 3: Measured sampler cost (not an estimate): average wall time of
+    -- successful ring sampler runs over the last 24 hours against the fixed
+    -- 60-second cadence.
+    SELECT round(avg(cs.duration_ms)::numeric, 1)
+    INTO v_avg_sample_ms
+    FROM pgfr_record.collection_stats cs
+    WHERE cs.collection_type = 'sample'
+      AND cs.success AND NOT cs.skipped AND cs.completed_at IS NOT NULL
+      AND cs.started_at > now() - interval '24 hours';
+    v_duty_pct := round(v_avg_sample_ms / 60000.0 * 100.0, 3);
     RETURN QUERY SELECT
-        'cpu_overhead'::text,
+        'sampler_cost'::text,
         CASE
-            WHEN v_cpu_pct > 0.1 THEN 'WARNING'
+            WHEN v_avg_sample_ms IS NULL THEN 'OK'
+            WHEN v_duty_pct > 0.5 THEN 'WARNING'
             ELSE 'OK'
         END::text,
-        format('%s%% sustained CPU overhead (~25ms per collection every %ss)',
-               ROUND(v_cpu_pct, 3), v_sample_interval)::text,
+        COALESCE(format('%s ms average per tick, %s%% duty cycle at the fixed 60s cadence (measured over 24h)',
+                        v_avg_sample_ms, v_duty_pct),
+                 'no successful sampler runs recorded in the last 24 hours')::text,
         CASE
-            WHEN v_cpu_pct > 0.1 THEN
-                'High sampling frequency—consider increasing sample_interval_seconds for production'
-            ELSE 'CPU overhead is negligible'
+            WHEN v_duty_pct > 0.5 THEN
+                'Sampler cost is high; the 500ms statement_timeout and circuit breaker bound it, but consider emergency mode to disable lock collection'
+            ELSE 'Sampler cost is negligible'
         END::text;
 
-    -- Check 4: Memory usage
+    -- Check 4: Ring storage footprint, measured from the ring tables.
+    SELECT COALESCE(sum(pg_total_relation_size(c.oid)), 0)
+    INTO v_ring_bytes
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'pgfr_record'
+      AND (c.relname LIKE 'wait\_samples%'
+        OR c.relname LIKE 'lock\_samples%'
+        OR c.relname LIKE 'activity\_samples%'
+        OR c.relname LIKE 'query\_map\_%');
     RETURN QUERY SELECT
-        'memory_usage'::text,
+        'ring_storage'::text,
         CASE
-            WHEN v_memory_mb > 200 THEN 'WARNING'
+            WHEN v_ring_bytes > 500 * 1024 * 1024 THEN 'WARNING'
             ELSE 'OK'
         END::text,
-        format('~%s MB estimated ring buffer memory (%s slots)',
-               ROUND(v_memory_mb, 0), v_slots)::text,
+        format('%s on disk across the ring tables (measured)',
+               pgfr_record._pretty_bytes(v_ring_bytes::bigint))::text,
         CASE
-            WHEN v_memory_mb > 200 THEN
-                'Large ring buffer—ensure adequate shared_buffers headroom'
-            ELSE 'Memory usage is within normal bounds'
+            WHEN v_ring_bytes > 500 * 1024 * 1024 THEN
+                'Large ring footprint; consider a shorter ring_rotation_period so slots truncate sooner'
+            ELSE 'Ring storage is within normal bounds'
         END::text;
 END;
 $$;
-COMMENT ON FUNCTION pgfr_record.validate_ring_configuration() IS 'Validates ring buffer configuration and returns diagnostic checks for retention, batching efficiency, CPU overhead, and memory usage.';
+COMMENT ON FUNCTION pgfr_record.validate_ring_configuration() IS 'Validates the v2 ring buffer: nominal retention window from ring_config, rotation health, measured sampler cost from collection_stats, and measured ring storage footprint.';
 
 -- Check if the pg_stat_statements extension is installed
 -- Returns TRUE if available, FALSE otherwise

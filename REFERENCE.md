@@ -37,14 +37,12 @@ Complete reference for [pg_flight_recorder](README.md). For installation and get
 | `pgfr_record.explain_profile(name text)` | `record` | Preview what a profile would change |
 | `pgfr_record.apply_profile(name text)` | `record` | Apply a configuration profile |
 | `pgfr_record.get_current_profile()` | `record` | Identify which profile matches current settings |
-| `pgfr_record.get_optimization_profiles()` | `record` | List ring buffer optimization presets |
-| `pgfr_record.apply_optimization_profile(name text)` | `record` | Apply a ring buffer optimization preset |
 
 ### Ring buffer management
 
 | Function | Returns | Description |
 |----------|---------|-------------|
-| `pgfr_record.validate_ring_configuration()` | `record` | Validate ring buffer retention, batching, CPU, and memory |
+| `pgfr_record.validate_ring_configuration()` | `record` | Validate the v2 ring: nominal window from `ring_config`, rotation health, measured sampler cost, measured storage |
 
 The v2 ring uses TRUNCATE-rotation on LIST-partitioned tables; partition
 maintenance is handled by the `pgfr_truncate_partitions`,
@@ -624,8 +622,10 @@ This eliminates `pg_catalog` joins during collection, avoiding even `AccessShare
 Settings are stored in `pgfr_record.config`. Profiles set groups of related settings. Update individual settings with:
 
 ```sql
-UPDATE pgfr_record.config SET value = '300' WHERE key = 'sample_interval_seconds';
+UPDATE pgfr_record.config SET value = '14' WHERE key = 'retention_snapshots_days';
 ```
+
+The collection cadence itself is not a setting: both collectors run at a fixed one-minute cadence (the retired `sample_interval_seconds` key never changed it; see [STATISTICS.md](STATISTICS.md) for the detection limits this constant fixes).
 
 ### Core settings
 
@@ -639,8 +639,6 @@ UPDATE pgfr_record.config SET value = '300' WHERE key = 'sample_interval_seconds
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `sample_interval_seconds` | `60` | Seconds between ring buffer samples |
-| `ring_buffer_slots` | `120` | Ring buffer slot count (72-2880) |
 | `retention_snapshots_days` | `30` | Snapshot retention (days) |
 | `retention_archive_days` | `7` | Archive-tier partition retention (days). No active subscribers after the archive retirement, but kept as a placeholder for future archive-tier tables. |
 | `retention_statements_days` | `30` | Statement snapshot retention (days) |
@@ -846,7 +844,6 @@ Profiles configure groups of related settings for different environments. Key di
 
 | Setting | default | production_safe | development | troubleshooting | minimal_overhead |
 |---------|---------|-----------------|-------------|-----------------|------------------|
-| `sample_interval_seconds` | 60 | 300 | 60 | 60 | 300 |
 | `load_shedding_active_pct` | 70 | 60 | 70 | disabled | 50 |
 | `circuit_breaker_threshold_ms` | 1000 | 800 | 1000 | 2000 | 500 |
 | `enable_locks` | true | false | true | true | false |

@@ -43,41 +43,45 @@ SELECT plan(64);
 
 -- Configuration Boundaries (15 tests)
 
--- Test sample_interval_seconds = 0 (should be rejected by validation)
+-- Boundary-value storage tests. These used sample_interval_seconds until
+-- Issue #106 retired that key; statements_interval_minutes is the live
+-- numeric key with the same store-anything-validate-at-use contract.
+
+-- Test statements_interval_minutes = 0 (should be rejected by validation)
 SELECT lives_ok(
-    $$UPDATE pgfr_record.config SET value = '0' WHERE key = 'sample_interval_seconds'$$,
-    'Boundary: config can store sample_interval_seconds = 0 (validation happens at use time)'
+    $$UPDATE pgfr_record.config SET value = '0' WHERE key = 'statements_interval_minutes'$$,
+    'Boundary: config can store statements_interval_minutes = 0 (validation happens at use time)'
 );
 
 -- Reset to valid value
-UPDATE pgfr_record.config SET value = '120' WHERE key = 'sample_interval_seconds';
+UPDATE pgfr_record.config SET value = '1' WHERE key = 'statements_interval_minutes';
 
--- Test sample_interval_seconds = -1
+-- Test statements_interval_minutes = -1
 SELECT lives_ok(
-    $$UPDATE pgfr_record.config SET value = '-1' WHERE key = 'sample_interval_seconds'$$,
-    'Boundary: config can store negative sample_interval_seconds (validation happens at use time)'
+    $$UPDATE pgfr_record.config SET value = '-1' WHERE key = 'statements_interval_minutes'$$,
+    'Boundary: config can store negative statements_interval_minutes (validation happens at use time)'
 );
 
 -- Reset to valid value
-UPDATE pgfr_record.config SET value = '120' WHERE key = 'sample_interval_seconds';
+UPDATE pgfr_record.config SET value = '1' WHERE key = 'statements_interval_minutes';
 
--- Test sample_interval_seconds = 59 (below minimum of 60)
+-- Test an absurdly large value
 SELECT lives_ok(
-    $$UPDATE pgfr_record.config SET value = '59' WHERE key = 'sample_interval_seconds'$$,
-    'Boundary: config can store sample_interval_seconds = 59'
+    $$UPDATE pgfr_record.config SET value = '999999' WHERE key = 'statements_interval_minutes'$$,
+    'Boundary: config can store an absurdly large statements_interval_minutes'
 );
 
 -- Reset to valid value
-UPDATE pgfr_record.config SET value = '120' WHERE key = 'sample_interval_seconds';
+UPDATE pgfr_record.config SET value = '1' WHERE key = 'statements_interval_minutes';
 
--- Test sample_interval_seconds = 3601 (above maximum of 3600)
+-- Test non-integer text in a numeric key slot
 SELECT lives_ok(
-    $$UPDATE pgfr_record.config SET value = '3601' WHERE key = 'sample_interval_seconds'$$,
-    'Boundary: config can store sample_interval_seconds = 3601'
+    $$UPDATE pgfr_record.config SET value = '1.5' WHERE key = 'statements_interval_minutes'$$,
+    'Boundary: config can store a non-integer statements_interval_minutes'
 );
 
 -- Reset to valid value
-UPDATE pgfr_record.config SET value = '120' WHERE key = 'sample_interval_seconds';
+UPDATE pgfr_record.config SET value = '1' WHERE key = 'statements_interval_minutes';
 
 -- Test circuit_breaker_threshold_ms = 0
 SELECT lives_ok(
@@ -522,7 +526,6 @@ SELECT ok(
 DO $$
 BEGIN
     -- Set all recommended values
-    UPDATE pgfr_record.config SET value = '120' WHERE key = 'sample_interval_seconds';
     UPDATE pgfr_record.config SET value = 'true' WHERE key = 'circuit_breaker_enabled';
     UPDATE pgfr_record.config SET value = '50' WHERE key = 'lock_timeout_ms';
 END $$;
