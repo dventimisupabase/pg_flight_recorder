@@ -857,7 +857,7 @@ BEGIN
             'Scheduling (pg_cron)'::text,
             'CAUTION'::text,
             'pg_cron extension not found',
-            'You will need to schedule pgfr_record.sample() and pgfr_record.snapshot() manually via external cron or pg_agent.'::text;
+            'You will need to schedule pgfr_record.sample_ring() and pgfr_record.snapshot() (plus pgfr_record.rotate_ring() every 2 hours) manually via external cron; pgfr_record.enable() is the canonical scheduler when pg_cron is present.'::text;
     END IF;
     RETURN QUERY SELECT
         'Safety Mechanisms'::text,
@@ -1081,10 +1081,13 @@ BEGIN
         v_inactive_jobs TEXT[];
     BEGIN
         WITH required_jobs AS (
+            -- Current v2 job roster (Issue #71: pgfr_sample and pgfr_flush
+            -- were retired with the legacy ring; requiring them here made
+            -- every healthy install report missing jobs).
             SELECT unnest(ARRAY[
-                'pgfr_sample',
                 'pgfr_snapshot',
-                'pgfr_flush',
+                'pgfr_sample_ring',
+                'pgfr_rotate_ring',
                 'pgfr_cleanup'
             ]) AS job_name
         )
@@ -1100,7 +1103,7 @@ BEGIN
             RETURN QUERY SELECT
                 '6. pg_cron Job Health'::text,
                 'EXCELLENT'::text,
-                '4/4 jobs active (sample, snapshot, flush, cleanup)',
+                '4/4 jobs active (snapshot, sample_ring, rotate_ring, cleanup)',
                 'All pg_cron jobs are running correctly.'::text;
         ELSIF v_missing_count > 0 THEN
             RETURN QUERY SELECT
@@ -1117,7 +1120,7 @@ BEGIN
         END IF;
     EXCEPTION WHEN OTHERS THEN
         RETURN QUERY SELECT
-            '7. pg_cron Job Health'::text,
+            '6. pg_cron Job Health'::text,
             'ERROR'::text,
             format('Failed to check pg_cron jobs: %s', SQLERRM),
             'Verify pg_cron extension is installed and accessible.'::text;

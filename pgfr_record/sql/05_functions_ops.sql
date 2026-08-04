@@ -588,8 +588,13 @@ DECLARE
 BEGIN
     v_mode := pgfr_record._get_config('mode', 'normal');
     SELECT schema_size_mb INTO v_schema_size_mb FROM pgfr_record._check_schema_size();
-    -- Sample volume from v2 wait_samples (legacy samples_ring retired).
-    SELECT count(*) INTO v_sample_count FROM pgfr_record.wait_samples;
+    -- Archive-tier volume: the retention_archive_days advice below must
+    -- count what that key actually governs, the three _archive_v2 rollup
+    -- tables (ring raw samples are bounded by rotation, not retention).
+    SELECT (SELECT count(*) FROM pgfr_record.wait_event_rollups_archive_v2)
+         + (SELECT count(*) FROM pgfr_record.lock_rollups_archive_v2)
+         + (SELECT count(*) FROM pgfr_record.activity_rollups_archive_v2)
+    INTO v_sample_count;
     SELECT count(*) INTO v_snapshot_count FROM pgfr_record.snapshots;
     SELECT avg(duration_ms) INTO v_avg_sample_ms
     FROM pgfr_record.collection_stats
@@ -616,8 +621,8 @@ BEGIN
     IF v_sample_count > 50000 AND v_retention_samples > 7 THEN
         RETURN QUERY SELECT
             'Storage'::text,
-            'Reduce sample retention period'::text,
-            format('High sample count (%s) with %s day retention', v_sample_count, v_retention_samples),
+            'Reduce archive rollup retention period'::text,
+            format('High archive rollup row count (%s) with %s day retention', v_sample_count, v_retention_samples),
             format('UPDATE pgfr_record.config SET value = ''3'' WHERE key = ''retention_archive_days'';')::text;
     END IF;
     IF NOT FOUND THEN

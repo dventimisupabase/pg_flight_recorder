@@ -12,7 +12,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(14);
+SELECT plan(19);
 
 -- -----------------------------------------------------------------------------
 -- 1. The retired config keys are gone and stay gone
@@ -56,6 +56,17 @@ SELECT hasnt_function('pgfr_record', '_get_ring_buffer_slots',
     '_get_ring_buffer_slots() is retired');
 SELECT hasnt_function('pgfr_record', '_get_ring_retention_interval',
     '_get_ring_retention_interval() is retired');
+SELECT hasnt_function('pgfr_record', 'sample',
+    'the legacy sampler pgfr_record.sample() is retired (Issue #71)');
+
+-- -----------------------------------------------------------------------------
+-- 2b. The legacy 120-slot ring tables are gone (Issue #71)
+-- -----------------------------------------------------------------------------
+
+SELECT hasnt_table('pgfr_record', 'samples_ring', 'samples_ring is dropped');
+SELECT hasnt_table('pgfr_record', 'wait_samples_ring', 'wait_samples_ring is dropped');
+SELECT hasnt_table('pgfr_record', 'activity_samples_ring', 'activity_samples_ring is dropped');
+SELECT hasnt_table('pgfr_record', 'lock_samples_ring', 'lock_samples_ring is dropped');
 
 -- -----------------------------------------------------------------------------
 -- 3. validate_ring_configuration() reads the live v2 state

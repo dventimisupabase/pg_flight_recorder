@@ -361,7 +361,8 @@ comment on function pgfr_record.rotate_ring() is
 -- 8. sample_ring() — INSERT-based sampler (replaces UPDATE pattern)
 -- Implements the same integer[] encoding as ash.take_sample():
 --   [-wait_id, count, qmap_id, qmap_id, ...]  — one group per (datid, wait_event)
--- Keeps existing pgfr_record.sample() intact for dual operation during migration.
+-- The legacy pgfr_record.sample() it replaced is retired (Issue #71); a
+-- standing DROP below removes it from upgraded installs.
 create or replace function pgfr_record.sample_ring()
 returns timestamptz
 language plpgsql
@@ -1028,6 +1029,11 @@ comment on function pgfr_record.sample_ring() is
 
 DROP FUNCTION IF EXISTS pgfr_record.flush_ring_to_aggregates();
 DROP FUNCTION IF EXISTS pgfr_record.archive_ring_samples();
+-- The legacy sampler itself (Issue #71): its definition is gone from the
+-- source, but upgraded installs still carry the function, pointing at
+-- tables 02_tables.sql drops. A leftover callable that can only error
+-- advertises a retired path.
+DROP FUNCTION IF EXISTS pgfr_record.sample();
 
 --------------------------------------------------------------------------------
 -- End of ring buffer v2 section
