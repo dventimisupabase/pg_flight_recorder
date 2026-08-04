@@ -260,8 +260,8 @@ SELECT is(
 
 SELECT is(
     (SELECT value FROM pgfr_record.config WHERE key = 'schema_version'),
-    '2.28',
-    'Schema version should be 2.28'
+    '2.29',
+    'Schema version should be 2.29'
 );
 
 -- =============================================================================

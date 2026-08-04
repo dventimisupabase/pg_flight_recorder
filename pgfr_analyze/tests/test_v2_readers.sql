@@ -7,7 +7,7 @@
 -- =============================================================================
 
 begin;
-select plan(19);
+select plan(21);
 
 -- ---------------------------------------------------------------------------
 -- 1. v2_time_range: function exists
@@ -338,9 +338,11 @@ end $$;
 select ok(true, 'R3: index_activity_v2 uses pre-window baseline — idx_scan_delta = 80 not 580 (N1 guard)');
 
 -- ---------------------------------------------------------------------------
--- R4. Single-tick window: delta is 0 when only one row exists (inside window)
---     With no pre-window baseline, coalesce to 0 — result is the full counter
---     value. This is expected/documented behaviour for first-ever appearance.
+-- R4. First-ever appearance is CENSORED, not a lifetime counter (Issue #101).
+--     With no pre-window baseline, the old behaviour returned the full
+--     counter value (potentially months of activity attributed to the
+--     window); the reader now returns NULL deltas with
+--     censored_reason = no_baseline, and the row stays visible.
 -- ---------------------------------------------------------------------------
 do $$
 declare
@@ -348,6 +350,7 @@ declare
     v_win_start timestamptz;
     v_win_end   timestamptz;
     v_delta     bigint;
+    v_reason    text;
     v_newqid    bigint := -88885678;
     v_dbid      oid;
     v_uid       oid;
@@ -368,18 +371,98 @@ begin
     ) values (-3, 4500, v_newqid, v_uid, v_dbid, true,
               42, 420.0, 42, 100, 5, 0, false);
 
-    select calls_delta into v_delta
+    select calls_delta, censored_reason into v_delta, v_reason
     from pgfr_analyze.statement_activity_v2(v_win_start, v_win_end, 100)
     where queryid = v_newqid;
 
-    -- first-ever appearance: no pre-window row, delta = calls - 0 = 42
-    -- this is the documented behaviour (not a bug, just no history)
-    if v_delta is null or v_delta <> 42 then
-        raise exception 'R4: first-ever query delta = % (expected 42)', v_delta;
+    if v_reason is distinct from 'no_baseline' then
+        raise exception 'R4: censored_reason = % (expected no_baseline)', v_reason;
+    end if;
+    if v_delta is not null then
+        raise exception 'R4: first-ever query delta = % (expected NULL: a delta without a baseline is the lifetime counter, not a measurement)', v_delta;
     end if;
 end $$;
 
-select ok(true, 'R4: first-ever query appearance returns calls_delta = full counter (no prior baseline)');
+select ok(true, 'R4: first-ever query appearance is censored (NULL delta, no_baseline), never the lifetime counter');
+
+-- ---------------------------------------------------------------------------
+-- R5. Counter regression between the two snapshots is censored, not clamped
+--     to zero (Issue #101): calls goes 500 -> 100 across the window baseline,
+--     so the delta is NULL with censored_reason = counter_regression.
+-- ---------------------------------------------------------------------------
+do $$
+declare
+    v_epoch     timestamptz := pgfr_record.epoch();
+    v_win_start timestamptz;
+    v_win_end   timestamptz;
+    v_delta     bigint;
+    v_reason    text;
+    v_qid       bigint := -88886789;
+    v_dbid      oid;
+    v_uid       oid;
+begin
+    v_dbid      := (select oid from pg_database where datname = current_database());
+    v_uid       := (select usesysid from pg_user where usename = current_user);
+    v_win_start := v_epoch + 4000 * interval '1 second';
+    v_win_end   := v_epoch + 5000 * interval '1 second';
+
+    insert into pgfr_record.statement_snapshots_v2 (
+        snapshot_id, sample_ts, queryid, userid, dbid, toplevel,
+        calls, total_exec_time, rows, shared_blks_hit, shared_blks_read,
+        temp_blks_written, pgss_dealloc_warning
+    ) values
+        (-4, 3800, v_qid, v_uid, v_dbid, true, 500, 5000.0, 500, 900, 90, 0, false),
+        (-5, 4500, v_qid, v_uid, v_dbid, true, 100, 1000.0, 100, 200, 20, 0, false);
+
+    select calls_delta, censored_reason into v_delta, v_reason
+    from pgfr_analyze.statement_activity_v2(v_win_start, v_win_end, 100)
+    where queryid = v_qid;
+
+    if v_reason is distinct from 'counter_regression' then
+        raise exception 'R5: censored_reason = % (expected counter_regression)', v_reason;
+    end if;
+    if v_delta is not null then
+        raise exception 'R5: regressed counter delta = % (expected NULL, not a zero clamp)', v_delta;
+    end if;
+end $$;
+
+select ok(true, 'R5: a counter regression across the window is censored (NULL delta, counter_regression), never zero-clamped');
+
+-- ---------------------------------------------------------------------------
+-- R6. table_activity_v2 censors a first-ever observation the same way.
+-- ---------------------------------------------------------------------------
+do $$
+declare
+    v_epoch     timestamptz := pgfr_record.epoch();
+    v_delta     bigint;
+    v_reason    text;
+    v_testrelid oid := 99998::oid;
+    v_dbid      oid;
+begin
+    v_dbid := (select oid from pg_database where datname = current_database());
+
+    insert into pgfr_record.table_snapshots_v2 (
+        snapshot_id, sample_ts, relid, dbid,
+        n_tup_ins, n_tup_upd, n_tup_del, n_tup_hot_upd,
+        seq_scan, idx_scan, n_live_tup, n_dead_tup, table_size_bytes
+    ) values (-6, 4500, v_testrelid, v_dbid,
+              77777, 0, 0, 0, 0, 0, 100, 0, 8192);
+
+    select n_tup_ins_delta, censored_reason into v_delta, v_reason
+    from pgfr_analyze.table_activity_v2(
+        v_epoch + 4000 * interval '1 second',
+        v_epoch + 5000 * interval '1 second', 100)
+    where relid = v_testrelid;
+
+    if v_reason is distinct from 'no_baseline' then
+        raise exception 'R6: censored_reason = % (expected no_baseline)', v_reason;
+    end if;
+    if v_delta is not null then
+        raise exception 'R6: first-ever table delta = % (expected NULL)', v_delta;
+    end if;
+end $$;
+
+select ok(true, 'R6: first-ever table observation is censored (NULL delta, no_baseline), never the lifetime counter');
 
 select * from finish();
 rollback;

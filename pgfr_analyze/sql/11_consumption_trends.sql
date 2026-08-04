@@ -112,9 +112,9 @@ create table if not exists pgfr_analyze.consumption_trends (
 
     slope_pct_per_30d   numeric,
     classification      text        not null
-        check (classification in ('insufficient_data', 'stable', 'drift', 'step', 'composition')),
+        check (classification in ('insufficient_data', 'stable', 'drift', 'step', 'composition', 'discontinuity')),
     changepoint_date    date,
-    check ((classification = 'step') = (changepoint_date is not null)),
+    check ((classification in ('step', 'discontinuity')) = (changepoint_date is not null)),
     composition_change  boolean     not null default false,
 
     computed_at         timestamptz not null default now(),
@@ -123,10 +123,11 @@ create table if not exists pgfr_analyze.consumption_trends (
 );
 
 -- Additive upgrade path for installs from phase 2 (before composition_change
--- and the 'composition' classification value existed). SET LOCAL silences the
+-- and the 'composition' classification value existed) and from pre-#101
+-- installs (before the 'discontinuity' classification). SET LOCAL silences the
 -- "does not exist, skipping" notice on fresh installs where these are already
 -- correct from the CREATE TABLE above. CHECK constraints can't be altered in
--- place, so the classification constraint is dropped and recreated.
+-- place, so both are dropped and recreated.
 do $$
 begin
     set local client_min_messages = warning;
@@ -136,7 +137,12 @@ begin
         drop constraint if exists consumption_trends_classification_check;
     alter table pgfr_analyze.consumption_trends
         add constraint consumption_trends_classification_check
-        check (classification in ('insufficient_data', 'stable', 'drift', 'step', 'composition'));
+        check (classification in ('insufficient_data', 'stable', 'drift', 'step', 'composition', 'discontinuity'));
+    alter table pgfr_analyze.consumption_trends
+        drop constraint if exists consumption_trends_check;
+    alter table pgfr_analyze.consumption_trends
+        add constraint consumption_trends_check
+        check ((classification in ('step', 'discontinuity')) = (changepoint_date is not null));
 end $$;
 
 comment on table pgfr_analyze.consumption_trends is
@@ -169,7 +175,11 @@ comment on column pgfr_analyze.consumption_trends.classification is
 'movement was detected (would otherwise be step or drift) but the window''s '
 'workload-shape indicators also moved beyond threshold between the window''s '
 'halves (see composition_change) -- no fitness inference is safe, so no '
-'changepoint_date either. A metric that never moved (stable) stays stable '
+'changepoint_date either. discontinuity: a level shift was detected but its '
+'split date coincides with a recorded restart or stats reset '
+'(pgfr_record.discontinuities, Issue #101) -- a known instrument boundary '
+'supplied as input, not a discovered workload changepoint; changepoint_date '
+'carries the boundary. A metric that never moved (stable) stays stable '
 'even if the workload shape also changed that window: there''s nothing to '
 'misattribute in the first place. Not a magnitude threshold for step vs '
 'drift: distinguishing them requires comparing model fit, not shift size -- '
@@ -381,7 +391,21 @@ begin
             gs.median_value, gs.r2_line, gs.tss,
             sc.median_slope,
             bs.split_date, bs.r2_step,
-            coalesce(cf.composition_change, false) as composition_change
+            coalesce(cf.composition_change, false) as composition_change,
+            -- Known instrument boundary (Issue #101): the best split landing
+            -- on (within a day of) a recorded restart or stats reset is not a
+            -- discovered workload changepoint, it is the instrument's own
+            -- baseline moving. detected_at dates the tick that noticed the
+            -- event; the level shift in daily rollups lands on that day or
+            -- its neighbor, hence the one-day tolerance.
+            (bs.split_date is not null and exists (
+                select 1
+                from pgfr_record.discontinuities d
+                where d.event_kind in ('restart', 'stats_reset')
+                  and abs(bs.split_date - d.detected_at::date) <= 1
+                  and d.detected_at::date >  v_as_of_date - v_window_days
+                  and d.detected_at::date <= v_as_of_date
+            )) as split_on_boundary
         from all_combos ac
         left join group_stats gs      on gs.datname = ac.datname and gs.metric_name = ac.metric_name
         left join slope_calc  sc      on sc.datname = ac.datname and sc.metric_name = ac.metric_name
@@ -399,6 +423,12 @@ begin
                 -- constant series -- see the comment on group_stats.r2_line.
                 when coalesce(tss, 0) = 0 then 'stable'
                 when coalesce(r2_step, 0) < v_min_r2 and coalesce(r2_line, 0) < v_min_r2 then 'stable'
+                -- A detected step whose split sits on a recorded discontinuity
+                -- is reported as such, never as a discovered changepoint. This
+                -- outranks composition: a recorded instrument event is
+                -- stronger evidence than the shape heuristic.
+                when coalesce(r2_step, 0) >= coalesce(r2_line, 0) + v_step_r2_margin
+                     and split_on_boundary then 'discontinuity'
                 -- Composition only overrides a *detected* movement (a metric
                 -- that's already stable has nothing to misattribute), so this
                 -- check sits after both stable checks and before step/drift.
@@ -422,7 +452,7 @@ begin
             else median_slope * 30 / abs(median_value) * 100
         end,
         classification,
-        case when classification = 'step' then split_date else null end,
+        case when classification in ('step', 'discontinuity') then split_date else null end,
         composition_change
     from classified
     on conflict (as_of_date, datname, metric_name, window_days)
@@ -589,6 +619,11 @@ begin
     elsif v_trend.classification = 'composition' then
         v_result := v_result || 'A change was detected, but the workload mix also shifted '
             || 'during this window -- no attribution made.' || E'\n';
+    elsif v_trend.classification = 'discontinuity' then
+        v_result := v_result || 'Level shift on ' || v_trend.changepoint_date
+            || ' coincides with a recorded instrument discontinuity (restart or '
+            || 'stats reset; see pgfr_record.discontinuities) -- known baseline '
+            || 'move, not a discovered workload changepoint.' || E'\n';
     end if;
 
     if p_grain = 'weekly' then

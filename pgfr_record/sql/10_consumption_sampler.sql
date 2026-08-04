@@ -228,6 +228,10 @@ declare
     v_io_reads_total        bigint;
     v_io_writes_total       bigint;
     v_io_extends_total      bigint;
+    v_db_stats_reset        timestamptz;
+    v_prev_db_reset         timestamptz;
+    v_prev_wal_reset        timestamptz;
+    v_prev_ckpt_reset       timestamptz;
 begin
     -- Primary only: pg_current_wal_lsn(), pg_stat_checkpointer, and several
     -- conflict/replication-adjacent views are absent, zero, or misleading on a
@@ -293,6 +297,36 @@ begin
         -- buffer counters already read above; reads_total has no PG15 equivalent
         -- and stays NULL (Issue #81 §"Version handling").
         v_io_writes_total := v_ckpt_buffers_written + v_bgw_buffers_clean;
+    end if;
+
+    -- Discontinuity detection (Issue #101): compare this tick's reset
+    -- sentinels against the previous tick's before inserting the new row,
+    -- and record one stats_reset event per family that moved. This is the
+    -- same censoring condition _reset_guarded_delta() applies at read time
+    -- (prev sentinel known, current distinct from it); the event makes the
+    -- fact queryable instead of only NULLing the spanned deltas.
+    select stats_reset into v_db_stats_reset
+    from pg_stat_database where datname = current_database();
+
+    select cs.db_stats_reset, cs.wal_stats_reset, cs.ckpt_stats_reset
+    into   v_prev_db_reset,   v_prev_wal_reset,   v_prev_ckpt_reset
+    from pgfr_record.consumption_snapshots_v2 cs
+    where cs.datname = current_database()
+    order by cs.sample_ts desc
+    limit 1;
+
+    if v_prev_db_reset is not null and v_db_stats_reset is distinct from v_prev_db_reset then
+        perform pgfr_record._record_discontinuity('stats_reset', 'pg_stat_database',
+            jsonb_build_object('previous', v_prev_db_reset, 'current', v_db_stats_reset,
+                               'datname', current_database()));
+    end if;
+    if v_prev_wal_reset is not null and v_wal_stats_reset is distinct from v_prev_wal_reset then
+        perform pgfr_record._record_discontinuity('stats_reset', 'pg_stat_wal',
+            jsonb_build_object('previous', v_prev_wal_reset, 'current', v_wal_stats_reset));
+    end if;
+    if v_prev_ckpt_reset is not null and v_ckpt_stats_reset is distinct from v_prev_ckpt_reset then
+        perform pgfr_record._record_discontinuity('stats_reset', 'checkpointer_bgwriter',
+            jsonb_build_object('previous', v_prev_ckpt_reset, 'current', v_ckpt_stats_reset));
     end if;
 
     perform pgfr_record._ensure_partition('consumption_snapshots_v2', current_date,

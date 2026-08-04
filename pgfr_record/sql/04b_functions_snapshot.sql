@@ -63,6 +63,11 @@ DECLARE
     v_max_catalog_oid BIGINT;
     v_large_object_count BIGINT;
 BEGIN
+    -- Restart detection first (Issue #101): runs on every tick, before the
+    -- circuit breaker can return early, so a post-restart trip cannot hide
+    -- the restart event itself.
+    PERFORM pgfr_record._detect_restart();
+
     v_should_skip := pgfr_record._check_circuit_breaker('snapshot');
     IF v_should_skip THEN
         PERFORM pgfr_record._record_collection_skip('snapshot', 'Circuit breaker tripped - last run exceeded threshold', 'circuit_breaker');

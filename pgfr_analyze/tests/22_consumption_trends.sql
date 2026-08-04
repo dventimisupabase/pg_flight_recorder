@@ -10,7 +10,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(21);
+SELECT plan(24);
 
 -- -----------------------------------------------------------------------------
 -- 1. Schema (6 tests)
@@ -174,6 +174,45 @@ SELECT is(
        AND as_of_date = current_date),
     0,
     'the NULL metric does not poison its sibling metrics: 0 samples recorded, not silently omitted'
+);
+
+-- -----------------------------------------------------------------------------
+-- 6b. Known boundary (Issue #101): the same clean level shift, but with a
+--     recorded restart discontinuity at the shift date, classifies as
+--     discontinuity (known instrument boundary), not a discovered step.
+--     The shift sits at current_date - 10, away from the - 14 shift above, so
+--     the instance-wide discontinuity cannot re-classify that fixture.
+-- -----------------------------------------------------------------------------
+
+INSERT INTO pgfr_record.consumption_daily_rollups (
+    rollup_date, datname, total_seconds, valid_tick_count,
+    temp_bytes_sum, xact_commit_sum
+)
+SELECT current_date - i, '__pgfr_test_trends_discont__', 3600, 1,
+    CASE WHEN i >= 10 THEN 1000 ELSE 2000 END, 100
+FROM generate_series(0, 27) AS i;
+
+INSERT INTO pgfr_record.discontinuities (detected_at, event_kind, scope, evidence)
+VALUES ((current_date - 10)::timestamptz + interval '4 hours', 'restart', 'postmaster',
+        '{"previous_start": "fixture"}'::jsonb);
+
+SELECT lives_ok($$SELECT pgfr_analyze._refresh_consumption_trends()$$,
+    '_refresh_consumption_trends() runs with a recorded discontinuity in the window');
+
+SELECT is(
+    (SELECT classification FROM pgfr_analyze.consumption_trends
+     WHERE datname = '__pgfr_test_trends_discont__' AND metric_name = 'temp_bytes_per_xact'
+       AND as_of_date = current_date),
+    'discontinuity',
+    'a level shift on a recorded restart classifies as discontinuity, not a discovered step'
+);
+
+SELECT is(
+    (SELECT changepoint_date FROM pgfr_analyze.consumption_trends
+     WHERE datname = '__pgfr_test_trends_discont__' AND metric_name = 'temp_bytes_per_xact'
+       AND as_of_date = current_date),
+    (current_date - 10),
+    'the discontinuity row carries the boundary date in changepoint_date'
 );
 
 -- -----------------------------------------------------------------------------

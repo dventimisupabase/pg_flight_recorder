@@ -9,7 +9,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(12);
+SELECT plan(15);
 
 -- -----------------------------------------------------------------------------
 -- 1. Schema (2 tests)
@@ -120,6 +120,46 @@ SELECT ok(
           AND composition_change = true
     ),
     'composition_change is false everywhere at this grain -- not evaluated yet, phase C''s job'
+);
+
+-- -----------------------------------------------------------------------------
+-- 3b. Known boundary (Issue #101): a level shift whose week contains a
+--     recorded restart classifies as discontinuity, not step. Shift at
+--     i >= 21 (week index 3, week_end_date = current_date - 21); restart
+--     recorded at current_date - 23, inside that week's 7-day span. The
+--     existing step fixture splits at current_date - 42, outside this
+--     event's tolerance, so it stays a discovered step.
+-- -----------------------------------------------------------------------------
+
+INSERT INTO pgfr_record.consumption_daily_rollups (
+    rollup_date, datname, total_seconds, valid_tick_count,
+    temp_bytes_sum, xact_commit_sum
+)
+SELECT current_date - i, '__pgfr_test_weekly_discont__', 3600, 1,
+    CASE WHEN i >= 21 THEN 1000 ELSE 2000 END, 100
+FROM generate_series(0, 83) AS i;
+
+INSERT INTO pgfr_record.discontinuities (detected_at, event_kind, scope, evidence)
+VALUES ((current_date - 23)::timestamptz + interval '4 hours', 'restart', 'postmaster',
+        '{"previous_start": "weekly fixture"}'::jsonb);
+
+SELECT lives_ok($$SELECT pgfr_analyze._refresh_consumption_trends_weekly()$$,
+    '_refresh_consumption_trends_weekly() runs with a recorded discontinuity in the window');
+
+SELECT is(
+    (SELECT classification FROM pgfr_analyze.consumption_trends
+     WHERE datname = '__pgfr_test_weekly_discont__' AND metric_name = 'temp_bytes_per_xact'
+       AND as_of_date = current_date AND window_days = 84),
+    'discontinuity',
+    'a weekly level shift whose week contains a recorded restart classifies as discontinuity'
+);
+
+SELECT is(
+    (SELECT classification FROM pgfr_analyze.consumption_trends
+     WHERE datname = '__pgfr_test_weekly_step__' AND metric_name = 'temp_bytes_per_xact'
+       AND as_of_date = current_date AND window_days = 84),
+    'step',
+    'the unrelated step fixture (split outside the event tolerance) stays a discovered step'
 );
 
 SELECT lives_ok($$SELECT pgfr_analyze._refresh_consumption_trends_weekly()$$,
