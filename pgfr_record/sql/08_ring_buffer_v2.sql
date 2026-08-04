@@ -635,8 +635,9 @@ values
 on conflict (lock_type) do nothing;
 
 --------------------------------------------------------------------------------
--- 13. sample_ring() v2: also inserts into activity_samples
--- Adds activity sampling to the existing wait + lock sampling in sample_ring().
+-- 13. sample_ring() v2: wait events, active sessions, and lock contention
+-- Reads 1-4 encode wait events, read 5 samples activity, read 6 samples
+-- blocked/blocking lock pairs.
 --------------------------------------------------------------------------------
 
 create or replace function pgfr_record.sample_ring()
@@ -664,6 +665,9 @@ declare
     v_max_connections   int;
     v_active_clients    int;
     v_active_pct        numeric;
+    v_enable_locks      bool;
+    v_blocked_count     int;
+    v_skip_locks_threshold int;
 begin
     v_captured_at := clock_timestamp();
 
@@ -706,7 +710,7 @@ begin
         end if;
     end if;
 
-    v_stat_id := pgfr_record._record_collection_start('sample', 3);
+    v_stat_id := pgfr_record._record_collection_start('sample', 4);
 
     v_sample_ts   := extract(epoch from (v_captured_at - pgfr_record.epoch()))::int4;
     v_slot        := pgfr_record.ring_current_slot();
@@ -884,6 +888,80 @@ begin
         raise warning 'pgfr_record.sample_ring: activity_samples insert failed [%]: %', sqlstate, sqlerrm;
     end;
 
+    -- -------------------------------------------------------------------------
+    -- read 6: lock_samples — one row per blocked/blocking pair.
+    -- Gated by enable_locks. Skipped entirely when more backends are waiting
+    -- on locks than skip_locks_threshold: pg_blocking_pids() is priced per
+    -- waiter and fans out worst during a lock storm, exactly when the 500ms
+    -- job timeout is most at risk.
+    -- -------------------------------------------------------------------------
+    begin
+        v_enable_locks := coalesce(pgfr_record._get_config('enable_locks', 'true')::bool, true);
+        if v_enable_locks then
+            select count(*) into v_blocked_count
+            from pg_stat_activity sa
+            where sa.wait_event_type = 'Lock'
+              and sa.pid <> pg_backend_pid();
+
+            v_skip_locks_threshold := coalesce(
+                pgfr_record._get_config('skip_locks_threshold', '50')::int, 50);
+
+            if v_blocked_count > v_skip_locks_threshold then
+                if v_debug_logging then
+                    raise log 'pgfr_record.sample_ring: lock sampling skipped (% waiters > % threshold)',
+                        v_blocked_count, v_skip_locks_threshold;
+                end if;
+            elsif v_blocked_count > 0 then
+                -- Forward compatibility: register any lock type this PG
+                -- version exposes that the install-time seed list predates
+                -- (lock_type is NOT NULL, so an unmapped type would
+                -- otherwise drop the row at the join below).
+                insert into pgfr_record.lock_type_map (lock_type)
+                select distinct wl.locktype
+                from pg_locks wl
+                where not wl.granted
+                on conflict (lock_type) do nothing;
+
+                -- A backend waits on at most one heavyweight lock, so the
+                -- pg_locks join contributes one ungranted row per waiter.
+                -- DISTINCT guards against duplicate pids from
+                -- pg_blocking_pids(). blocking_pid comes from the array
+                -- element (not the blocker's pg_stat_activity row) so a
+                -- blocker that vanishes mid-read still yields the pair.
+                insert into pgfr_record.lock_samples
+                    (sample_ts, blocked_pid, blocked_qid, blocked_duration_s,
+                     blocking_pid, blocking_qid, lock_type, locked_relation_oid, slot)
+                select distinct
+                    v_sample_ts,
+                    blocked.pid,
+                    bm.id,
+                    greatest(0, extract(epoch from clock_timestamp()
+                        - coalesce(wl.waitstart, blocked.query_start)))::int4,
+                    b.pid,
+                    km.id,
+                    ltm.id,
+                    wl.relation,
+                    v_slot
+                from pg_stat_activity blocked
+                join pg_locks wl
+                  on wl.pid = blocked.pid and not wl.granted
+                join pgfr_record.lock_type_map ltm
+                  on ltm.lock_type = wl.locktype
+                cross join lateral unnest(pg_blocking_pids(blocked.pid)) as b(pid)
+                left join pg_stat_activity blocker
+                  on blocker.pid = b.pid
+                left join pgfr_record.query_map_all bm
+                  on bm.slot = v_slot and bm.query_id = blocked.query_id
+                left join pgfr_record.query_map_all km
+                  on km.slot = v_slot and km.query_id = blocker.query_id
+                where blocked.wait_event_type = 'Lock'
+                  and blocked.pid <> pg_backend_pid();
+            end if;
+        end if;
+    exception when others then
+        raise warning 'pgfr_record.sample_ring: lock_samples insert failed [%]: %', sqlstate, sqlerrm;
+    end;
+
     -- Mark collection as successful. We get here even if a section's
     -- EXCEPTION handler fired -- those sections only emit a WARNING and
     -- don't abort the rest of the sample. Counting partial-success runs
@@ -897,7 +975,9 @@ $$;
 comment on function pgfr_record.sample_ring() is
 'Ring buffer v2 sampler: INSERT-based replacement for the UPDATE pattern in sample(). '
 'Encodes wait events as integer[] arrays: [-wait_id, count, qmap_id, ...] per database. '
-'Also inserts flat rows into activity_samples (top 25 sessions by query age). '
+'Also inserts flat rows into activity_samples (top 25 sessions by query age) and '
+'blocked/blocking pairs into lock_samples via pg_blocking_pids() (gated by '
+'enable_locks; skipped when waiters exceed skip_locks_threshold). '
 'Dual operation: existing sample() continues to work during migration. '
 'Call via pg_cron at 1-minute cadence; use rotate_ring() on a slower schedule.';
 
