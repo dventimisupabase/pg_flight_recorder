@@ -34,6 +34,11 @@
 -- pgTAP suites (pgfr_record/tests/23_column_semantics.sql,
 -- pgfr_analyze/tests/27_column_semantics.sql) fail when any exposed column is
 -- absent from this registry.
+--
+-- Channel caveat: the dbdev package build strips every COMMENT ON statement
+-- to fit dbdev's 250,000-character cap (scripts/build_dbdev_package.sh), so
+-- on a dbdev-channel install this registry is empty. The psql and bundle
+-- install channels carry the full annotations.
 --------------------------------------------------------------------------------
 
 create or replace function pgfr_analyze.column_semantics()

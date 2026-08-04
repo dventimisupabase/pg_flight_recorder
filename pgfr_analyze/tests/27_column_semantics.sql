@@ -17,6 +17,13 @@
 BEGIN;
 SELECT plan(9);
 
+-- The dbdev package build strips every COMMENT ON statement to fit dbdev's
+-- 250,000-character cap (see scripts/build_dbdev_package.sh), so on a
+-- dbdev-channel install there are no annotations to enforce. Skip the
+-- comment-dependent assertions there; psql and bundle channels still enforce.
+CREATE TEMP VIEW __semantics_stripped AS
+SELECT obj_description('pgfr_record.config'::regclass, 'pg_class') IS NULL AS stripped;
+
 SELECT has_function('pgfr_analyze', 'column_semantics',
     'pgfr_analyze.column_semantics() exists');
 
@@ -24,7 +31,9 @@ SELECT has_function('pgfr_analyze', 'column_semantics',
 -- 1. pgfr_analyze view columns: commented and well-formed
 -- -----------------------------------------------------------------------------
 
-SELECT is(
+SELECT CASE WHEN (SELECT stripped FROM __semantics_stripped)
+THEN skip('dbdev package strips COMMENT ON; annotations not present on this channel')
+ELSE is(
     (SELECT coalesce(array_agg(c.relname || '.' || a.attname ORDER BY c.relname, a.attnum), '{}')
      FROM pg_class c
      JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -38,7 +47,7 @@ SELECT is(
        AND d.description IS NULL),
     '{}'::text[],
     'every pgfr_analyze view column has a COMMENT ON COLUMN'
-);
+) END;
 
 SELECT is(
     (SELECT coalesce(array_agg(c.relname || '.' || a.attname ORDER BY c.relname, a.attnum), '{}')
@@ -62,7 +71,9 @@ SELECT is(
 --    comment's "Output columns:" block)
 -- -----------------------------------------------------------------------------
 
-SELECT is(
+SELECT CASE WHEN (SELECT stripped FROM __semantics_stripped)
+THEN skip('dbdev package strips COMMENT ON; annotations not present on this channel')
+ELSE is(
     (WITH declared AS (
         SELECT DISTINCT n.nspname || '.' || p.proname || '()' AS relation,
                args.argname AS column_name
@@ -80,7 +91,7 @@ SELECT is(
           SELECT relation, column_name FROM pgfr_analyze.column_semantics()) d),
     '{}'::text[],
     'every output column of every public pgfr_analyze SRF is in the registry'
-);
+) END;
 
 -- Typo guard: no registry entry for a function output column that is not
 -- actually declared by the function (catches misspelled names in comments).
@@ -110,7 +121,9 @@ SELECT is(
 --    this asserts the registry actually parses them)
 -- -----------------------------------------------------------------------------
 
-SELECT is(
+SELECT CASE WHEN (SELECT stripped FROM __semantics_stripped)
+THEN skip('dbdev package strips COMMENT ON; annotations not present on this channel')
+ELSE is(
     (WITH view_cols AS (
         SELECT n.nspname || '.' || c.relname AS relation,
                a.attname::text AS column_name
@@ -126,35 +139,41 @@ SELECT is(
           SELECT relation, column_name FROM pgfr_analyze.column_semantics()) v),
     '{}'::text[],
     'every view column in both pgfr schemas resolves to a registry row'
-);
+) END;
 
 -- -----------------------------------------------------------------------------
 -- 4. Spot checks: canonical semantics land in the registry with the right
 --    class, units, and denominator disclosure
 -- -----------------------------------------------------------------------------
 
-SELECT is(
+SELECT CASE WHEN (SELECT stripped FROM __semantics_stripped)
+THEN skip('dbdev package strips COMMENT ON; annotations not present on this channel')
+ELSE is(
     (SELECT semantic_class || '|' || units
      FROM pgfr_analyze.column_semantics()
      WHERE relation = 'pgfr_analyze.wait_summary()' AND column_name = 'pct_of_samples'),
     'point-sample|percent',
     'wait_summary().pct_of_samples is a point-sample percent in the registry'
-);
+) END;
 
-SELECT ok(
+SELECT CASE WHEN (SELECT stripped FROM __semantics_stripped)
+THEN skip('dbdev package strips COMMENT ON; annotations not present on this channel')
+ELSE ok(
     (SELECT notes ILIKE '%distinct ticks%'
      FROM pgfr_analyze.column_semantics()
      WHERE relation = 'pgfr_analyze.wait_summary()' AND column_name = 'pct_of_samples'),
     'wait_summary().pct_of_samples notes disclose the distinct-ticks denominator'
-);
+) END;
 
-SELECT is(
+SELECT CASE WHEN (SELECT stripped FROM __semantics_stripped)
+THEN skip('dbdev package strips COMMENT ON; annotations not present on this channel')
+ELSE is(
     (SELECT semantic_class || '|' || units || '|' || interval_basis
      FROM pgfr_analyze.column_semantics()
      WHERE relation = 'pgfr_record.consumption_flows' AND column_name = 'block_demand_per_s'),
     'counter-delta|blocks/s|interval-mean',
     'consumption_flows.block_demand_per_s parses as an interval-mean counter-delta rate'
-);
+) END;
 
 SELECT * FROM finish();
 ROLLBACK;
