@@ -690,7 +690,15 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION pgfr_analyze.anomaly_report(TIMESTAMPTZ, TIMESTAMPTZ) IS
-'Analyzes database metrics within a time window and reports detected anomalies (checkpoints, buffer pressure, lock contention, XID wraparound, bloat, replication lag) with severity levels and remediation recommendations.';
+'Analyzes database metrics within a time window and reports detected anomalies (checkpoints, buffer pressure, lock contention, XID wraparound, bloat, replication lag) with severity levels and remediation recommendations.
+
+Output columns:
+  anomaly_type: [dimension] [text] Check name identifying the detected condition (e.g. CHECKPOINT_DURING_WINDOW, BUFFER_PRESSURE, LOCK_CONTENTION, XMIN_HORIZON_STALL, XID_WRAPAROUND_RISK); one row per firing of a check.
+  severity: [derived] [text] Assessment (low, medium, high, or critical) computed by comparing the observed metric against per-check severity thresholds.
+  description: [derived] [text] Human-readable statement of the detected condition, composed from the triggering metrics (table names, PIDs, ages, growth figures).
+  metric_value: [derived] [text] Pretty-printed re-formatting of the observed values that triggered the check, formatted from the underlying counter deltas, gauges, or sample aggregates.
+  threshold: [derived] [text] The trigger rule for this check with configured threshold values substituted in, e.g. warning and critical fractions of autovacuum_freeze_max_age read from pgfr_record.config.
+  recommendation: [derived] [text] Suggested remediation derived from the anomaly type and, for xmin horizon checks, from the dominant-holder attribution in snapshots.xmin_horizon_detail.';
 
 -- Generates a comprehensive performance report with metrics and interpretations for a specified time window
 -- Aggregates data from compare, anomaly detection, wait events, and lock contention to provide human-readable insights
@@ -819,7 +827,13 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION pgfr_analyze.summary_report(TIMESTAMPTZ, TIMESTAMPTZ) IS
-'Generates a comprehensive performance report aggregating compare, anomaly detection, wait events, and lock contention data into human-readable metrics and interpretations.';
+'Generates a comprehensive performance report aggregating compare, anomaly detection, wait events, and lock contention data into human-readable metrics and interpretations.
+
+Output columns:
+  section: [dimension] [text] Report section name: OVERVIEW, CHECKPOINT & WAL, BUFFERS & I/O, WAIT EVENTS, or LOCK CONTENTION.
+  metric: [dimension] [text] Metric name within the section; in the WAIT EVENTS section this is the wait_event_type:wait_event pair for each of the top five waits.
+  value: [derived] [text] Pretty-printed value computed from compare() counter deltas, snapshot and activity_samples counts, anomaly_report() row counts, wait_summary() sample aggregates, or lock_samples.
+  interpretation: [derived] [text] Assessment of the value against built-in heuristics (OK, WARNING, wait classification, remediation hint), computed from the same inputs as value.';
 
 -- =============================================================================
 -- ANALYSIS FUNCTIONS (full implementations, cross-schema reads from pgfr_record.*)
@@ -931,7 +945,50 @@ LANGUAGE sql STABLE AS $$
         pgfr_record._pretty_bytes(e.temp_bytes - s.temp_bytes)
     FROM start_snap s, end_snap e
 $$;
-COMMENT ON FUNCTION pgfr_analyze.compare(TIMESTAMPTZ, TIMESTAMPTZ) IS 'Compares database metrics between two time points, returning checkpoint, WAL, buffer, and IO activity deltas.';
+COMMENT ON FUNCTION pgfr_analyze.compare(TIMESTAMPTZ, TIMESTAMPTZ) IS 'Compares database metrics between two time points, returning checkpoint, WAL, buffer, and IO activity deltas.
+
+Output columns:
+  start_snapshot_at: [dimension] [timestamp] captured_at of the start snapshot, the latest pgfr_record.snapshots row at or before p_start_time.
+  end_snapshot_at: [dimension] [timestamp] captured_at of the end snapshot, the earliest snapshots row at or after p_end_time; every delta below covers start_snapshot_at to end_snapshot_at, which may be wider than the requested window.
+  elapsed_seconds: [derived] [seconds] Seconds between start_snapshot_at and end_snapshot_at, computed from the two snapshot timestamps; the denominator to use when converting any delta to a mean rate.
+  checkpoint_occurred: [derived] [boolean] True when the pg_control_checkpoint() checkpoint_time recorded at the two snapshots differs, meaning at least one checkpoint completed during the interval.
+  ckpt_timed_delta: [counter-delta] [count] Scheduled (timed) checkpoints completed between the snapshots; from pg_stat_checkpointer.num_timed on PG17+, pg_stat_bgwriter.checkpoints_timed on PG15/16.
+  ckpt_requested_delta: [counter-delta] [count] Requested (forced) checkpoints between the snapshots, typically WAL volume exceeding max_wal_size; from pg_stat_checkpointer.num_requested on PG17+, pg_stat_bgwriter.checkpoints_req on PG15/16.
+  ckpt_write_time_ms: [counter-delta] [milliseconds] Checkpoint write-phase time accumulated between the snapshots; from pg_stat_checkpointer.write_time on PG17+, pg_stat_bgwriter.checkpoint_write_time on PG15/16.
+  ckpt_sync_time_ms: [counter-delta] [milliseconds] Checkpoint sync-phase time accumulated between the snapshots; from pg_stat_checkpointer.sync_time on PG17+, pg_stat_bgwriter.checkpoint_sync_time on PG15/16.
+  ckpt_buffers_delta: [counter-delta] [blocks] Buffers written during checkpoints between the snapshots; from pg_stat_checkpointer.buffers_written on PG17+, pg_stat_bgwriter.buffers_checkpoint on PG15/16.
+  wal_bytes_delta: [counter-delta] [bytes] WAL generated between the snapshots, differenced from pg_stat_wal.wal_bytes.
+  wal_bytes_pretty: [derived] [text] Human-readable re-formatting of wal_bytes_delta via pgfr_record._pretty_bytes().
+  wal_write_time_ms: [counter-delta] [milliseconds] Time spent writing WAL buffers to disk between the snapshots, from pg_stat_wal.wal_write_time; NULL on PG18+ where that column was dropped.
+  wal_sync_time_ms: [counter-delta] [milliseconds] Time spent syncing WAL files to disk between the snapshots, from pg_stat_wal.wal_sync_time; NULL on PG18+ where that column was dropped.
+  bgw_buffers_clean_delta: [counter-delta] [blocks] Buffers written by the background writer cleaning scan between the snapshots, from pg_stat_bgwriter.buffers_clean.
+  bgw_buffers_alloc_delta: [counter-delta] [blocks] Buffers allocated between the snapshots, from pg_stat_bgwriter.buffers_alloc.
+  bgw_buffers_backend_delta: [counter-delta] [blocks] Buffers written directly by backends between the snapshots (shared_buffers pressure signal), from pg_stat_bgwriter.buffers_backend; NULL on PG17+ where that column was removed.
+  bgw_buffers_backend_fsync_delta: [counter-delta] [count] fsync calls backends were forced to execute themselves between the snapshots, from pg_stat_bgwriter.buffers_backend_fsync; NULL on PG17+ where that column was removed.
+  slots_count: [gauge] [count] Number of replication slots in pg_replication_slots as captured at the end snapshot; a level at that instant, not a delta.
+  slots_max_retained_wal: [gauge] [bytes] Largest WAL retention across slots at the end snapshot, computed by the collector as max pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn).
+  slots_max_retained_pretty: [derived] [text] Human-readable re-formatting of slots_max_retained_wal via pgfr_record._pretty_bytes().
+  io_ckpt_reads_delta: [counter-delta] [count] pg_stat_io read operations by the checkpointer between the snapshots, summed over all IO contexts and objects; NULL on PG15 where pg_stat_io does not exist.
+  io_ckpt_read_time_ms: [counter-delta] [milliseconds] pg_stat_io read time by the checkpointer accumulated between the snapshots, summed over all IO contexts and objects; NULL on PG15.
+  io_ckpt_writes_delta: [counter-delta] [count] pg_stat_io write operations by the checkpointer between the snapshots, summed over all IO contexts and objects; NULL on PG15.
+  io_ckpt_write_time_ms: [counter-delta] [milliseconds] pg_stat_io write time by the checkpointer accumulated between the snapshots, summed over all IO contexts and objects; NULL on PG15.
+  io_ckpt_fsyncs_delta: [counter-delta] [count] pg_stat_io fsync operations by the checkpointer between the snapshots, summed over all IO contexts and objects; NULL on PG15.
+  io_ckpt_fsync_time_ms: [counter-delta] [milliseconds] pg_stat_io fsync time by the checkpointer accumulated between the snapshots, summed over all IO contexts and objects; NULL on PG15.
+  io_autovacuum_reads_delta: [counter-delta] [count] pg_stat_io read operations by autovacuum workers between the snapshots, summed over all IO contexts and objects; NULL on PG15.
+  io_autovacuum_read_time_ms: [counter-delta] [milliseconds] pg_stat_io read time by autovacuum workers accumulated between the snapshots, summed over all IO contexts and objects; NULL on PG15.
+  io_autovacuum_writes_delta: [counter-delta] [count] pg_stat_io write operations by autovacuum workers between the snapshots, summed over all IO contexts and objects; NULL on PG15.
+  io_autovacuum_write_time_ms: [counter-delta] [milliseconds] pg_stat_io write time by autovacuum workers accumulated between the snapshots, summed over all IO contexts and objects; NULL on PG15.
+  io_client_reads_delta: [counter-delta] [count] pg_stat_io read operations by client backends between the snapshots, summed over all IO contexts and objects; NULL on PG15.
+  io_client_read_time_ms: [counter-delta] [milliseconds] pg_stat_io read time by client backends accumulated between the snapshots, summed over all IO contexts and objects; NULL on PG15.
+  io_client_writes_delta: [counter-delta] [count] pg_stat_io write operations by client backends between the snapshots, summed over all IO contexts and objects; NULL on PG15.
+  io_client_write_time_ms: [counter-delta] [milliseconds] pg_stat_io write time by client backends accumulated between the snapshots, summed over all IO contexts and objects; NULL on PG15.
+  io_bgwriter_reads_delta: [counter-delta] [count] pg_stat_io read operations by the background writer between the snapshots, summed over all IO contexts and objects; NULL on PG15.
+  io_bgwriter_read_time_ms: [counter-delta] [milliseconds] pg_stat_io read time by the background writer accumulated between the snapshots, summed over all IO contexts and objects; NULL on PG15.
+  io_bgwriter_writes_delta: [counter-delta] [count] pg_stat_io write operations by the background writer between the snapshots, summed over all IO contexts and objects; NULL on PG15.
+  io_bgwriter_write_time_ms: [counter-delta] [milliseconds] pg_stat_io write time by the background writer accumulated between the snapshots, summed over all IO contexts and objects; NULL on PG15.
+  temp_files_delta: [counter-delta] [count] Temp files created between the snapshots, from pg_stat_database.temp_files for the current database.
+  temp_bytes_delta: [counter-delta] [bytes] Bytes written to temp files between the snapshots, from pg_stat_database.temp_bytes for the current database.
+  temp_bytes_pretty: [derived] [text] Human-readable re-formatting of temp_bytes_delta via pgfr_record._pretty_bytes().';
 
 -- xmin horizon readers. Both read pgfr_record.snapshots.xmin_horizon_detail
 -- (JSONB) directly; no sidecar joins. The collector populates the JSONB
@@ -963,7 +1020,15 @@ LANGUAGE sql STABLE AS $$
     ORDER BY s.captured_at DESC;
 $$;
 COMMENT ON FUNCTION pgfr_analyze.xmin_horizon_history(TIMESTAMPTZ, TIMESTAMPTZ) IS
-'Timeline of xmin horizon ages and dominant-holder JSONB detail across snapshots in a window.';
+'Timeline of xmin horizon ages and dominant-holder JSONB detail across snapshots in a window.
+
+Output columns:
+  captured_at: [dimension] [timestamp] Snapshot capture time; one row per snapshot in the window with a non-null horizon age, newest first.
+  xmin_data_horizon_age: [gauge] [xid-age] Age in transactions of the oldest xmin holding back cleanup of user-table tuples, captured at snapshot time as the greatest of the activity, slot xmin, prepared, and replication ages; exact at the tick, undefined between ticks.
+  slot_catalog_xmin_age: [gauge] [xid-age] Age in transactions of the oldest replication slot catalog_xmin holding back system catalog cleanup, captured at snapshot time from pg_replication_slots.
+  xmin_any_horizon_age: [gauge] [xid-age] Overall horizon age at snapshot time, the greatest of xmin_data_horizon_age and slot_catalog_xmin_age.
+  source: [dimension] [text] Dominant holder category recorded in snapshots.xmin_horizon_detail: activity, slot, slot_catalog, prepared, or replication.
+  holder: [derived] [json] Holder attribution object from snapshots.xmin_horizon_detail, built by the collector for the dominant holder (for example pid, usename, state, and query preview for activity, or slot_name and wal_status for slots).';
 
 CREATE OR REPLACE FUNCTION pgfr_analyze.current_xmin_horizon_holder()
 RETURNS TABLE (
@@ -985,6 +1050,13 @@ LANGUAGE sql STABLE AS $$
     LIMIT 1;
 $$;
 COMMENT ON FUNCTION pgfr_analyze.current_xmin_horizon_holder() IS
-'Quick-answer reader: zero rows on a healthy cluster, otherwise one row for the dominant xmin holder at the latest snapshot.';
+'Quick-answer reader: zero rows on a healthy cluster, otherwise one row for the dominant xmin holder at the latest snapshot.
+
+Output columns:
+  captured_at: [dimension] [timestamp] Capture time of the newest snapshot whose xmin_horizon_detail is non-null; the row describes that snapshot instant, not now.
+  xmin_data_horizon_age: [gauge] [xid-age] Age in transactions of the oldest xmin holding back cleanup of user-table tuples at that snapshot, the greatest of the activity, slot xmin, prepared, and replication ages.
+  slot_catalog_xmin_age: [gauge] [xid-age] Age in transactions of the oldest replication slot catalog_xmin holding back system catalog cleanup at that snapshot.
+  source: [dimension] [text] Dominant holder category recorded in snapshots.xmin_horizon_detail: activity, slot, slot_catalog, prepared, or replication.
+  holder: [derived] [json] Holder attribution object from snapshots.xmin_horizon_detail, built by the collector for the dominant holder (for example pid, usename, state, and query preview for activity, or slot_name and wal_status for slots).';
 
 -- Retrieves recent wait event samples from the flight recorder ring buffer

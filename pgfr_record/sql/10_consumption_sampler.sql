@@ -482,6 +482,145 @@ comment on view pgfr_record.consumption_deltas is
 '_rollup_consumption_daily(); SUM() skips NULLs, so a reset-invalidated tick '
 'is excluded from a day''s sum automatically). See Issue #81, #83.';
 
+comment on column pgfr_record.consumption_deltas.sample_ts is
+'[dimension] [epoch-seconds] Seconds since pgfr_record.epoch() for the current '
+'(later) snapshot of the differenced pair; the view''s time axis.';
+
+comment on column pgfr_record.consumption_deltas.captured_at is
+'[dimension] [timestamp] Wall-clock capture time of the current (later) snapshot '
+'of the differenced pair.';
+
+comment on column pgfr_record.consumption_deltas.pg_version is
+'[dimension] [bigint] PostgreSQL major version at capture time. Determines which '
+'lanes could be collected: pg_stat_io needs PG16+, pg_stat_checkpointer PG17+.';
+
+comment on column pgfr_record.consumption_deltas.datname is
+'[dimension] [text] Database the per-database lanes are scoped to (always '
+'current_database(); the WAL, io, and checkpointer lanes are cluster-wide).';
+
+comment on column pgfr_record.consumption_deltas.interval_seconds is
+'[derived] [seconds] Elapsed wall time between the two snapshots being '
+'differenced (this row''s sample_ts minus the prior row''s, per datname); NULL '
+'when no prior snapshot exists.';
+
+comment on column pgfr_record.consumption_deltas.wal_bytes_delta is
+'[counter-delta] [bytes] WAL bytes generated over the interval, from '
+'pg_wal_lsn_diff() on the wal_lsn odometer: the ledger of record, valid even '
+'across a pg_stat_reset(). Floored at 0 by GREATEST(); NULL only when no prior '
+'snapshot exists.';
+
+comment on column pgfr_record.consumption_deltas.tup_returned_delta is
+'[counter-delta] [count] Rows returned by scans over the interval '
+'(pg_stat_database.tup_returned, reset-guarded by db_stats_reset); NULL when the '
+'interval spans a stats reset or counter regression.';
+
+comment on column pgfr_record.consumption_deltas.tup_mutated_delta is
+'[counter-delta] [count] Rows inserted + updated + deleted over the interval '
+'(sum of three reset-guarded pg_stat_database deltas); NULL if any component '
+'spans a stats reset or counter regression.';
+
+comment on column pgfr_record.consumption_deltas.xact_commit_delta is
+'[counter-delta] [count] Transactions committed over the interval '
+'(pg_stat_database.xact_commit, reset-guarded by db_stats_reset); NULL when the '
+'interval spans a stats reset or counter regression.';
+
+comment on column pgfr_record.consumption_deltas.xact_rollback_delta is
+'[counter-delta] [count] Transactions rolled back over the interval '
+'(pg_stat_database.xact_rollback, reset-guarded by db_stats_reset); NULL when '
+'the interval spans a stats reset or counter regression.';
+
+comment on column pgfr_record.consumption_deltas.blks_hit_delta is
+'[counter-delta] [blocks] Buffer-pool hits over the interval '
+'(pg_stat_database.blks_hit, reset-guarded by db_stats_reset); NULL when the '
+'interval spans a stats reset or counter regression.';
+
+comment on column pgfr_record.consumption_deltas.blks_read_delta is
+'[counter-delta] [blocks] Block read requests issued to the OS over the interval '
+'(pg_stat_database.blks_read, reset-guarded by db_stats_reset): buffer-pool '
+'misses, not confirmed disk I/O. NULL when the interval spans a stats reset or '
+'counter regression.';
+
+comment on column pgfr_record.consumption_deltas.temp_bytes_delta is
+'[counter-delta] [bytes] Temp-file bytes spilled over the interval '
+'(pg_stat_database.temp_bytes, reset-guarded by db_stats_reset); NULL when the '
+'interval spans a stats reset or counter regression.';
+
+comment on column pgfr_record.consumption_deltas.recorder_blks_hit_delta is
+'[counter-delta] [blocks] Buffer-pool hits against pgfr_record''s own tables and '
+'indexes over the interval (self-accounting, reset-guarded by db_stats_reset); '
+'a numerator component of consumption_flows.recorder_overhead_fraction.';
+
+comment on column pgfr_record.consumption_deltas.recorder_blks_read_delta is
+'[counter-delta] [blocks] Block read requests to the OS for pgfr_record''s own '
+'tables and indexes over the interval (self-accounting, reset-guarded by '
+'db_stats_reset); a numerator component of '
+'consumption_flows.recorder_overhead_fraction.';
+
+comment on column pgfr_record.consumption_deltas.wal_records_delta is
+'[counter-delta] [count] WAL records written over the interval '
+'(pg_stat_wal.wal_records, cluster-wide, reset-guarded by wal_stats_reset); NULL '
+'when the interval spans a stats reset or counter regression.';
+
+comment on column pgfr_record.consumption_deltas.wal_fpi_delta is
+'[counter-delta] [count] Full-page images written to WAL over the interval '
+'(pg_stat_wal.wal_fpi, cluster-wide, reset-guarded by wal_stats_reset); NULL '
+'when the interval spans a stats reset or counter regression.';
+
+comment on column pgfr_record.consumption_deltas.wal_bytes_advisory_delta is
+'[counter-delta] [bytes] WAL bytes over the interval per pg_stat_wal.wal_bytes '
+'(reset-guarded by wal_stats_reset): advisory decomposition only; '
+'wal_bytes_delta from the LSN odometer is the ledger of record. NULL when the '
+'interval spans a stats reset or counter regression.';
+
+comment on column pgfr_record.consumption_deltas.ckpt_num_timed_delta is
+'[counter-delta] [count] Scheduled (timed) checkpoints over the interval '
+'(pg_stat_checkpointer.num_timed on PG17+, pg_stat_bgwriter.checkpoints_timed '
+'on PG15/16; reset-guarded by ckpt_stats_reset); NULL when the interval spans a '
+'stats reset or counter regression.';
+
+comment on column pgfr_record.consumption_deltas.ckpt_num_requested_delta is
+'[counter-delta] [count] Requested (forced) checkpoints over the interval '
+'(pg_stat_checkpointer.num_requested on PG17+, pg_stat_bgwriter.checkpoints_req '
+'on PG15/16; reset-guarded by ckpt_stats_reset); NULL when the interval spans a '
+'stats reset or counter regression.';
+
+comment on column pgfr_record.consumption_deltas.io_reads_client_delta is
+'[counter-delta] [blocks] Block read requests to the OS by client backends over '
+'the interval (pg_stat_io, object=relation, PG16+; NULL on PG15). pg_stat_io '
+'exposes no reset sentinel, so the guard is regression-only: a reset appears as '
+'a counter regression and the delta is NULL.';
+
+comment on column pgfr_record.consumption_deltas.io_writes_client_delta is
+'[counter-delta] [blocks] Block write requests to the OS by client backends over '
+'the interval (pg_stat_io, object=relation, PG16+; NULL on PG15); regression-only '
+'guard, see io_reads_client_delta.';
+
+comment on column pgfr_record.consumption_deltas.io_writes_autovacuum_delta is
+'[counter-delta] [blocks] Block write requests to the OS by autovacuum workers '
+'over the interval (pg_stat_io, object=relation, PG16+; NULL on PG15); '
+'regression-only guard, see io_reads_client_delta.';
+
+comment on column pgfr_record.consumption_deltas.io_writes_checkpointer_delta is
+'[counter-delta] [blocks] Block write requests to the OS by the checkpointer '
+'over the interval (pg_stat_io, object=relation, PG16+; NULL on PG15); '
+'regression-only guard, see io_reads_client_delta.';
+
+comment on column pgfr_record.consumption_deltas.io_writes_bgwriter_delta is
+'[counter-delta] [blocks] Block write requests to the OS by the background '
+'writer over the interval (pg_stat_io, object=relation, PG16+; NULL on PG15); '
+'regression-only guard, see io_reads_client_delta.';
+
+comment on column pgfr_record.consumption_deltas.io_reads_total_delta is
+'[counter-delta] [blocks] Block read requests to the OS over the interval, '
+'summed across backend types (pg_stat_io, object=relation, PG16+; NULL on PG15, '
+'which has no equivalent). Not confirmed disk I/O; regression-only guard.';
+
+comment on column pgfr_record.consumption_deltas.io_writes_total_delta is
+'[counter-delta] [blocks] Block write requests to the OS over the interval, '
+'summed across backend types (pg_stat_io, object=relation, PG16+; on PG15 falls '
+'back to checkpointer + bgwriter buffer counters). Not confirmed disk I/O; '
+'regression-only guard.';
+
 -- ---------------------------------------------------------------------------
 -- 7. consumption_flows — flow rates and efficiency ratios derived from
 --    consumption_deltas. Purely a reshaping of consumption_deltas into rates
@@ -528,25 +667,137 @@ comment on view pgfr_record.consumption_flows is
 '"logical"/"physical" I/O labels -- see os_read_blocks_per_s and '
 'os_write_blocks_per_s below for why.';
 
+comment on column pgfr_record.consumption_flows.sample_ts is
+'[dimension] [epoch-seconds] Seconds since pgfr_record.epoch() for the tick that '
+'closed the interval; inherited from consumption_deltas.';
+
+comment on column pgfr_record.consumption_flows.captured_at is
+'[dimension] [timestamp] Wall-clock capture time of the tick that closed the '
+'interval; inherited from consumption_deltas.';
+
+comment on column pgfr_record.consumption_flows.pg_version is
+'[dimension] [bigint] PostgreSQL major version at capture time. Determines which '
+'lanes could be collected: pg_stat_io needs PG16+, pg_stat_checkpointer PG17+.';
+
+comment on column pgfr_record.consumption_flows.datname is
+'[dimension] [text] Database the per-database lanes are scoped to (always '
+'current_database(); the WAL, io, and checkpointer lanes are cluster-wide).';
+
+comment on column pgfr_record.consumption_flows.interval_seconds is
+'[derived] [seconds] Elapsed wall time between the two snapshots being '
+'differenced; the denominator of every per-second rate in this view. NULL when '
+'no prior snapshot exists.';
+
 comment on column pgfr_record.consumption_flows.block_demand_per_s is
-'Total block accesses through the buffer pool per second (blks_hit + blks_read), '
-'hit or miss. Not "logical" as opposed to some other kind -- just the total '
-'demand the executor placed on the buffer pool, independent of how each access '
-'was satisfied.';
+'[counter-delta] [blocks/s] [interval-mean] Total block accesses through the '
+'buffer pool per second (blks_hit + blks_read), hit or miss. Not "logical" as '
+'opposed to some other kind -- just the total demand the executor placed on the '
+'buffer pool, independent of how each access was satisfied. Mean rate over the '
+'tick interval, never instantaneous.';
 
 comment on column pgfr_record.consumption_flows.os_read_blocks_per_s is
-'Block read requests issued to the OS per second (buffer pool misses): from '
-'pg_stat_io (object=relation, PG16+) or pg_stat_database.blks_read as fallback. '
-'NOT confirmed disk I/O -- Postgres calls the OS for these blocks and neither '
-'knows nor cares whether the OS serves the request from its own page cache or '
-'from physical storage. Calling this "physical" I/O (as Issue #81 originally '
-'did) overstates what is actually measurable from inside Postgres.';
+'[counter-delta] [blocks/s] [interval-mean] Block read requests issued to the OS '
+'per second (buffer pool misses): from pg_stat_io (object=relation, PG16+) or '
+'pg_stat_database.blks_read as fallback. NOT confirmed disk I/O -- Postgres '
+'calls the OS for these blocks and neither knows nor cares whether the OS '
+'serves the request from its own page cache or from physical storage. Calling '
+'this "physical" I/O (as Issue #81 originally did) overstates what is actually '
+'measurable from inside Postgres. Mean rate over the tick interval.';
 
 comment on column pgfr_record.consumption_flows.os_write_blocks_per_s is
-'Block write requests issued to the OS per second (from pg_stat_io, PG16+; NULL '
-'on PG15). Same caveat as os_read_blocks_per_s: this is Postgres asking the OS '
-'to write a block, not confirmation the block reached physical storage -- the '
-'OS may hold it in page cache until its own writeback policy flushes it.';
+'[counter-delta] [blocks/s] [interval-mean] Block write requests issued to the '
+'OS per second (from pg_stat_io, PG16+; NULL on PG15). Same caveat as '
+'os_read_blocks_per_s: this is Postgres asking the OS to write a block, not '
+'confirmation the block reached physical storage -- the OS may hold it in page '
+'cache until its own writeback policy flushes it. Mean rate over the tick '
+'interval.';
+
+comment on column pgfr_record.consumption_flows.wal_bytes_per_s is
+'[counter-delta] [bytes/s] [interval-mean] WAL bytes per second from the wal_lsn '
+'odometer (wal_bytes_delta / interval_seconds): mean rate over the tick '
+'interval, not instantaneous. Ledger of record, valid across stats resets; NULL '
+'only when no prior snapshot exists.';
+
+comment on column pgfr_record.consumption_flows.rows_returned_per_s is
+'[counter-delta] [count/s] [interval-mean] Rows returned by scans per second '
+'(tup_returned_delta / interval_seconds): mean rate over the tick interval. '
+'NULL when the underlying delta was censored by a stats reset.';
+
+comment on column pgfr_record.consumption_flows.rows_mutated_per_s is
+'[counter-delta] [count/s] [interval-mean] Rows inserted + updated + deleted per '
+'second (tup_mutated_delta / interval_seconds): mean rate over the tick '
+'interval. NULL when the underlying delta was censored by a stats reset.';
+
+comment on column pgfr_record.consumption_flows.xact_per_s is
+'[counter-delta] [count/s] [interval-mean] Transactions per second, commits plus '
+'rollbacks ((xact_commit_delta + xact_rollback_delta) / interval_seconds): mean '
+'rate over the tick interval. NULL when either delta was censored by a stats '
+'reset.';
+
+comment on column pgfr_record.consumption_flows.temp_bytes_per_s is
+'[counter-delta] [bytes/s] [interval-mean] Temp-file bytes spilled per second '
+'(temp_bytes_delta / interval_seconds): mean rate over the tick interval. NULL '
+'when the underlying delta was censored by a stats reset.';
+
+comment on column pgfr_record.consumption_flows.cache_hit_fraction is
+'[derived] [fraction] Share of buffer-pool block demand satisfied from shared '
+'buffers, 0 to 1: blks_hit_delta over (blks_hit_delta + blks_read_delta). NULL '
+'when the denominator is zero or a delta was reset-censored.';
+
+comment on column pgfr_record.consumption_flows.fpi_fraction is
+'[derived] [fraction] Approximate share of WAL volume consumed by full-page '
+'images, 0 to 1: wal_fpi_delta times block_size over wal_bytes_advisory_delta '
+'(the advisory pg_stat_wal byte count, not the LSN odometer). NULL when the '
+'denominator is zero or a delta was reset-censored.';
+
+comment on column pgfr_record.consumption_flows.ckpt_requested_fraction is
+'[derived] [fraction] Share of checkpoints that were requested (forced) rather '
+'than scheduled, 0 to 1: ckpt_num_requested_delta over (ckpt_num_timed_delta + '
+'ckpt_num_requested_delta). NULL when no checkpoints occurred in the interval '
+'or a delta was reset-censored.';
+
+comment on column pgfr_record.consumption_flows.write_share_client is
+'[derived] [fraction] Share of OS block write requests issued by client '
+'backends, 0 to 1: io_writes_client_delta over io_writes_total_delta '
+'(pg_stat_io, PG16+; NULL on PG15 or when the denominator is zero).';
+
+comment on column pgfr_record.consumption_flows.write_share_autovacuum is
+'[derived] [fraction] Share of OS block write requests issued by autovacuum '
+'workers, 0 to 1: io_writes_autovacuum_delta over io_writes_total_delta '
+'(pg_stat_io, PG16+; NULL on PG15 or when the denominator is zero).';
+
+comment on column pgfr_record.consumption_flows.write_share_checkpointer is
+'[derived] [fraction] Share of OS block write requests issued by the '
+'checkpointer, 0 to 1: io_writes_checkpointer_delta over io_writes_total_delta '
+'(pg_stat_io, PG16+; NULL on PG15 or when the denominator is zero).';
+
+comment on column pgfr_record.consumption_flows.write_share_bgwriter is
+'[derived] [fraction] Share of OS block write requests issued by the background '
+'writer, 0 to 1: io_writes_bgwriter_delta over io_writes_total_delta '
+'(pg_stat_io, PG16+; NULL on PG15 or when the denominator is zero).';
+
+comment on column pgfr_record.consumption_flows.blocks_per_row_returned is
+'[derived] [blocks/row] Buffer-pool block demand per row returned: '
+'(blks_hit_delta + blks_read_delta) over tup_returned_delta. Efficiency figure '
+'of merit with hardware divided out. NULL when no rows were returned or a delta '
+'was reset-censored.';
+
+comment on column pgfr_record.consumption_flows.wal_bytes_per_row_mutated is
+'[derived] [bytes/row] WAL bytes per row mutated: wal_bytes_delta (LSN odometer) '
+'over tup_mutated_delta (rows inserted + updated + deleted). NULL when no rows '
+'were mutated or the denominator delta was reset-censored.';
+
+comment on column pgfr_record.consumption_flows.temp_bytes_per_xact is
+'[derived] [bytes/xact] Temp-file bytes spilled per committed transaction: '
+'temp_bytes_delta over xact_commit_delta (commits only, rollbacks excluded). '
+'NULL when no commits occurred or a delta was reset-censored.';
+
+comment on column pgfr_record.consumption_flows.recorder_overhead_fraction is
+'[derived] [fraction] The recorder''s own share of total buffer-pool block '
+'demand, 0 to 1: (recorder_blks_hit_delta + recorder_blks_read_delta) over '
+'(blks_hit_delta + blks_read_delta). The instrument itemizing its own observer '
+'effect; footnote-grade. NULL when the denominator is zero or a delta was '
+'reset-censored.';
 
 --------------------------------------------------------------------------------
 -- consumption_daily_rollups (Issue #83 prerequisite): a daily-grain durable
@@ -763,3 +1014,100 @@ comment on view pgfr_record.consumption_daily_flows is
 'workload-shape guard indicators. A NULL ratio means its day''s underlying '
 'sum was itself NULL (reset-excluded) or the denominator was zero -- both '
 'nullif-guarded, never a division error. See Issue #83.';
+
+comment on column pgfr_record.consumption_daily_flows.rollup_date is
+'[dimension] [date] Calendar day the rollup covers. An interval is attributed '
+'to the day of its end timestamp (the tick that closed it).';
+
+comment on column pgfr_record.consumption_daily_flows.datname is
+'[dimension] [text] Database the per-database lanes are scoped to (always '
+'current_database(); the WAL, io, and checkpointer lanes are cluster-wide).';
+
+comment on column pgfr_record.consumption_daily_flows.total_seconds is
+'[derived] [seconds] Elapsed wall time covered by the day''s valid ticks (sum '
+'of consumption_deltas.interval_seconds): the denominator for this view''s '
+'per-second rates, not an assumed 86400. A day with recorder downtime or a '
+'partial first/last day has proportionally fewer seconds.';
+
+comment on column pgfr_record.consumption_daily_flows.valid_tick_count is
+'[derived] [count] Number of delta intervals that contributed to the day''s '
+'sums. Counts intervals present, not per-metric validity: a mid-day stats reset '
+'can still leave individual ratios NULL for a day counted here. Low values flag '
+'partial coverage.';
+
+comment on column pgfr_record.consumption_daily_flows.blocks_per_row_returned is
+'[derived] [blocks/row] Buffer-pool block demand per row returned over the day: '
+'(blks_hit_sum + blks_read_sum) over tup_returned_sum, reconstructed from the '
+'day''s summed components. NULL when the denominator is zero or a component sum '
+'was reset-excluded.';
+
+comment on column pgfr_record.consumption_daily_flows.wal_bytes_per_row_mutated is
+'[derived] [bytes/row] WAL bytes per row mutated over the day: wal_bytes_sum '
+'(LSN odometer) over tup_mutated_sum (rows inserted + updated + deleted). NULL '
+'when the denominator is zero or a component sum was reset-excluded.';
+
+comment on column pgfr_record.consumption_daily_flows.temp_bytes_per_xact is
+'[derived] [bytes/xact] Temp-file bytes spilled per committed transaction over '
+'the day: temp_bytes_sum over xact_commit_sum (commits only, rollbacks '
+'excluded). NULL when the denominator is zero or a component sum was '
+'reset-excluded.';
+
+comment on column pgfr_record.consumption_daily_flows.fpi_fraction is
+'[derived] [fraction] Approximate share of the day''s WAL volume consumed by '
+'full-page images, 0 to 1: wal_fpi_sum times block_size over '
+'wal_bytes_advisory_sum (the advisory pg_stat_wal byte count). NULL when the '
+'denominator is zero or a component sum was reset-excluded.';
+
+comment on column pgfr_record.consumption_daily_flows.ckpt_requested_fraction is
+'[derived] [fraction] Share of the day''s checkpoints that were requested '
+'(forced) rather than scheduled, 0 to 1: ckpt_num_requested_sum over '
+'(ckpt_num_timed_sum + ckpt_num_requested_sum). NULL when no checkpoints '
+'occurred or a component sum was reset-excluded.';
+
+comment on column pgfr_record.consumption_daily_flows.rollback_fraction is
+'[derived] [fraction] Share of the day''s transactions that rolled back, 0 to '
+'1: xact_rollback_sum over (xact_commit_sum + xact_rollback_sum). NULL when the '
+'denominator is zero or a component sum was reset-excluded.';
+
+comment on column pgfr_record.consumption_daily_flows.autovacuum_write_share is
+'[derived] [fraction] Share of the day''s OS block write requests issued by '
+'autovacuum workers, 0 to 1: io_writes_autovacuum_sum over io_writes_total_sum '
+'(pg_stat_io, PG16+; NULL on PG15 or when the denominator is zero).';
+
+comment on column pgfr_record.consumption_daily_flows.cache_hit_fraction is
+'[derived] [fraction] Share of the day''s buffer-pool block demand satisfied '
+'from shared buffers, 0 to 1: blks_hit_sum over (blks_hit_sum + blks_read_sum). '
+'NULL when the denominator is zero or a component sum was reset-excluded.';
+
+comment on column pgfr_record.consumption_daily_flows.read_write_tuple_ratio is
+'[derived] [ratio] Workload-shape guard, not a consumption metric: '
+'tup_returned_sum over tup_mutated_sum for the day. Unbounded (a read-heavy day '
+'is far above 1). NULL when no rows were mutated or a component sum was '
+'reset-excluded.';
+
+comment on column pgfr_record.consumption_daily_flows.xact_per_s is
+'[counter-delta] [count/s] [interval-mean] Transactions per second, commits '
+'plus rollbacks: (xact_commit_sum + xact_rollback_sum) over total_seconds. Mean '
+'rate over the day''s covered seconds, never instantaneous. NULL when a '
+'component sum was reset-excluded.';
+
+comment on column pgfr_record.consumption_daily_flows.rows_returned_per_xact is
+'[derived] [rows/xact] Workload-shape guard: rows returned per transaction for '
+'the day, tup_returned_sum over (xact_commit_sum + xact_rollback_sum). NULL '
+'when the denominator is zero or a component sum was reset-excluded.';
+
+comment on column pgfr_record.consumption_daily_flows.rows_mutated_per_xact is
+'[derived] [rows/xact] Workload-shape guard: rows mutated per transaction for '
+'the day, tup_mutated_sum over (xact_commit_sum + xact_rollback_sum). NULL when '
+'the denominator is zero or a component sum was reset-excluded.';
+
+comment on column pgfr_record.consumption_daily_flows.db_size_bytes is
+'[gauge] [bytes] The day''s last observed pg_database_size() for datname, taken '
+'from the final snapshot of the day. Exact at that instant, undefined between '
+'ticks; a level, not a flow, so it is carried through rather than summed.';
+
+comment on column pgfr_record.consumption_daily_flows.recorder_overhead_fraction is
+'[derived] [fraction] The recorder''s own share of the day''s total buffer-pool '
+'block demand, 0 to 1: (recorder_blks_hit_sum + recorder_blks_read_sum) over '
+'(blks_hit_sum + blks_read_sum). Footnote-grade self-accounting. NULL when the '
+'denominator is zero or a component sum was reset-excluded.';

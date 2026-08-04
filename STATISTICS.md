@@ -22,7 +22,7 @@ The ring holds roughly 2 to 4 hours at defaults (3 slots on a 2-hour rotation). 
 
 **Detection probability.** A condition of duration `d` sampled at interval `T` is captured with probability approximately `min(d/T, 1)` per occurrence. At the 60 s cadence, a 6-second lock wait has about a 10% chance of appearing in any one pass. If it recurs `m` times in a window, the probability of catching it at least once is `1 - (1 - d/T)^m`: ten independent 6-second waits have about a 65% chance of showing up at all.
 
-**Time-in-state estimation.** A state appearing in `k` of `n` samples over a window has estimated time-in-state `k * T`. The proportion `p_hat = k/n` carries binomial standard error `sqrt(p_hat * (1 - p_hat) / n)`. `pgfr_analyze.wait_summary()`'s `pct_of_samples` is exactly this estimator's proportion: distinct ticks where the wait appeared, over distinct ticks total, times 100. The archive rollups' `pct_of_samples` uses the same definition. Neither is a share of waiters; `total_waiters` measures volume separately.
+**Time-in-state estimation.** A state appearing in `k` of `n` samples over a window has estimated time-in-state `k * T`. The proportion `p_hat = k/n` carries binomial standard error `sqrt(p_hat * (1 - p_hat) / n)`. `pgfr_analyze.wait_summary()`'s `pct_of_samples` is exactly this estimator's proportion: distinct ticks where the wait appeared, over distinct ticks that recorded any wait data in the window, times 100. The archive rollups' `pct_of_samples` uses the same definition. Neither is a share of waiters; `total_waiters` measures volume separately.
 
 **What Mode A cannot do: count events.** Ten 1-second lock waits and one 10-second lock wait are indistinguishable at 60 s cadence; both contribute about 10 seconds of expected sampled state. Sample counts estimate *time*, never *frequency*. Any report language implying event counts from Mode A data is a semantic bug. Reconstructing sub-interval event counts from Mode A data is not a missing feature; it is mathematically impossible at this cadence, and the recorder does not attempt it.
 
@@ -44,6 +44,8 @@ Every column the recorder exposes classifies as exactly one of four semantic typ
 | **Counter delta** | Difference of a cumulative counter between two snapshots | Exact over the interval, modulo resets; mean rate only | `calls_delta`, `blks_read_delta`, `wal_bytes_delta`, all `*_per_s` columns |
 | **Gauge** | Instantaneous level read at snapshot time | Exact at the sample instant, undefined between samples | `datfrozenxid_age`, `datminmxid_age`, `db_size_bytes`, `connections_active`, xmin-horizon ages on the legacy `snapshots` table |
 | **Derived estimate** | Computed from the above; inherits and propagates their semantics | Follows from inputs (a ratio of deltas is exact; a ratio involving a point sample is an estimate) | `hit_ratio_pct`, `recorder_overhead_fraction`, `mean_exec_time_ms`, trend slopes |
+
+The per-column classification is not maintained in this document. It lives in the schema itself: every user-facing view column carries a `COMMENT ON COLUMN` with a machine-parseable `[class] [units]` prefix, set-returning functions carry an `Output columns:` block in their function comment, and `pgfr_analyze.column_semantics()` returns the parsed registry (one row per column: relation, column name, semantic class, units, interval basis, notes). That registry is the source of truth for what any given column means; `\d+` on a view shows the same annotations inline.
 
 Two consequences worth internalizing:
 

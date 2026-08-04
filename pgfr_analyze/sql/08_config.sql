@@ -43,7 +43,15 @@ LANGUAGE sql STABLE AS $$
     ORDER BY parameter_name
 $$;
 COMMENT ON FUNCTION pgfr_analyze.config_changes(TIMESTAMPTZ, TIMESTAMPTZ) IS
-'Detect PostgreSQL configuration changes between two time points. Useful for correlating configuration changes with performance incidents.';
+'Detect PostgreSQL configuration changes between two time points. Useful for correlating configuration changes with performance incidents.
+
+Output columns:
+  parameter_name: [dimension] [text] PostgreSQL parameter name as recorded in config_snapshots; present whenever the start-side and end-side recorded values differ.
+  old_value: [dimension] [text] Recorded setting (with unit suffix when the snapshot stored one) from the latest config snapshot at or before p_start_time; NULL when the parameter was not recorded at the start (it appeared later).
+  new_value: [dimension] [text] Recorded setting (with unit suffix when the snapshot stored one) from the earliest config snapshot at or after p_end_time; NULL when the parameter is absent at the end (it was removed).
+  old_source: [dimension] [text] pg_settings source of the old value as recorded at the start-side snapshot.
+  new_source: [dimension] [text] pg_settings source of the new value as recorded at the end-side snapshot.
+  changed_at: [dimension] [timestamp] captured_at of the end-side snapshot where the new value was observed, not the moment of the change itself; the actual change happened somewhere between the two snapshots, so resolution is the snapshot cadence.';
 
 
 -- Retrieves configuration at a specific point in time
@@ -69,7 +77,12 @@ LANGUAGE sql STABLE AS $$
     ORDER BY cs.name, s.captured_at DESC
 $$;
 COMMENT ON FUNCTION pgfr_analyze.config_at(TIMESTAMPTZ, TEXT) IS
-'Retrieve PostgreSQL configuration at a specific point in time. Optionally filter by category prefix (e.g., ''autovacuum'', ''work_mem'').';
+'Retrieve PostgreSQL configuration at a specific point in time. Optionally filter by category prefix (e.g., ''autovacuum'', ''work_mem'').
+
+Output columns:
+  parameter_name: [dimension] [text] PostgreSQL parameter name; one row per parameter that had been recorded in config_snapshots at or before p_timestamp.
+  value: [dimension] [text] Recorded setting (with unit suffix when the snapshot stored one) from the latest config snapshot at or before p_timestamp: the last known value, carried forward without interpolation.
+  source: [dimension] [text] pg_settings source of the setting as recorded at that same snapshot.';
 
 
 -- Performs a health check on current PostgreSQL configuration
@@ -145,7 +158,14 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION pgfr_analyze.config_health_check() IS
-'Perform a health check on current PostgreSQL configuration. Returns potential issues and recommendations for memory, connections, and safety settings.';
+'Perform a health check on current PostgreSQL configuration. Returns potential issues and recommendations for memory, connections, and safety settings.
+
+Output columns:
+  category: [dimension] [text] Check category label: memory, connections, or safety.
+  parameter_name: [dimension] [text] PostgreSQL parameter the check flagged.
+  current_value: [dimension] [text] Live pg_settings value at call time (not from recorded snapshots), pretty-printed for byte-valued parameters.
+  issue: [derived] [text] Description of the configuration concern, produced by comparing the live pg_settings value against a fixed built-in threshold.
+  recommendation: [derived] [text] Suggested remediation text for the flagged issue.';
 
 
 -- =============================================================================
@@ -188,7 +208,14 @@ LANGUAGE sql STABLE AS $$
     ORDER BY drc.database_name, drc.role_name, drc.parameter_name, s.captured_at DESC
 $$;
 COMMENT ON FUNCTION pgfr_analyze.db_role_config_at(TIMESTAMPTZ, TEXT, TEXT, TEXT) IS
-'Retrieve database/role configuration overrides at a specific point in time. Filter by database, role, or parameter prefix.';
+'Retrieve database/role configuration overrides at a specific point in time. Filter by database, role, or parameter prefix.
+
+Output columns:
+  database_name: [dimension] [text] Database the override applies to, as recorded in db_role_config_snapshots; NULL for role-only overrides.
+  role_name: [dimension] [text] Role the override applies to, as recorded in db_role_config_snapshots; NULL for database-only overrides.
+  parameter_name: [dimension] [text] Name of the overridden parameter.
+  parameter_value: [dimension] [text] Recorded override value from the latest snapshot at or before p_timestamp: the last known value, carried forward without interpolation.
+  scope: [dimension] [text] Override scope label computed from which identifiers are set: database, role, database+role, or unknown.';
 
 
 -- Detects database/role configuration changes between two time points
@@ -243,7 +270,15 @@ LANGUAGE sql STABLE AS $$
     ORDER BY database_name NULLS FIRST, role_name NULLS FIRST, parameter_name
 $$;
 COMMENT ON FUNCTION pgfr_analyze.db_role_config_changes(TIMESTAMPTZ, TIMESTAMPTZ) IS
-'Detect database/role configuration changes between two time points. Returns added, removed, and modified settings.';
+'Detect database/role configuration changes between two time points. Returns added, removed, and modified settings.
+
+Output columns:
+  database_name: [dimension] [text] Database the override applies to; NULL for role-only overrides.
+  role_name: [dimension] [text] Role the override applies to; NULL for database-only overrides.
+  parameter_name: [dimension] [text] Name of the overridden parameter whose recorded value differs between the two time points.
+  old_value: [dimension] [text] Recorded override value from the latest snapshot at or before p_start_time; NULL when the override was added after the start.
+  new_value: [dimension] [text] Recorded override value from the latest snapshot at or before p_end_time; NULL when the override was removed by the end.
+  change_type: [derived] [text] Classification of the change (added, removed, or modified) computed by comparing the start-side and end-side recorded values; resolution is the snapshot cadence.';
 
 
 -- Provides a summary overview of all database/role configuration overrides
@@ -285,7 +320,14 @@ LANGUAGE sql STABLE AS $$
     ORDER BY scope, database_name NULLS FIRST, role_name NULLS FIRST
 $$;
 COMMENT ON FUNCTION pgfr_analyze.db_role_config_summary() IS
-'Overview of database/role configuration overrides grouped by scope. Shows which databases and roles have custom settings.';
+'Overview of database/role configuration overrides grouped by scope. Shows which databases and roles have custom settings.
+
+Output columns:
+  scope: [dimension] [text] Override scope label computed from which identifiers are set: database, role, database+role, or unknown.
+  database_name: [dimension] [text] Database the overrides apply to; NULL for role-only overrides.
+  role_name: [dimension] [text] Role the overrides apply to; NULL for database-only overrides.
+  parameter_count: [gauge] [count] Number of override parameters recorded for this scope grouping in the single most recent snapshot; exact as of that snapshot instant, undefined between ticks.
+  parameters: [dimension] [text] Alphabetically sorted array of the overridden parameter names in this scope grouping at the most recent snapshot.';
 
 
 -- =============================================================================

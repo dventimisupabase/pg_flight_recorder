@@ -13,7 +13,11 @@ language sql immutable as $$
 $$;
 comment on function pgfr_analyze.v2_time_range(timestamptz, timestamptz) is
 'Convert timestamptz bounds to int4 sample_ts offsets (seconds since pgfr_record.epoch()). '
-'Used by v2 reader functions to produce partition-prunable range predicates on sample_ts.';
+'Used by v2 reader functions to produce partition-prunable range predicates on sample_ts.
+
+Output columns:
+  ts_start: [dimension] [epoch-seconds] Window start converted to seconds since pgfr_record.epoch(), the int4 sample_ts encoding the v2 partitioned tables key on; used as the inclusive lower bound of a partition-prunable sample_ts range predicate.
+  ts_end: [dimension] [epoch-seconds] Window end converted to seconds since pgfr_record.epoch(), same int4 sample_ts encoding; used as the upper bound of the sample_ts range predicate (exclusive in the *_activity_v2 readers).';
 
 
 -- Returns top queries by total_exec_time delta over the specified time window,
@@ -114,7 +118,22 @@ comment on function pgfr_analyze.statement_activity_v2(timestamptz, timestamptz,
 'pruning — no join to snapshots table. JIT disabled at entry. Backwards-compatible: '
 'existing statement_compare() is untouched. '
 'pgss_reset_warning = true means a cluster-wide PGSS eviction occurred at that tick — '
-'deltas for that row may be understated due to counter reset.';
+'deltas for that row may be understated due to counter reset.
+
+Output columns:
+  queryid: [dimension] [bigint] pg_stat_statements query identifier (hash of the normalized statement text); identity key for the row.
+  dbid: [dimension] [oid] OID of the database the statement ran in; part of the pg_stat_statements identity key.
+  userid: [dimension] [oid] OID of the role that executed the statement; part of the pg_stat_statements identity key.
+  toplevel: [dimension] [boolean] True when the statement executed at top level, false when nested inside a function or DO block; part of the pg_stat_statements identity key.
+  calls_delta: [counter-delta] [count] Executions over the window: difference in cumulative pg_stat_statements.calls between the last snapshot before the window and the last snapshot inside it, clamped at zero. Exact total for the interval, modulo counter resets (see pgss_reset_warning).
+  total_exec_time_delta_ms: [counter-delta] [milliseconds] Execution time over the window: difference in cumulative total_exec_time between the same snapshot pair, clamped at zero. Rows are ordered by this column descending.
+  mean_exec_time_ms: [derived] [milliseconds] Lifetime mean execution time as reported by pg_stat_statements at the last snapshot inside the window: numerator is cumulative total_exec_time and denominator is cumulative calls, both since the last statistics reset. NOT the within-window mean; compute total_exec_time_delta_ms / calls_delta for that.
+  rows_delta: [counter-delta] [count] Rows returned or affected over the window: difference in cumulative rows between the two snapshots, clamped at zero.
+  shared_blks_hit_delta: [counter-delta] [blocks] Shared-buffer hits over the window: difference in cumulative shared_blks_hit between the two snapshots, clamped at zero.
+  shared_blks_read_delta: [counter-delta] [blocks] Shared blocks read from the OS (buffer-pool misses) over the window: difference in cumulative shared_blks_read between the two snapshots, clamped at zero.
+  temp_blks_written_delta: [counter-delta] [blocks] Temp blocks written over the window: difference in cumulative temp_blks_written between the two snapshots, clamped at zero.
+  hit_ratio_pct: [derived] [percent] 100 * shared_blks_hit_delta / (shared_blks_hit_delta + shared_blks_read_delta), rounded to 1 decimal; the denominator is total shared block accesses over the window. NULL when that denominator is zero. A ratio of two exact deltas, so exact for the interval.
+  pgss_reset_warning: [derived] [boolean] Censoring flag: true when the end snapshot recorded a cluster-wide pg_stat_statements eviction (pgss_dealloc_warning) during the window. When set, deltas may be understated and statements absent from this result may be censored by eviction, not absent from the workload.';
 
 
 -- Returns tables ordered by modification rate (n_tup_ins + n_tup_upd + n_tup_del delta)
@@ -210,7 +229,22 @@ comment on function pgfr_analyze.table_activity_v2(timestamptz, timestamptz, int
 'Return tables ordered by modification rate (ins+upd+del delta) over a time window, '
 'reading from table_snapshots_v2 (v2 partitioned table). Uses int4 sample_ts for '
 'partition pruning. JIT disabled at entry. Backwards-compatible: existing '
-'table_compare() and table_hotspots() are untouched.';
+'table_compare() and table_hotspots() are untouched.
+
+Output columns:
+  relid: [dimension] [oid] OID of the table; identity key for the row.
+  dbid: [dimension] [oid] OID of the database containing the table; part of the identity key.
+  n_tup_ins_delta: [counter-delta] [count] Rows inserted over the window: difference in cumulative pg_stat_all_tables.n_tup_ins between the last snapshot before the window and the last snapshot inside it, clamped at zero. Exact for the interval, modulo counter resets.
+  n_tup_upd_delta: [counter-delta] [count] Rows updated over the window (includes HOT updates): difference in cumulative n_tup_upd between the two snapshots, clamped at zero.
+  n_tup_del_delta: [counter-delta] [count] Rows deleted over the window: difference in cumulative n_tup_del between the two snapshots, clamped at zero.
+  n_tup_hot_upd_delta: [counter-delta] [count] HOT updates over the window: difference in cumulative n_tup_hot_upd between the two snapshots, clamped at zero.
+  seq_scan_delta: [counter-delta] [count] Sequential scans initiated over the window: difference in cumulative seq_scan between the two snapshots, clamped at zero.
+  idx_scan_delta: [counter-delta] [count] Index scans initiated on the table over the window: difference in cumulative idx_scan between the two snapshots, clamped at zero.
+  total_modifications: [counter-delta] [count] n_tup_ins_delta + n_tup_upd_delta + n_tup_del_delta; the ordering key of the result.
+  n_live_tup: [gauge] [count] Estimated live tuples as of the last snapshot inside the window; instantaneous level, exact only at that tick and undefined between ticks.
+  n_dead_tup: [gauge] [count] Estimated dead tuples as of the last snapshot inside the window; instantaneous level.
+  dead_tup_pct: [derived] [percent] 100 * n_dead_tup / (n_live_tup + n_dead_tup) at the end snapshot, rounded to 1 decimal; the denominator is total estimated tuples (live plus dead). 0 when that denominator is zero. Inherits gauge semantics: describes the end-of-window instant only.
+  table_size_bytes: [gauge] [bytes] Table size as of the last snapshot inside the window.';
 
 
 -- Returns indexes ordered by idx_scan delta over the specified time window,
@@ -291,7 +325,17 @@ comment on function pgfr_analyze.index_activity_v2(timestamptz, timestamptz, int
 'Return indexes ordered by idx_scan delta over a time window, reading from '
 'index_snapshots_v2 (v2 partitioned table). Uses int4 sample_ts for partition '
 'pruning. JIT disabled at entry. Backwards-compatible: existing index_efficiency() '
-'and unused_indexes() are untouched.';
+'and unused_indexes() are untouched.
+
+Output columns:
+  relid: [dimension] [oid] OID of the table the index belongs to; part of the identity key.
+  indexrelid: [dimension] [oid] OID of the index; identity key for the row.
+  dbid: [dimension] [oid] OID of the database containing the index; part of the identity key.
+  idx_scan_delta: [counter-delta] [count] Index scans initiated over the window: difference in cumulative pg_stat_all_indexes.idx_scan between the last snapshot before the window and the last snapshot inside it, clamped at zero. Exact for the interval, modulo counter resets. The ordering key of the result.
+  idx_tup_read_delta: [counter-delta] [count] Index entries returned by scans over the window: difference in cumulative idx_tup_read between the two snapshots, clamped at zero.
+  idx_tup_fetch_delta: [counter-delta] [count] Live table rows fetched by simple index scans over the window: difference in cumulative idx_tup_fetch between the two snapshots, clamped at zero.
+  index_size_bytes: [gauge] [bytes] Index size as of the last snapshot inside the window; instantaneous level, undefined between ticks.
+  selectivity_pct: [derived] [percent] 100 * idx_tup_fetch_delta / idx_tup_read_delta, rounded to 1 decimal; the denominator is index entries read over the window. NULL when idx_tup_read_delta is zero. Low values mean many index entries read per live row fetched.';
 
 --------------------------------------------------------------------------------
 -- ring buffer v2 reader functions
@@ -356,7 +400,15 @@ $$;
 comment on function pgfr_analyze.recent_waits_current() is
 'Ring buffer v2: decode wait_samples integer[] via wait_event_map. '
 'Returns same columns as the original recent_waits_current(). '
-'Retention window: num_slots * rotation_period from ring_config.';
+'Retention window: num_slots * rotation_period from ring_config.
+
+Output columns:
+  captured_at: [dimension] [timestamp] Sample tick time, reconstructed as the ring epoch plus the row sample_ts offset in seconds.
+  backend_state: [dimension] [text] Backend state label of the sampled waiters, decoded from wait_event_map.
+  wait_event_type: [dimension] [text] Wait event type label decoded from wait_event_map.
+  wait_event: [dimension] [text] Wait event name decoded from wait_event_map.
+  state: [dimension] [text] Backend state label, duplicate of backend_state kept for compatibility with the original signature.
+  count: [point-sample] [count] Sessions observed in this wait state at the sample instant (Mode A). Across ticks this estimates time-in-state, never how many wait events occurred.';
 
 -- recent_activity_current() v2
 -- reads activity_samples (flat rows, no decode needed).
@@ -407,7 +459,20 @@ $$;
 comment on function pgfr_analyze.recent_activity_current() is
 'Ring buffer v2: reads activity_samples (flat per-backend rows). '
 'Returns same columns as the original recent_activity_current(). '
-'Retention window: num_slots * rotation_period from ring_config.';
+'Retention window: num_slots * rotation_period from ring_config.
+
+Output columns:
+  captured_at: [dimension] [timestamp] Sample tick time, reconstructed as the ring epoch plus the row sample_ts offset in seconds.
+  pid: [dimension] [bigint] Server process ID of the sampled backend.
+  usename: [dimension] [text] Role name the sampled backend was logged in as.
+  application_name: [dimension] [text] Client application_name of the sampled backend.
+  backend_type: [dimension] [text] Backend type label (client backend, autovacuum worker, and so on).
+  state: [dimension] [text] Backend state label at the sample instant (active, idle in transaction, and so on).
+  wait_event_type: [dimension] [text] Wait event type at the sample instant; NULL when the backend was not waiting.
+  wait_event: [dimension] [text] Wait event name at the sample instant; NULL when the backend was not waiting.
+  query_start: [dimension] [timestamp] Start time of the backend current query as captured in the sample row.
+  running_for: [point-sample] [duration] How long the current query had been running as of the sample instant: captured_at minus query_start.
+  query_preview: [dimension] [text] Truncated text of the query the backend was running when sampled.';
 
 -- recent_locks_current() v2
 -- reads lock_samples; decodes lock_type via lock_type_map.
@@ -465,7 +530,21 @@ $$;
 comment on function pgfr_analyze.recent_locks_current() is
 'Ring buffer v2: reads lock_samples; decodes lock_type via lock_type_map. '
 'blocked_user, blocked_app, query_preview are null in v2 (pids only stored). '
-'Returns same columns as the original recent_locks_current().';
+'Returns same columns as the original recent_locks_current().
+
+Output columns:
+  captured_at: [dimension] [timestamp] Sample tick time, reconstructed as the ring epoch plus the row sample_ts offset in seconds.
+  blocked_pid: [dimension] [bigint] Server process ID of the blocked session.
+  blocked_user: [dimension] [text] Role name of the blocked session; always NULL in v2 because lock_samples stores pids only.
+  blocked_app: [dimension] [text] Application name of the blocked session; always NULL in v2 because lock_samples stores pids only.
+  blocked_duration: [point-sample] [duration] How long the session had been blocked as of the sample instant, read from the sample row (blocked_duration_s).
+  blocking_pid: [dimension] [bigint] Server process ID of the session holding the conflicting lock.
+  blocking_user: [dimension] [text] Role name of the blocking session; always NULL in v2 because lock_samples stores pids only.
+  blocking_app: [dimension] [text] Application name of the blocking session; always NULL in v2 because lock_samples stores pids only.
+  lock_type: [dimension] [text] Lock type label decoded via lock_type_map, falling back to the raw numeric type ID as text when unmapped.
+  locked_relation: [dimension] [text] Locked relation name resolved from the stored relation OID via regclass, with an oid:N text fallback.
+  blocked_query_preview: [dimension] [text] Query text of the blocked session; always NULL in v2 because lock_samples does not store query text.
+  blocking_query_preview: [dimension] [text] Query text of the blocking session; always NULL in v2 because lock_samples does not store query text.';
 
 -- wait_summary() v2
 -- decodes wait_samples integer[] for a given time window.
@@ -536,5 +615,15 @@ $$;
 comment on function pgfr_analyze.wait_summary(timestamptz, timestamptz) is
 'Ring buffer v2: decode wait_samples integer[] for a time window. '
 'Returns same columns as original wait_summary(). '
-'Uses int4 sample_ts bounds for partition pruning.';
+'Uses int4 sample_ts bounds for partition pruning.
+
+Output columns:
+  backend_state: [dimension] [text] Backend state (for example active, idle in transaction) decoded from wait_event_map; grouping key.
+  wait_event_type: [dimension] [text] Wait event type (for example Lock, IO, LWLock) decoded from wait_event_map; grouping key.
+  wait_event: [dimension] [text] Specific wait event name decoded from wait_event_map; grouping key.
+  sample_count: [point-sample] [count] Distinct sampling ticks in the window where this wait appeared. At the one-tick-per-minute cadence this estimates time-in-state (roughly sample_count minutes), never event counts: one long wait and many short ones are indistinguishable.
+  total_waiters: [point-sample] [count] Sum of per-tick waiter counts over the ticks where this wait appeared; a duration-weighted volume measure across point samples, not a count of distinct sessions or wait events.
+  avg_waiters: [point-sample] [count] Mean waiters per tick over the ticks where this wait was present (total_waiters / sample_count), rounded to 2 decimals; ticks where the wait was absent are not in the denominator.
+  max_waiters: [point-sample] [count] Largest single-tick waiter count observed for this wait in the window.
+  pct_of_samples: [point-sample] [percent] 100 times the distinct ticks where this wait appeared (the numerator, exposed as sample_count) over the distinct ticks in the window that recorded any wait (the denominator); a binomial-error time-in-state share (0 to 100), never event frequency.';
 

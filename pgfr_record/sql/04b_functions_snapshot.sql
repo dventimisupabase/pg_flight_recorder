@@ -1033,6 +1033,50 @@ JOIN pgfr_record.snapshots prev ON prev.id = (
     SELECT MAX(id) FROM pgfr_record.snapshots WHERE id < s.id
 )
 ORDER BY s.captured_at DESC;
+COMMENT ON COLUMN pgfr_record.deltas.id IS '[dimension] [bigint] Snapshot id of the later (current) endpoint of the delta pair; references pgfr_record.snapshots.id.';
+COMMENT ON COLUMN pgfr_record.deltas.captured_at IS '[dimension] [timestamp] Capture time of the later snapshot; the interval covered by this row ends here and began interval_seconds earlier.';
+COMMENT ON COLUMN pgfr_record.deltas.pg_version IS '[dimension] [bigint] PostgreSQL major version recorded with the later snapshot; determines which pg_stat_* sources fed the underlying counters.';
+COMMENT ON COLUMN pgfr_record.deltas.interval_seconds IS '[derived] [seconds] Elapsed wall-clock time between the previous and the current snapshot, computed as the difference of their captured_at values; the denominator for converting any delta column in this view to a mean rate.';
+COMMENT ON COLUMN pgfr_record.deltas.checkpoint_occurred IS '[derived] [boolean] True when the pg_control_checkpoint() checkpoint_time differs between the two snapshots, i.e. at least one checkpoint completed during the interval.';
+COMMENT ON COLUMN pgfr_record.deltas.ckpt_timed_delta IS '[counter-delta] [count] Scheduled (timed) checkpoints completed during the interval; difference of pg_stat_checkpointer.num_timed (PG17+) or pg_stat_bgwriter.checkpoints_timed (PG15/16).';
+COMMENT ON COLUMN pgfr_record.deltas.ckpt_requested_delta IS '[counter-delta] [count] Requested (forced) checkpoints completed during the interval; difference of pg_stat_checkpointer.num_requested (PG17+) or pg_stat_bgwriter.checkpoints_req (PG15/16).';
+COMMENT ON COLUMN pgfr_record.deltas.ckpt_write_time_ms IS '[counter-delta] [milliseconds] Checkpoint write-phase time accumulated during the interval; difference of the cumulative write_time counter from pg_stat_checkpointer (PG17+) or pg_stat_bgwriter.checkpoint_write_time (PG15/16).';
+COMMENT ON COLUMN pgfr_record.deltas.ckpt_sync_time_ms IS '[counter-delta] [milliseconds] Checkpoint sync-phase time accumulated during the interval; difference of the cumulative sync_time counter from pg_stat_checkpointer (PG17+) or pg_stat_bgwriter.checkpoint_sync_time (PG15/16).';
+COMMENT ON COLUMN pgfr_record.deltas.ckpt_buffers_delta IS '[counter-delta] [blocks] Buffers written by checkpoints during the interval; difference of pg_stat_checkpointer.buffers_written (PG17+) or pg_stat_bgwriter.buffers_checkpoint (PG15/16).';
+COMMENT ON COLUMN pgfr_record.deltas.wal_bytes_delta IS '[counter-delta] [bytes] WAL generated during the interval; difference of pg_stat_wal.wal_bytes between the two snapshots.';
+COMMENT ON COLUMN pgfr_record.deltas.wal_bytes_pretty IS '[derived] [text] Human-readable formatting of wal_bytes_delta via pgfr_record._pretty_bytes().';
+COMMENT ON COLUMN pgfr_record.deltas.wal_write_time_ms IS '[counter-delta] [milliseconds] Time spent writing WAL buffers to disk during the interval; difference of pg_stat_wal.wal_write_time. NULL on PG18+, where the source column was removed.';
+COMMENT ON COLUMN pgfr_record.deltas.wal_sync_time_ms IS '[counter-delta] [milliseconds] Time spent syncing WAL files to disk during the interval; difference of pg_stat_wal.wal_sync_time. NULL on PG18+, where the source column was removed.';
+COMMENT ON COLUMN pgfr_record.deltas.bgw_buffers_clean_delta IS '[counter-delta] [blocks] Buffers written by the background writer during the interval; difference of pg_stat_bgwriter.buffers_clean.';
+COMMENT ON COLUMN pgfr_record.deltas.bgw_buffers_alloc_delta IS '[counter-delta] [blocks] Buffers allocated during the interval; difference of pg_stat_bgwriter.buffers_alloc.';
+COMMENT ON COLUMN pgfr_record.deltas.bgw_buffers_backend_delta IS '[counter-delta] [blocks] Buffers written directly by backends during the interval; difference of pg_stat_bgwriter.buffers_backend. NULL on PG17+, where the source column was removed (use io_client_writes_delta from pg_stat_io instead).';
+COMMENT ON COLUMN pgfr_record.deltas.bgw_buffers_backend_fsync_delta IS '[counter-delta] [count] fsync calls executed by backends themselves during the interval; difference of pg_stat_bgwriter.buffers_backend_fsync. NULL on PG17+, where the source column was removed.';
+COMMENT ON COLUMN pgfr_record.deltas.autovacuum_workers_active IS '[gauge] [count] Autovacuum worker backends running at the instant the later snapshot was taken (pg_stat_activity rows with backend_type autovacuum worker); exact at that instant, undefined between ticks.';
+COMMENT ON COLUMN pgfr_record.deltas.slots_count IS '[gauge] [count] Replication slots existing (rows in pg_replication_slots) at the instant the later snapshot was taken.';
+COMMENT ON COLUMN pgfr_record.deltas.slots_max_retained_wal IS '[gauge] [bytes] Largest WAL retention across replication slots at the later snapshot instant: max of pg_current_wal_lsn() minus restart_lsn over pg_replication_slots, 0 when no slots exist.';
+COMMENT ON COLUMN pgfr_record.deltas.slots_max_retained_pretty IS '[derived] [text] Human-readable formatting of slots_max_retained_wal via pgfr_record._pretty_bytes().';
+COMMENT ON COLUMN pgfr_record.deltas.io_ckpt_reads_delta IS '[counter-delta] [count] Read operations by the checkpointer during the interval; difference of summed pg_stat_io.reads for backend_type checkpointer. NULL on PG15, where pg_stat_io does not exist.';
+COMMENT ON COLUMN pgfr_record.deltas.io_ckpt_read_time_ms IS '[counter-delta] [milliseconds] Time the checkpointer spent in read operations during the interval; difference of summed pg_stat_io.read_time for backend_type checkpointer. NULL on PG15.';
+COMMENT ON COLUMN pgfr_record.deltas.io_ckpt_writes_delta IS '[counter-delta] [count] Write operations by the checkpointer during the interval; difference of summed pg_stat_io.writes for backend_type checkpointer. NULL on PG15.';
+COMMENT ON COLUMN pgfr_record.deltas.io_ckpt_write_time_ms IS '[counter-delta] [milliseconds] Time the checkpointer spent in write operations during the interval; difference of summed pg_stat_io.write_time for backend_type checkpointer. NULL on PG15.';
+COMMENT ON COLUMN pgfr_record.deltas.io_ckpt_fsyncs_delta IS '[counter-delta] [count] fsync calls by the checkpointer during the interval; difference of summed pg_stat_io.fsyncs for backend_type checkpointer. NULL on PG15.';
+COMMENT ON COLUMN pgfr_record.deltas.io_ckpt_fsync_time_ms IS '[counter-delta] [milliseconds] Time the checkpointer spent in fsync calls during the interval; difference of summed pg_stat_io.fsync_time for backend_type checkpointer. NULL on PG15.';
+COMMENT ON COLUMN pgfr_record.deltas.io_autovacuum_reads_delta IS '[counter-delta] [count] Read operations by autovacuum workers during the interval; difference of summed pg_stat_io.reads for backend_type autovacuum worker. NULL on PG15.';
+COMMENT ON COLUMN pgfr_record.deltas.io_autovacuum_read_time_ms IS '[counter-delta] [milliseconds] Time autovacuum workers spent in read operations during the interval; difference of summed pg_stat_io.read_time for backend_type autovacuum worker. NULL on PG15.';
+COMMENT ON COLUMN pgfr_record.deltas.io_autovacuum_writes_delta IS '[counter-delta] [count] Write operations by autovacuum workers during the interval; difference of summed pg_stat_io.writes for backend_type autovacuum worker. NULL on PG15.';
+COMMENT ON COLUMN pgfr_record.deltas.io_autovacuum_write_time_ms IS '[counter-delta] [milliseconds] Time autovacuum workers spent in write operations during the interval; difference of summed pg_stat_io.write_time for backend_type autovacuum worker. NULL on PG15.';
+COMMENT ON COLUMN pgfr_record.deltas.io_client_reads_delta IS '[counter-delta] [count] Read operations by client backends during the interval; difference of summed pg_stat_io.reads for backend_type client backend. NULL on PG15.';
+COMMENT ON COLUMN pgfr_record.deltas.io_client_read_time_ms IS '[counter-delta] [milliseconds] Time client backends spent in read operations during the interval; difference of summed pg_stat_io.read_time for backend_type client backend. NULL on PG15.';
+COMMENT ON COLUMN pgfr_record.deltas.io_client_writes_delta IS '[counter-delta] [count] Write operations by client backends during the interval; difference of summed pg_stat_io.writes for backend_type client backend. NULL on PG15.';
+COMMENT ON COLUMN pgfr_record.deltas.io_client_write_time_ms IS '[counter-delta] [milliseconds] Time client backends spent in write operations during the interval; difference of summed pg_stat_io.write_time for backend_type client backend. NULL on PG15.';
+COMMENT ON COLUMN pgfr_record.deltas.io_bgwriter_reads_delta IS '[counter-delta] [count] Read operations by the background writer during the interval; difference of summed pg_stat_io.reads for backend_type background writer. NULL on PG15.';
+COMMENT ON COLUMN pgfr_record.deltas.io_bgwriter_read_time_ms IS '[counter-delta] [milliseconds] Time the background writer spent in read operations during the interval; difference of summed pg_stat_io.read_time for backend_type background writer. NULL on PG15.';
+COMMENT ON COLUMN pgfr_record.deltas.io_bgwriter_writes_delta IS '[counter-delta] [count] Write operations by the background writer during the interval; difference of summed pg_stat_io.writes for backend_type background writer. NULL on PG15.';
+COMMENT ON COLUMN pgfr_record.deltas.io_bgwriter_write_time_ms IS '[counter-delta] [milliseconds] Time the background writer spent in write operations during the interval; difference of summed pg_stat_io.write_time for backend_type background writer. NULL on PG15.';
+COMMENT ON COLUMN pgfr_record.deltas.temp_files_delta IS '[counter-delta] [count] Temporary files created by the current database during the interval; difference of pg_stat_database.temp_files.';
+COMMENT ON COLUMN pgfr_record.deltas.temp_bytes_delta IS '[counter-delta] [bytes] Bytes written to temporary files by the current database during the interval; difference of pg_stat_database.temp_bytes.';
+COMMENT ON COLUMN pgfr_record.deltas.temp_bytes_pretty IS '[derived] [text] Human-readable formatting of temp_bytes_delta via pgfr_record._pretty_bytes().';
+
 -- Returns the ring buffer retention interval based on configured sample interval
 -- Used by recent_* views and recent_*_current() functions to determine query window
 CREATE OR REPLACE FUNCTION pgfr_record._get_ring_retention_interval()
@@ -1069,6 +1113,21 @@ FROM pgfr_record.snapshots sn
 JOIN pgfr_record.replication_snapshots r ON r.snapshot_id = sn.id
 WHERE sn.captured_at > now() - interval '2 hours'
 ORDER BY sn.captured_at DESC, r.application_name;
+COMMENT ON COLUMN pgfr_record.recent_replication.captured_at IS '[dimension] [timestamp] Capture time of the snapshot this row belongs to; the view returns replication rows from snapshots taken in the last 2 hours.';
+COMMENT ON COLUMN pgfr_record.recent_replication.pid IS '[dimension] [bigint] Process id of the WAL sender backend, from pg_stat_replication at snapshot time.';
+COMMENT ON COLUMN pgfr_record.recent_replication.client_addr IS '[dimension] [text] IP address of the connected standby (inet), from pg_stat_replication.';
+COMMENT ON COLUMN pgfr_record.recent_replication.application_name IS '[dimension] [text] application_name reported by the standby connection, from pg_stat_replication.';
+COMMENT ON COLUMN pgfr_record.recent_replication.state IS '[dimension] [text] WAL sender state at the snapshot instant (startup, catchup, streaming, backup, stopping).';
+COMMENT ON COLUMN pgfr_record.recent_replication.sync_state IS '[dimension] [text] Synchronous replication state of this standby at the snapshot instant (async, potential, sync, quorum).';
+COMMENT ON COLUMN pgfr_record.recent_replication.sent_lsn IS '[gauge] [lsn] Last WAL location sent on this connection as of the snapshot instant.';
+COMMENT ON COLUMN pgfr_record.recent_replication.write_lsn IS '[gauge] [lsn] Last WAL location written to disk by the standby, as reported to the primary as of the snapshot instant.';
+COMMENT ON COLUMN pgfr_record.recent_replication.flush_lsn IS '[gauge] [lsn] Last WAL location flushed to disk by the standby, as reported to the primary as of the snapshot instant.';
+COMMENT ON COLUMN pgfr_record.recent_replication.replay_lsn IS '[gauge] [lsn] Last WAL location replayed on the standby, as reported to the primary as of the snapshot instant.';
+COMMENT ON COLUMN pgfr_record.recent_replication.replay_lag_bytes IS '[gauge] [bytes] Replication backlog at the snapshot instant: pg_wal_lsn_diff(sent_lsn, replay_lsn), the bytes of WAL sent to the standby but not yet replayed there.';
+COMMENT ON COLUMN pgfr_record.recent_replication.replay_lag_pretty IS '[derived] [text] Human-readable formatting of replay_lag_bytes via pgfr_record._pretty_bytes().';
+COMMENT ON COLUMN pgfr_record.recent_replication.write_lag IS '[gauge] [duration] Time elapsed between flushing WAL locally and receiving confirmation that the standby wrote it, as reported by pg_stat_replication at the snapshot instant.';
+COMMENT ON COLUMN pgfr_record.recent_replication.flush_lag IS '[gauge] [duration] Time elapsed between flushing WAL locally and receiving confirmation that the standby flushed it, as reported by pg_stat_replication at the snapshot instant.';
+COMMENT ON COLUMN pgfr_record.recent_replication.replay_lag IS '[gauge] [duration] Time elapsed between flushing WAL locally and receiving confirmation that the standby replayed it, as reported by pg_stat_replication at the snapshot instant.';
 
 -- Shows vacuum progress from recent snapshots with percentage calculations
 CREATE OR REPLACE VIEW pgfr_record.recent_vacuum_progress AS
@@ -1097,6 +1156,19 @@ JOIN pgfr_record.vacuum_progress_snapshots v ON v.snapshot_id = sn.id
 WHERE sn.captured_at > now() - interval '2 hours'
 ORDER BY sn.captured_at DESC, v.pid;
 COMMENT ON VIEW pgfr_record.recent_vacuum_progress IS 'Recent vacuum progress with percentage scanned/vacuumed calculations';
+COMMENT ON COLUMN pgfr_record.recent_vacuum_progress.captured_at IS '[dimension] [timestamp] Capture time of the snapshot this row belongs to; the view returns vacuum-progress rows from snapshots taken in the last 2 hours.';
+COMMENT ON COLUMN pgfr_record.recent_vacuum_progress.pid IS '[dimension] [bigint] Process id of the backend running the vacuum, from pg_stat_progress_vacuum at snapshot time.';
+COMMENT ON COLUMN pgfr_record.recent_vacuum_progress.datname IS '[dimension] [text] Database being vacuumed, resolved from pg_stat_progress_vacuum.datid at collection time.';
+COMMENT ON COLUMN pgfr_record.recent_vacuum_progress.relname IS '[dimension] [text] Table being vacuumed, resolved from pg_stat_progress_vacuum.relid at collection time.';
+COMMENT ON COLUMN pgfr_record.recent_vacuum_progress.phase IS '[dimension] [text] Vacuum processing phase at the snapshot instant (e.g. scanning heap, vacuuming indexes, vacuuming heap), from pg_stat_progress_vacuum.';
+COMMENT ON COLUMN pgfr_record.recent_vacuum_progress.heap_blks_total IS '[gauge] [blocks] Total heap blocks in the table as of the start of the vacuum, from pg_stat_progress_vacuum, read at the snapshot instant.';
+COMMENT ON COLUMN pgfr_record.recent_vacuum_progress.heap_blks_scanned IS '[gauge] [blocks] Heap blocks scanned so far by this vacuum as of the snapshot instant.';
+COMMENT ON COLUMN pgfr_record.recent_vacuum_progress.heap_blks_vacuumed IS '[gauge] [blocks] Heap blocks vacuumed so far by this vacuum as of the snapshot instant.';
+COMMENT ON COLUMN pgfr_record.recent_vacuum_progress.pct_scanned IS '[derived] [percent] Scan progress on a 0-100 scale: 100 * heap_blks_scanned / heap_blks_total, denominator heap_blks_total; NULL when heap_blks_total is 0.';
+COMMENT ON COLUMN pgfr_record.recent_vacuum_progress.pct_vacuumed IS '[derived] [percent] Vacuum progress on a 0-100 scale: 100 * heap_blks_vacuumed / heap_blks_total, denominator heap_blks_total; NULL when heap_blks_total is 0.';
+COMMENT ON COLUMN pgfr_record.recent_vacuum_progress.index_vacuum_count IS '[gauge] [count] Index vacuum cycles completed so far in this vacuum run, as of the snapshot instant.';
+COMMENT ON COLUMN pgfr_record.recent_vacuum_progress.max_dead_tuples IS '[gauge] [count] Dead-tuple storage capacity before an index vacuum cycle is forced. On PG15/16 this holds pg_stat_progress_vacuum.max_dead_tuples (a tuple count); on PG17+ the collector stores max_dead_tuple_bytes here, so the value is bytes, not tuples.';
+COMMENT ON COLUMN pgfr_record.recent_vacuum_progress.num_dead_tuples IS '[gauge] [count] Dead items collected so far as of the snapshot instant: pg_stat_progress_vacuum.num_dead_tuples on PG15/16, num_dead_item_ids on PG17+.';
 
 -- Shows archiver status with delta calculations between snapshots
 CREATE OR REPLACE VIEW pgfr_record.archiver_status AS
@@ -1120,6 +1192,17 @@ WHERE s.captured_at > now() - interval '24 hours'
   AND s.archived_count IS NOT NULL
 ORDER BY s.captured_at DESC;
 COMMENT ON VIEW pgfr_record.archiver_status IS 'WAL archiver status with delta calculations between snapshots';
+COMMENT ON COLUMN pgfr_record.archiver_status.snapshot_id IS '[dimension] [bigint] Snapshot id of the later (current) endpoint of the delta pair; references pgfr_record.snapshots.id.';
+COMMENT ON COLUMN pgfr_record.archiver_status.captured_at IS '[dimension] [timestamp] Capture time of the later snapshot; the view returns rows from the last 24 hours where archiver stats were collected (archive_mode not off).';
+COMMENT ON COLUMN pgfr_record.archiver_status.archived_count IS '[gauge] [count] Cumulative number of WAL files successfully archived since archiver stats were last reset (pg_stat_archiver.archived_count), as read at snapshot time; a raw counter endpoint, use archived_delta for per-interval activity.';
+COMMENT ON COLUMN pgfr_record.archiver_status.last_archived_wal IS '[dimension] [text] Name of the most recent WAL file successfully archived, as of the snapshot.';
+COMMENT ON COLUMN pgfr_record.archiver_status.last_archived_time IS '[dimension] [timestamp] Time of the most recent successful archive operation, as of the snapshot.';
+COMMENT ON COLUMN pgfr_record.archiver_status.failed_count IS '[gauge] [count] Cumulative number of failed WAL archive attempts since archiver stats were last reset (pg_stat_archiver.failed_count), as read at snapshot time; a raw counter endpoint, use failed_delta for per-interval failures.';
+COMMENT ON COLUMN pgfr_record.archiver_status.last_failed_wal IS '[dimension] [text] Name of the WAL file involved in the most recent failed archive attempt, as of the snapshot.';
+COMMENT ON COLUMN pgfr_record.archiver_status.last_failed_time IS '[dimension] [timestamp] Time of the most recent failed archive attempt, as of the snapshot.';
+COMMENT ON COLUMN pgfr_record.archiver_status.archiver_stats_reset IS '[dimension] [timestamp] When pg_stat_archiver statistics were last reset; delta columns spanning a reset are unreliable.';
+COMMENT ON COLUMN pgfr_record.archiver_status.archived_delta IS '[counter-delta] [count] WAL files successfully archived between the previous and the current snapshot; difference of pg_stat_archiver.archived_count.';
+COMMENT ON COLUMN pgfr_record.archiver_status.failed_delta IS '[counter-delta] [count] Failed WAL archive attempts between the previous and the current snapshot; difference of pg_stat_archiver.failed_count.';
 
 -- Switches flight recorder to specified mode (normal/light/emergency) with different overhead and retention trade-offs
 -- Validates mode and configures sampling interval and collector enablement accordingly

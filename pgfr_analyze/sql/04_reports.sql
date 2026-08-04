@@ -151,7 +151,12 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION pgfr_analyze.performance_report(INTERVAL) IS
-'Reports on flight recorder collection performance: sample/snapshot timing, success rates, schema size, and qualitative health assessments over a configurable lookback window.';
+'Reports on flight recorder collection performance: sample/snapshot timing, success rates, schema size, and qualitative health assessments over a configurable lookback window.
+
+Output columns:
+  metric: [dimension] [text] Name of the reported metric row: Avg Sample Duration, Max Sample Duration, Avg Snapshot Duration, Schema Size, Collection Success Rate, Skipped Collections, Section Success Rate, or Performance Trend.
+  value: [derived] [text] Pretty-printed value for the metric, computed from collection_stats over the lookback window (or from _check_schema_size for Schema Size); N/A when no data is available.
+  assessment: [derived] [text] Qualitative rating of the value against fixed thresholds (for example Excellent, Good, Acceptable, Poor), computed from the same inputs as value.';
 
 -- Monitors flight recorder system health by checking for circuit breaker trips, schema size limits, collection failures, and stale data
 -- Returns alerts with severity levels (CRITICAL/WARNING) and recommendations when thresholds are exceeded
@@ -243,7 +248,14 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION pgfr_analyze.check_alerts(INTERVAL) IS
-'Monitors flight recorder system health and returns alerts with severity levels (CRITICAL/WARNING) for circuit breaker trips, schema size limits, collection failures, and stale data.';
+'Monitors flight recorder system health and returns alerts with severity levels (CRITICAL/WARNING) for circuit breaker trips, schema size limits, collection failures, and stale data.
+
+Output columns:
+  alert_type: [dimension] [text] Alert identifier: CIRCUIT_BREAKER_TRIPS, SCHEMA_SIZE_HIGH, COLLECTION_FAILURES, or STALE_DATA.
+  severity: [derived] [text] CRITICAL or WARNING, fixed per alert type once its trigger threshold is exceeded.
+  message: [derived] [text] Human-readable description of the triggering condition, computed from collection_stats over the lookback window, _check_schema_size, or the most recent wait_samples tick.
+  triggered_at: [dimension] [timestamp] Time the alert row was generated (now() at call time), not the time the underlying condition began.
+  recommendation: [derived] [text] Suggested remediation text, fixed per alert type.';
 
 -- Exports flight recorder diagnostic data as human-readable Markdown
 -- Produces a report with tables that is legible to both humans and AI
@@ -792,7 +804,13 @@ END;
 $$;
 COMMENT ON FUNCTION pgfr_analyze.preflight_check() IS
 
-'Pre-installation validation checks. Returns component status (GO/CAUTION/NO-GO). For summary, use preflight_check_with_summary().';
+'Pre-installation validation checks. Returns component status (GO/CAUTION/NO-GO). For summary, use preflight_check_with_summary().
+
+Output columns:
+  check_name: [dimension] [text] Name of the preflight check: System Resources, Connection Headroom, pg_stat_statements Budget, Storage Overhead, Scheduling (pg_cron), or Safety Mechanisms.
+  status: [derived] [text] Readiness verdict for the check: GO, CAUTION, or NO-GO, from thresholds on the inspected setting or condition (worker processes, connection share of max_connections, pg_stat_statements.max, pg_cron presence).
+  details: [derived] [text] Human-readable evidence behind the verdict; for Connection Headroom this includes current connections as a percent of max_connections.
+  recommendation: [derived] [text] Actionable guidance matching the verdict for this check.';
 -- Executes preflight validation checks and appends a summary row indicating overall system readiness (READY, CAUTION, or NO-GO)
 CREATE OR REPLACE FUNCTION pgfr_analyze.preflight_check_with_summary()
 RETURNS TABLE(
@@ -835,7 +853,13 @@ END;
 $$;
 COMMENT ON FUNCTION pgfr_analyze.preflight_check_with_summary() IS
 
-'Pre-installation validation with summary. Calls preflight_check() twice - once for results, once to count. More expensive but includes summary row.';
+'Pre-installation validation with summary. Calls preflight_check() twice - once for results, once to count. More expensive but includes summary row.
+
+Output columns:
+  check_name: [dimension] [text] Name of the preflight check, or the literal === SUMMARY === for the appended overall row.
+  status: [derived] [text] GO, CAUTION, or NO-GO per check; the summary row reports NO-GO, PROCEED WITH CAUTION, or READY FOR PRODUCTION based on counts of NO-GO and CAUTION rows.
+  details: [derived] [text] Evidence behind the verdict; on the summary row, the count of critical issues or cautions detected.
+  recommendation: [derived] [text] Actionable guidance per check; on the summary row, overall installation advice.';
 -- Generates a comprehensive quarterly health review of the pgfr_record system
 -- Assesses collection performance, storage consumption, reliability, circuit breaker activity, and data freshness
 CREATE OR REPLACE FUNCTION pgfr_analyze.quarterly_review()
@@ -1038,7 +1062,13 @@ END;
 $$;
 COMMENT ON FUNCTION pgfr_analyze.quarterly_review() IS
 
-'Quarterly health check for flight recorder. Returns component metrics (EXCELLENT/GOOD/REVIEW NEEDED/ERROR). For summary, use quarterly_review_with_summary().';
+'Quarterly health check for flight recorder. Returns component metrics (EXCELLENT/GOOD/REVIEW NEEDED/ERROR). For summary, use quarterly_review_with_summary().
+
+Output columns:
+  component: [dimension] [text] Review section name: a header row plus numbered components (Collection Performance, Storage Consumption, Collection Reliability, Circuit Breaker Activity, Data Freshness, pg_cron Job Health).
+  status: [derived] [text] Health grade for the component: EXCELLENT, GOOD, REVIEW NEEDED, ERROR, or CRITICAL, from thresholds on the component metric; the header row uses INFO.
+  metric: [derived] [text] Formatted measurement behind the grade: avg/max sample collection duration and skip counts over 30 days, schema size in MB and wait sample count, failed collection and circuit breaker trip counts over 90 days, last sample and snapshot age, or cron job counts.
+  assessment: [derived] [text] Actionable interpretation of the metric for the component.';
 -- Quarterly health check with summary. Appends overall health status (HEALTHY or ACTION REQUIRED) based on count of ERROR or REVIEW NEEDED items detected
 -- More expensive than quarterly_review() as it calls it twice - once for detailed results, once to count critical issues
 CREATE OR REPLACE FUNCTION pgfr_analyze.quarterly_review_with_summary()
@@ -1073,6 +1103,12 @@ END;
 $$;
 COMMENT ON FUNCTION pgfr_analyze.quarterly_review_with_summary() IS
 
-'Quarterly health check with summary. Calls quarterly_review() twice - once for results, once to count. More expensive but includes summary row.';
+'Quarterly health check with summary. Calls quarterly_review() twice - once for results, once to count. More expensive but includes summary row.
+
+Output columns:
+  component: [dimension] [text] Review section name from quarterly_review(); the appended overall row uses === QUARTERLY REVIEW SUMMARY ===.
+  status: [derived] [text] Health grade per component (EXCELLENT, GOOD, REVIEW NEEDED, ERROR, CRITICAL, or INFO); the summary row reports HEALTHY or ACTION REQUIRED based on the count of ERROR and REVIEW NEEDED rows.
+  metric: [derived] [text] Formatted measurement behind the grade; on the summary row, the count of items needing review.
+  assessment: [derived] [text] Actionable interpretation per component; on the summary row, overall guidance.';
 -- Analyzes database resource capacity metrics (connections, memory, storage, transactions) over a time window
 -- Returns utilization status with actionable recommendations

@@ -98,14 +98,117 @@ comment on view pgfr_record.consumption_weekly_flows is
 'Issue #92.';
 
 comment on column pgfr_record.consumption_weekly_flows.week_end_date is
-'The bucket''s anchor date (the most recent day in its rolling 7-day span), '
-'matching how consumption_daily_rollups.rollup_date already represents an '
-'interval''s end, not its start. Stable per bucket regardless of which '
-'day''s row happens to compute it, since it''s derived from week_index, not '
-'from any individual row''s rollup_date.';
+'[dimension] [date] The bucket''s anchor date (the most recent day in its '
+'rolling 7-day span), matching how consumption_daily_rollups.rollup_date '
+'already represents an interval''s end, not its start. Stable per bucket '
+'regardless of which day''s row happens to compute it, since it''s derived '
+'from week_index, not from any individual row''s rollup_date.';
+
+comment on column pgfr_record.consumption_weekly_flows.datname is
+'[dimension] [text] Database the per-database lanes are scoped to, carried '
+'through from consumption_daily_rollups (always current_database(); the WAL, '
+'io, and checkpointer lanes are cluster-wide).';
 
 comment on column pgfr_record.consumption_weekly_flows.week_index is
-'0 = the most recent complete rolling week (today back to 6 days ago), '
-'counting backward through all available history. Exposed alongside '
-'week_end_date mainly for debugging/testing; callers should filter on '
-'week_end_date, the same way daily callers filter on rollup_date.';
+'[dimension] [count] 0 = the most recent complete rolling week (today back to '
+'6 days ago), counting backward through all available history. Exposed '
+'alongside week_end_date mainly for debugging/testing; callers should filter '
+'on week_end_date, the same way daily callers filter on rollup_date.';
+
+comment on column pgfr_record.consumption_weekly_flows.total_seconds is
+'[derived] [seconds] Elapsed wall time covered by the bucket''s valid ticks: '
+'sum of consumption_daily_rollups.total_seconds across its 7 days. The '
+'denominator for this view''s per-second rates, not an assumed 604800; a week '
+'containing recorder downtime has proportionally fewer seconds.';
+
+comment on column pgfr_record.consumption_weekly_flows.valid_tick_count is
+'[derived] [count] Number of delta intervals that contributed to the '
+'bucket''s sums (sum of consumption_daily_rollups.valid_tick_count over its 7 '
+'days). Counts intervals present, not per-metric validity; low values flag '
+'partial coverage.';
+
+comment on column pgfr_record.consumption_weekly_flows.blocks_per_row_returned is
+'[derived] [blocks/row] Buffer-pool block demand per row returned over the '
+'week: (blks_hit_sum + blks_read_sum) over tup_returned_sum, each re-summed '
+'across the bucket''s 7 days before dividing (never an average of daily '
+'ratios). NULL when the denominator is zero; reset-excluded (NULL) days drop '
+'out of the weekly sums rather than nulling the bucket.';
+
+comment on column pgfr_record.consumption_weekly_flows.wal_bytes_per_row_mutated is
+'[derived] [bytes/row] WAL bytes per row mutated over the week: wal_bytes_sum '
+'(LSN odometer) over tup_mutated_sum (rows inserted + updated + deleted), '
+'re-summed across the bucket before dividing. NULL when the denominator is '
+'zero; reset-excluded days drop out of the weekly sums.';
+
+comment on column pgfr_record.consumption_weekly_flows.temp_bytes_per_xact is
+'[derived] [bytes/xact] Temp-file bytes spilled per committed transaction '
+'over the week: temp_bytes_sum over xact_commit_sum (commits only, rollbacks '
+'excluded), re-summed across the bucket before dividing. NULL when the '
+'denominator is zero; reset-excluded days drop out of the weekly sums.';
+
+comment on column pgfr_record.consumption_weekly_flows.fpi_fraction is
+'[derived] [fraction] Approximate share of the week''s WAL volume consumed by '
+'full-page images, 0 to 1: wal_fpi_sum times block_size over '
+'wal_bytes_advisory_sum (the advisory pg_stat_wal byte count), re-summed '
+'across the bucket. NULL when the denominator is zero; reset-excluded days '
+'drop out of the weekly sums.';
+
+comment on column pgfr_record.consumption_weekly_flows.ckpt_requested_fraction is
+'[derived] [fraction] Share of the week''s checkpoints that were requested '
+'(forced) rather than scheduled, 0 to 1: ckpt_num_requested_sum over '
+'(ckpt_num_timed_sum + ckpt_num_requested_sum), re-summed across the bucket. '
+'NULL when no checkpoints occurred; reset-excluded days drop out of the '
+'weekly sums.';
+
+comment on column pgfr_record.consumption_weekly_flows.rollback_fraction is
+'[derived] [fraction] Share of the week''s transactions that rolled back, 0 '
+'to 1: xact_rollback_sum over (xact_commit_sum + xact_rollback_sum), '
+'re-summed across the bucket. NULL when the denominator is zero; '
+'reset-excluded days drop out of the weekly sums.';
+
+comment on column pgfr_record.consumption_weekly_flows.autovacuum_write_share is
+'[derived] [fraction] Share of the week''s OS block write requests issued by '
+'autovacuum workers, 0 to 1: io_writes_autovacuum_sum over '
+'io_writes_total_sum (pg_stat_io, PG16+), re-summed across the bucket. NULL '
+'on PG15 or when the denominator is zero.';
+
+comment on column pgfr_record.consumption_weekly_flows.cache_hit_fraction is
+'[derived] [fraction] Share of the week''s buffer-pool block demand satisfied '
+'from shared buffers, 0 to 1: blks_hit_sum over (blks_hit_sum + '
+'blks_read_sum), re-summed across the bucket. Substrate indicator, never '
+'called consumption. NULL when the denominator is zero.';
+
+comment on column pgfr_record.consumption_weekly_flows.read_write_tuple_ratio is
+'[derived] [ratio] Workload-shape guard, not a consumption metric: '
+'tup_returned_sum over tup_mutated_sum for the week, re-summed across the '
+'bucket. Unbounded (a read-heavy week is far above 1). NULL when no rows '
+'were mutated.';
+
+comment on column pgfr_record.consumption_weekly_flows.xact_per_s is
+'[counter-delta] [count/s] [interval-mean] Transactions per second, commits '
+'plus rollbacks: (xact_commit_sum + xact_rollback_sum) over total_seconds, '
+'the bucket''s covered seconds. Mean rate over the week, never instantaneous; '
+'carries no sub-week burst information.';
+
+comment on column pgfr_record.consumption_weekly_flows.rows_returned_per_xact is
+'[derived] [rows/xact] Workload-shape guard: rows returned per transaction '
+'for the week, tup_returned_sum over (xact_commit_sum + xact_rollback_sum), '
+'re-summed across the bucket. NULL when the denominator is zero.';
+
+comment on column pgfr_record.consumption_weekly_flows.rows_mutated_per_xact is
+'[derived] [rows/xact] Workload-shape guard: rows mutated per transaction '
+'for the week, tup_mutated_sum over (xact_commit_sum + xact_rollback_sum), '
+'re-summed across the bucket. NULL when the denominator is zero.';
+
+comment on column pgfr_record.consumption_weekly_flows.db_size_bytes is
+'[gauge] [bytes] The bucket''s most recent observed database size: the last '
+'day''s consumption_daily_rollups.db_size_bytes (itself the day''s last '
+'observed pg_database_size()), a level carried through rather than summed. '
+'Exact at that reading, undefined between readings.';
+
+comment on column pgfr_record.consumption_weekly_flows.recorder_overhead_fraction is
+'[derived] [fraction] The recorder''s own share of the week''s total '
+'buffer-pool block demand, 0 to 1: (recorder_blks_hit_sum + '
+'recorder_blks_read_sum) over (blks_hit_sum + blks_read_sum), re-summed '
+'across the bucket. Footnote-grade self-accounting. NULL when the denominator '
+'is zero.';

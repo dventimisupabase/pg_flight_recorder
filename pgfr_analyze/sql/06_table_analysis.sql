@@ -93,7 +93,26 @@ LANGUAGE sql STABLE AS $$
     LIMIT p_limit
 $$;
 COMMENT ON FUNCTION pgfr_analyze.table_compare(TIMESTAMPTZ, TIMESTAMPTZ, INTEGER) IS
-'Compare table activity between two time points. Shows DML deltas, scan counts, dead tuple percentage, and maintenance events. Useful for identifying hot tables during incidents.';
+'Compare table activity between two time points. Shows DML deltas, scan counts, dead tuple percentage, and maintenance events. Useful for identifying hot tables during incidents.
+
+Output columns:
+  schemaname: [dimension] [text] Schema of the table, from the end snapshot, falling back to parsing relid::regclass when the stored name is NULL.
+  relname: [dimension] [text] Table name, from the end snapshot with regclass fallback.
+  relid: [dimension] [oid] Table OID; the join key matching start and end snapshots.
+  seq_scan_delta: [counter-delta] [count] Sequential scans (pg_stat_user_tables.seq_scan) between the last table snapshot at or before p_start_time and the first at or after p_end_time; when no start snapshot exists, the raw end counter is reported.
+  seq_tup_read_delta: [counter-delta] [count] Rows read by sequential scans (seq_tup_read) over the comparison window.
+  idx_scan_delta: [counter-delta] [count] Index scans against the table (idx_scan) over the comparison window.
+  idx_tup_fetch_delta: [counter-delta] [count] Live rows fetched by index scans (idx_tup_fetch) over the comparison window.
+  n_tup_ins_delta: [counter-delta] [count] Rows inserted (n_tup_ins) over the comparison window.
+  n_tup_upd_delta: [counter-delta] [count] Rows updated (n_tup_upd) over the comparison window.
+  n_tup_del_delta: [counter-delta] [count] Rows deleted (n_tup_del) over the comparison window.
+  n_tup_hot_upd_delta: [counter-delta] [count] HOT updates (n_tup_hot_upd) over the comparison window.
+  dead_tup_pct: [derived] [percent] Dead tuples as a percent of live plus dead tuples (n_dead_tup over n_live_tup + n_dead_tup, times 100) at the end snapshot only; both inputs are estimated gauges, and 0 is returned when n_live_tup is 0.
+  vacuum_count_delta: [counter-delta] [count] Manual VACUUM runs (vacuum_count) over the comparison window.
+  autovacuum_count_delta: [counter-delta] [count] Autovacuum runs (autovacuum_count) over the comparison window.
+  analyze_count_delta: [counter-delta] [count] Manual ANALYZE runs (analyze_count) over the comparison window.
+  autoanalyze_count_delta: [counter-delta] [count] Autoanalyze runs (autoanalyze_count) over the comparison window.
+  total_activity: [derived] [count] Sum of seq_tup_read_delta, idx_tup_fetch_delta, n_tup_ins_delta, n_tup_upd_delta, and n_tup_del_delta over the comparison window; the ranking key, and rows where it is 0 are filtered out.';
 
 
 -- Identifies table hotspots and potential issues
@@ -186,7 +205,15 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION pgfr_analyze.table_hotspots(TIMESTAMPTZ, TIMESTAMPTZ) IS
-'Identify table-level hotspots and issues. Returns actionable recommendations for sequential scan storms, table bloat, low HOT update ratios, and frequent autovacuum activity.';
+'Identify table-level hotspots and issues. Returns actionable recommendations for sequential scan storms, table bloat, low HOT update ratios, and frequent autovacuum activity.
+
+Output columns:
+  schemaname: [dimension] [text] Schema of the flagged table.
+  relname: [dimension] [text] Name of the flagged table.
+  issue_type: [derived] [text] Detected issue class: SEQUENTIAL_SCAN_STORM, TABLE_BLOAT, LOW_HOT_UPDATE_RATIO, or HIGH_AUTOVACUUM_FREQUENCY, from fixed thresholds on table_compare() output between p_start_time and p_end_time.
+  severity: [derived] [text] low, medium, or high, from magnitude thresholds on the triggering metric (tuples read, dead tuple percent, HOT ratio, autovacuum count).
+  description: [derived] [text] Formatted evidence for the issue: scan and tuple-read counts, dead tuples as a percent of live plus dead tuples, HOT updates as a percent of all updates, or autovacuum count over the period.
+  recommendation: [derived] [text] Suggested remediation for the issue type.';
 
 
 -- =============================================================================

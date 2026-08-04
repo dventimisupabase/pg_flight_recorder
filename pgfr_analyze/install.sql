@@ -29,6 +29,7 @@
 --                                 _refresh_consumption_trends
 --   12_consumption_weekly_trends.sql consumption_weekly_metric_series,
 --                                 _refresh_consumption_trends_weekly (90d window)
+--   13_column_semantics.sql       column_semantics registry (Issue #99)
 
 \ir sql/01_core_metrics.sql
 \ir sql/02_ring_readers.sql
@@ -42,3 +43,4 @@
 \ir sql/10_v2_readers.sql
 \ir sql/11_consumption_trends.sql
 \ir sql/12_consumption_weekly_trends.sql
+\ir sql/13_column_semantics.sql

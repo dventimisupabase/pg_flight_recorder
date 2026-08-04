@@ -55,13 +55,19 @@ function emit_line(line,   stripped) {
     if (stripped == "") return
     if (stripped ~ /^--/) return
     # Track whether we are inside a multi-line COMMENT ON block so we can
-    # also drop its continuation lines.
+    # also drop its continuation lines. A COMMENT ON statement ends at a
+    # closing quote followed by the semicolon (…something.\x27;) — NOT at any
+    # line that merely ends with ;. Comment prose can legitimately end a line
+    # with a bare semicolon (e.g. an example invocation inside the text), and
+    # treating that as the statement end used to spill the rest of the
+    # comment string into the output as bogus SQL. The [^\x27] guard also
+    # keeps an escaped quote (\x27\x27;) from reading as the terminator.
     if (in_comment_on) {
-        if (stripped ~ /;[ \t]*$/) in_comment_on = 0
+        if (stripped ~ /[^\x27]\x27[ \t]*;[ \t]*$/) in_comment_on = 0
         return
     }
     if (stripped ~ /^(COMMENT ON|comment on)[ \t]/) {
-        if (stripped !~ /;[ \t]*$/) in_comment_on = 1
+        if (stripped !~ /[^\x27]\x27[ \t]*;[ \t]*$/) in_comment_on = 1
         return
     }
     if (stripped !~ /[\x27"]|\$\$|\$[A-Za-z_]+\$/) {

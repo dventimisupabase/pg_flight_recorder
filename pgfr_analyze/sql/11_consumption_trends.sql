@@ -81,6 +81,15 @@ comment on view pgfr_analyze.consumption_metric_series is
 'affect any other metric''s trend, since each metric''s point-set is built '
 'and filtered independently.';
 
+comment on column pgfr_analyze.consumption_metric_series.rollup_date is
+'[dimension] [date] Daily rollup bucket carried through from pgfr_record.consumption_daily_flows.rollup_date; identifies the day the metric value describes.';
+comment on column pgfr_analyze.consumption_metric_series.datname is
+'[dimension] [text] Database name the metric row describes, carried through from pgfr_record.consumption_daily_flows.';
+comment on column pgfr_analyze.consumption_metric_series.metric_name is
+'[dimension] [text] Name of the basket metric; one of the 8 unpivoted ratio columns of pgfr_record.consumption_daily_flows (blocks_per_row_returned, wal_bytes_per_row_mutated, temp_bytes_per_xact, fpi_fraction, ckpt_requested_fraction, rollback_fraction, autovacuum_write_share, cache_hit_fraction).';
+comment on column pgfr_analyze.consumption_metric_series.value is
+'[derived] [mixed] Value of the metric named by metric_name; units vary by metric (0-1 fractions for the *_fraction and *_share metrics, blocks or bytes per row or per transaction for the intensity metrics), so consult the underlying pgfr_record.consumption_daily_flows column of the same name for units, numerator, and denominator. NULL when the source day was reset-excluded or its denominator was zero.';
+
 -- ---------------------------------------------------------------------------
 -- 2. consumption_trends — the persisted trend table.
 --    One row per (as_of_date, datname, metric_name, window_days), upserted on
