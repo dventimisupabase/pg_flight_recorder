@@ -152,17 +152,17 @@ SELECT ok(
 -- Test INSERT into config with non-numeric value for numeric setting
 DO $$
 BEGIN
-    UPDATE pgfr_record.config SET value = 'not-a-number' WHERE key = 'sample_interval_seconds';
+    UPDATE pgfr_record.config SET value = 'not-a-number' WHERE key = 'statements_interval_minutes';
 END $$;
 
 SELECT throws_ok(
-    $$SELECT pgfr_record._get_config('sample_interval_seconds', '60')::integer$$,
+    $$SELECT pgfr_record._get_config('statements_interval_minutes', '1')::integer$$,
     NULL,
     'Error: Should raise error for non-numeric config values when casting to integer'
 );
 
--- Reset sample_interval_seconds
-UPDATE pgfr_record.config SET value = '120' WHERE key = 'sample_interval_seconds';
+-- Reset statements_interval_minutes
+UPDATE pgfr_record.config SET value = '1' WHERE key = 'statements_interval_minutes';
 
 -- -----------------------------------------------------------------------------
 -- 13.2 Division by Zero Protection (10 tests)

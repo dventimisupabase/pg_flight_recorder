@@ -160,17 +160,9 @@ DECLARE
     v_mode TEXT;
     v_pgcron_version TEXT;
     v_supports_subsecond BOOLEAN := FALSE;
-    v_sample_schedule TEXT;
     v_scheduled INTEGER := 0;
-    v_sample_interval_seconds INTEGER;
-    v_sample_interval_minutes INTEGER;
-    v_cron_expression TEXT;
 BEGIN
     v_mode := pgfr_record._get_config('mode', 'normal');
-    v_sample_interval_seconds := COALESCE(
-        pgfr_record._get_config('sample_interval_seconds', '60')::integer,
-        60
-    );
     BEGIN
         SELECT extversion INTO v_pgcron_version FROM pg_extension WHERE extname = 'pg_cron';
         IF v_pgcron_version IS NULL THEN
@@ -187,18 +179,11 @@ BEGIN
         );
         PERFORM cron.schedule('pgfr_snapshot', '* * * * *', 'SET statement_timeout = ''10s''; SELECT pgfr_record.snapshot()');
         v_scheduled := v_scheduled + 1;
-        IF v_sample_interval_seconds <= 60 THEN
-            v_cron_expression := '* * * * *';
-            v_sample_schedule := 'every 60 seconds';
-        ELSIF v_sample_interval_seconds % 60 = 0 THEN
-            v_sample_interval_minutes := v_sample_interval_seconds / 60;
-            v_cron_expression := format('*/%s * * * *', v_sample_interval_minutes);
-            v_sample_schedule := format('every %s seconds', v_sample_interval_seconds);
-        ELSE
-            v_sample_interval_minutes := CEILING(v_sample_interval_seconds::numeric / 60.0)::integer;
-            v_cron_expression := format('*/%s * * * *', v_sample_interval_minutes);
-            v_sample_schedule := format('approximately every %s seconds', v_sample_interval_seconds);
-        END IF;
+        -- The collection cadence is a fixed design constant: one minute for
+        -- both collectors (Issue #106 retired the sample_interval_seconds
+        -- config key, which computed a cron expression here that was never
+        -- used). The statistical layer (coverage(), STATISTICS.md's
+        -- detection limits) is built on this constant.
         -- Legacy ring writers (pgfr_sample, pgfr_flush, pgfr_archive) retired.
         -- The unschedule block at the top of enable() still removes them if
         -- they exist from an older install. The v2 path (pgfr_sample_ring,
@@ -295,8 +280,8 @@ BEGIN
             -- Don't fail enable() if the GUC is unavailable
             NULL;
         END;
-        RETURN format('Flight Recorder collection restarted. Scheduled %s cron jobs in %s mode (sample: %s).',
-                     v_scheduled, v_mode, v_sample_schedule);
+        RETURN format('Flight Recorder collection restarted. Scheduled %s cron jobs in %s mode (sample: every 60 seconds, fixed).',
+                     v_scheduled, v_mode);
     EXCEPTION
         WHEN undefined_table THEN
             RETURN 'pg_cron extension not found. Cannot schedule automatic collection.';

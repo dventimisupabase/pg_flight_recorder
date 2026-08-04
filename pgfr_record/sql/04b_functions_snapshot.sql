@@ -1082,16 +1082,15 @@ COMMENT ON COLUMN pgfr_record.deltas.temp_files_delta IS '[counter-delta] [count
 COMMENT ON COLUMN pgfr_record.deltas.temp_bytes_delta IS '[counter-delta] [bytes] Bytes written to temporary files by the current database during the interval; difference of pg_stat_database.temp_bytes.';
 COMMENT ON COLUMN pgfr_record.deltas.temp_bytes_pretty IS '[derived] [text] Human-readable formatting of temp_bytes_delta via pgfr_record._pretty_bytes().';
 
--- Returns the ring buffer retention interval based on configured sample interval
--- Used by recent_* views and recent_*_current() functions to determine query window
-CREATE OR REPLACE FUNCTION pgfr_record._get_ring_retention_interval()
-RETURNS INTERVAL
-LANGUAGE sql STABLE AS $$
-    SELECT ((pgfr_record._get_ring_buffer_slots() * COALESCE(
-        pgfr_record._get_config('sample_interval_seconds', '60')::integer,
-        60
-    ))::text || ' seconds')::interval;
-$$;
+-- _get_ring_retention_interval() retired with sample_interval_seconds
+-- (Issue #106): it computed a fictional retention from the legacy ring's
+-- slot count times the inert interval key, and nothing consumed it. The v2
+-- readers derive their cutoff from ring_config (num_slots * rotation_period).
+do $$
+begin
+    set local client_min_messages = warning;
+    drop function if exists pgfr_record._get_ring_retention_interval();
+end $$;
 
 -- recent_waits / recent_activity / recent_locks / recent_idle_in_transaction
 -- are now defined at the end of 08_ring_buffer_v2.sql alongside the v2
@@ -1218,34 +1217,29 @@ DECLARE
     v_enable_locks BOOLEAN;
     v_enable_progress BOOLEAN;
     v_description TEXT;
-    v_sample_interval_seconds INTEGER;
-    v_sample_interval_minutes INTEGER;
-    v_cron_expression TEXT;
-    v_current_interval INTEGER;
 BEGIN
     IF p_mode NOT IN ('normal', 'light', 'emergency') THEN
         RAISE EXCEPTION 'Invalid mode: %. Must be normal, light, or emergency.', p_mode;
     END IF;
-    v_current_interval := COALESCE(
-        pgfr_record._get_config('sample_interval_seconds', '60')::integer,
-        60
-    );
+    -- The collection cadence is a fixed design constant (one minute); modes
+    -- control which collectors run, not how often. Issue #106 retired the
+    -- sample_interval_seconds key this function used to write (and the
+    -- reschedule of the long-retired pgfr_sample job, which was unreachable
+    -- on any current install), so mode descriptions no longer claim cadence
+    -- changes that never happened.
     CASE p_mode
         WHEN 'normal' THEN
             v_enable_locks := TRUE;
             v_enable_progress := TRUE;
-            v_sample_interval_seconds := 60;
-            v_description := 'Normal mode: 60s sampling, all collectors enabled (2h retention)';
+            v_description := 'Normal mode: all collectors enabled';
         WHEN 'light' THEN
             v_enable_locks := TRUE;
             v_enable_progress := FALSE;
-            v_sample_interval_seconds := 60;
-            v_description := 'Light mode: 60s sampling, progress disabled (2h retention, minimal overhead)';
+            v_description := 'Light mode: progress collection disabled';
         WHEN 'emergency' THEN
             v_enable_locks := FALSE;
             v_enable_progress := FALSE;
-            v_sample_interval_seconds := 300;
-            v_description := 'Emergency mode: 300s sampling, locks/progress disabled (10h retention, 60% less overhead)';
+            v_description := 'Emergency mode: lock and progress collection disabled (fixed 60s cadence; rely on load shedding and the circuit breaker for load relief)';
     END CASE;
     INSERT INTO pgfr_record.config (key, value, updated_at)
     VALUES ('mode', p_mode, now())
@@ -1256,32 +1250,11 @@ BEGIN
     INSERT INTO pgfr_record.config (key, value, updated_at)
     VALUES ('enable_progress', v_enable_progress::text, now())
     ON CONFLICT (key) DO UPDATE SET value = v_enable_progress::text, updated_at = now();
-    INSERT INTO pgfr_record.config (key, value, updated_at)
-    VALUES ('sample_interval_seconds', v_sample_interval_seconds::text, now())
-    ON CONFLICT (key) DO UPDATE SET value = v_sample_interval_seconds::text, updated_at = now();
-    BEGIN
-        IF v_sample_interval_seconds < 60 THEN
-            v_cron_expression := '* * * * *';
-        ELSIF v_sample_interval_seconds = 60 THEN
-            v_cron_expression := '* * * * *';
-        ELSE
-            v_sample_interval_minutes := CEILING(v_sample_interval_seconds::numeric / 60.0)::integer;
-            v_cron_expression := format('*/%s * * * *', v_sample_interval_minutes);
-        END IF;
-        -- Only reschedule if the job exists (i.e., collection is enabled)
-        IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr_sample') THEN
-            PERFORM cron.unschedule('pgfr_sample');
-            PERFORM cron.schedule('pgfr_sample', v_cron_expression, 'SET statement_timeout = ''5s''; SELECT pgfr_record.sample()');
-        END IF;
-    EXCEPTION
-        WHEN undefined_table THEN NULL;
-        WHEN undefined_function THEN NULL;
-    END;
     RETURN v_description;
 END;
 $$;
 COMMENT ON FUNCTION pgfr_record.set_mode(TEXT) IS
-'Set operating mode: normal (60s, all collectors), light (60s, no progress tracking), or emergency (300s, minimal collectors). Reschedules the sample cron job if running.';
+'Set operating mode: normal (all collectors), light (no progress tracking), or emergency (no locks or progress). The one-minute collection cadence is a fixed design constant and is not affected by mode.';
 
 -- Retrieve the current flight recorder operating mode and its associated configuration
 -- Returns mode, sample interval, and feature flags for locks, progress, and statement tracking
@@ -1296,18 +1269,15 @@ RETURNS TABLE(
 LANGUAGE sql STABLE AS $$
     SELECT
         pgfr_record._get_config('mode', 'normal') AS mode,
-        CASE pgfr_record._get_config('mode', 'normal')
-            WHEN 'normal' THEN '* * * * *'
-            WHEN 'light' THEN '* * * * *'
-            WHEN 'emergency' THEN '300 seconds'
-            ELSE 'unknown'
-        END AS sample_interval,
+        -- Fixed design constant for every mode (Issue #106): modes control
+        -- which collectors run, never the cadence.
+        '60s (fixed)'::text AS sample_interval,
         COALESCE(pgfr_record._get_config('enable_locks', 'true')::boolean, true) AS locks_enabled,
         COALESCE(pgfr_record._get_config('enable_progress', 'true')::boolean, true) AS progress_enabled,
         pgfr_record._get_config('statements_enabled', 'auto') AS statements_enabled
 $$;
 COMMENT ON FUNCTION pgfr_record.get_mode() IS
-'Returns current operating mode and configuration: mode name, sample interval, and feature flags for locks, progress, and statement tracking.';
+'Returns current operating mode and configuration: mode name, the fixed sample cadence, and feature flags for locks, progress, and statement tracking.';
 
 -- Lists the available monitoring profiles for flight recorder with their configurations, use cases, and overhead levels
 CREATE OR REPLACE FUNCTION pgfr_record.list_profiles()
@@ -1323,161 +1293,46 @@ LANGUAGE sql STABLE AS $$
         ('default',
          'Balanced configuration for most users',
          'General purpose monitoring - staging, development, or production',
-         '60s (2h retention)',
+         '60s (fixed cadence)',
          'Low (~0.04% CPU)'),
         ('production_safe',
          'Ultra-conservative for production environments',
          'Production always-on monitoring with maximum safety',
-         '300s (10h retention)',
+         '60s (fixed cadence)',
          'Ultra-minimal (~0.008% CPU)'),
         ('development',
          'Balanced for staging and development',
          'Active development, testing, or staging environments',
-         '60s (2h retention)',
+         '60s (fixed cadence)',
          'Low (~0.04% CPU)'),
         ('troubleshooting',
          'Aggressive collection during incidents',
          'Active incident response - detailed data collection',
-         '60s (2h retention)',
+         '60s (fixed cadence)',
          'Low (~0.04% CPU)'),
         ('minimal_overhead',
          'Absolute minimum footprint',
          'Resource-constrained systems, replicas, or minimal monitoring',
-         '300s (10h retention)',
+         '60s (fixed cadence)',
          'Ultra-minimal (~0.008% CPU)')
     ) AS t(profile_name, description, use_case, sample_interval, overhead_level)
 $$;
 COMMENT ON FUNCTION pgfr_record.list_profiles() IS
-'Lists available monitoring profiles (default, production_safe, development, troubleshooting, minimal_overhead) with descriptions, use cases, sample intervals, and overhead levels.';
+'Lists available monitoring profiles (default, production_safe, development, troubleshooting, minimal_overhead) with descriptions, use cases, and overhead levels. The one-minute sample cadence is a fixed design constant across all profiles (Issue #106).';
 
--- Returns ring buffer optimization profiles for different use cases
--- Profiles provide pre-configured ring_buffer_slots, sample_interval, and archive settings
-CREATE OR REPLACE FUNCTION pgfr_record.get_optimization_profiles()
-RETURNS TABLE(
-    profile_name            TEXT,
-    slots                   INTEGER,
-    sample_interval_seconds INTEGER,
-    archive_frequency_min   INTEGER,
-    retention_hours         NUMERIC,
-    description             TEXT
-)
-LANGUAGE sql STABLE AS $$
-    SELECT * FROM (VALUES
-        ('standard',
-         120, 60, 15,
-         ROUND(120 * 60 / 3600.0, 1),
-         'Default: 2h retention, 1min granularity, 0.042% CPU'),
-        ('fine_grained',
-         360, 60, 15,
-         ROUND(360 * 60 / 3600.0, 1),
-         'Fine: 6h retention, 1min granularity, 0.042% CPU'),
-        ('ultra_fine',
-         720, 30, 10,
-         ROUND(720 * 30 / 3600.0, 1),
-         'Ultra-fine: 6h retention, 30s granularity, 0.083% CPU'),
-        ('low_overhead',
-         72, 300, 30,
-         ROUND(72 * 300 / 3600.0, 1),
-         'Low overhead: 6h retention, 5min granularity, 0.008% CPU'),
-        ('high_retention',
-         240, 180, 30,
-         ROUND(240 * 180 / 3600.0, 1),
-         'High retention: 12h retention, 3min granularity, 0.014% CPU'),
-        ('forensic',
-         1440, 15, 5,
-         ROUND(1440 * 15 / 3600.0, 1),
-         'Forensic: 6h retention, 15s granularity, 0.167% CPU (temporary use only)')
-    ) AS t(profile_name, slots, sample_interval_seconds, archive_frequency_min, retention_hours, description)
-$$;
-COMMENT ON FUNCTION pgfr_record.get_optimization_profiles() IS 'Returns ring buffer optimization profiles for different use cases. Profiles configure ring_buffer_slots, sample_interval_seconds, and archive_sample_frequency_minutes for specific monitoring scenarios.';
-
--- Applies a ring buffer optimization profile
--- Updates config values and warns if rebuild is needed
-CREATE OR REPLACE FUNCTION pgfr_record.apply_optimization_profile(p_profile TEXT)
-RETURNS TABLE(
-    setting_key     TEXT,
-    old_value       TEXT,
-    new_value       TEXT,
-    changed         BOOLEAN
-)
-LANGUAGE plpgsql AS $$
-DECLARE
-    v_profile RECORD;
-    v_old_slots TEXT;
-    v_old_interval TEXT;
-    v_old_archive TEXT;
-    v_current_slots INTEGER;
-    v_rebuild_needed BOOLEAN := false;
-BEGIN
-    -- Validate profile exists
-    SELECT * INTO v_profile
-    FROM pgfr_record.get_optimization_profiles()
-    WHERE profile_name = p_profile;
-
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'Unknown optimization profile: %. Available: standard, fine_grained, ultra_fine, low_overhead, high_retention, forensic', p_profile;
-    END IF;
-
-    -- Get current values
-    v_old_slots := pgfr_record._get_config('ring_buffer_slots', '120');
-    v_old_interval := pgfr_record._get_config('sample_interval_seconds', '60');
-    v_old_archive := pgfr_record._get_config('archive_sample_frequency_minutes', '15');
-
-    -- Check if rebuild will be needed. v2 ring slot count lives in
-    -- pgfr_record.ring_config.num_slots (set at install from
-    -- ring_buffer_partitions config), not in a pre-allocated row count
-    -- as the retired legacy ring did.
-    SELECT num_slots INTO v_current_slots
-      FROM pgfr_record.ring_config
-     WHERE singleton;
-    IF v_current_slots IS DISTINCT FROM v_profile.slots THEN
-        v_rebuild_needed := true;
-    END IF;
-
-    -- Update ring_buffer_slots
-    INSERT INTO pgfr_record.config (key, value, updated_at)
-    VALUES ('ring_buffer_slots', v_profile.slots::text, now())
-    ON CONFLICT (key) DO UPDATE SET value = v_profile.slots::text, updated_at = now();
-
-    RETURN QUERY SELECT
-        'ring_buffer_slots'::text,
-        v_old_slots,
-        v_profile.slots::text,
-        (v_old_slots IS DISTINCT FROM v_profile.slots::text);
-
-    -- Update sample_interval_seconds
-    INSERT INTO pgfr_record.config (key, value, updated_at)
-    VALUES ('sample_interval_seconds', v_profile.sample_interval_seconds::text, now())
-    ON CONFLICT (key) DO UPDATE SET value = v_profile.sample_interval_seconds::text, updated_at = now();
-
-    RETURN QUERY SELECT
-        'sample_interval_seconds'::text,
-        v_old_interval,
-        v_profile.sample_interval_seconds::text,
-        (v_old_interval IS DISTINCT FROM v_profile.sample_interval_seconds::text);
-
-    -- Update archive_sample_frequency_minutes
-    INSERT INTO pgfr_record.config (key, value, updated_at)
-    VALUES ('archive_sample_frequency_minutes', v_profile.archive_frequency_min::text, now())
-    ON CONFLICT (key) DO UPDATE SET value = v_profile.archive_frequency_min::text, updated_at = now();
-
-    RETURN QUERY SELECT
-        'archive_sample_frequency_minutes'::text,
-        v_old_archive,
-        v_profile.archive_frequency_min::text,
-        (v_old_archive IS DISTINCT FROM v_profile.archive_frequency_min::text);
-
-    -- Ring buffer slot count change is now a config-only signal; the v2
-    -- ring uses TRUNCATE-rotated LIST-partitioned tables and is resized
-    -- via partition management, not a rebuild call.
-    IF v_rebuild_needed THEN
-        RAISE NOTICE 'ring_buffer_slots config changed; v2 ring partitions are managed by partition-maintenance cron jobs.';
-    END IF;
-
-    RAISE NOTICE 'Applied optimization profile: % (%)', p_profile, v_profile.description;
-END;
-$$;
-COMMENT ON FUNCTION pgfr_record.apply_optimization_profile(TEXT) IS 'Applies a ring buffer optimization profile. Updates ring_buffer_slots, sample_interval_seconds, and archive_sample_frequency_minutes config keys. Partition management for the v2 ring is handled by the partition-maintenance cron jobs.';
+-- get_optimization_profiles() / apply_optimization_profile() retired
+-- (Issue #106): every knob they managed (ring_buffer_slots,
+-- sample_interval_seconds, archive_sample_frequency_minutes) belonged to the
+-- retired legacy ring and controlled nothing in the v2 path, so applying a
+-- "profile" only wrote dead config and advertised granularities the fixed
+-- one-minute cadence cannot deliver. The v2 ring is shaped by the
+-- ring_buffer_partitions and ring_rotation_period config keys at install.
+do $$
+begin
+    set local client_min_messages = warning;
+    drop function if exists pgfr_record.get_optimization_profiles();
+    drop function if exists pgfr_record.apply_optimization_profile(text);
+end $$;
 
 -- Preview the configuration changes from applying a specified profile
 -- Compares current settings against profile values to show impact before applying

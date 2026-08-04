@@ -986,7 +986,7 @@ BEGIN
             'REVIEW NEEDED'::text,
             format('Avg: %sms | Max: %sms | Skipped: %s/%s',
                    round(v_avg_duration_ms), round(v_max_duration_ms), v_skipped_count, v_total_count),
-            'Collections are slower than expected. Consider: (1) switching to light mode, (2) increasing sample_interval_seconds to 300, or (3) checking for system bottlenecks.'::text;
+            'Collections are slower than expected. Consider: (1) switching to light or emergency mode to disable optional collectors, or (2) checking for system bottlenecks. The circuit breaker already skips ticks when runs stay slow.'::text;
     END IF;
     SELECT schema_size_mb INTO v_schema_size_mb FROM pgfr_record._check_schema_size();
     SELECT count(*) INTO v_sample_count FROM pgfr_record.wait_samples;

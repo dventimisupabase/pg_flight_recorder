@@ -487,10 +487,11 @@ SELECT lives_ok(
     'Profiles: apply_profile(production_safe) should execute'
 );
 
--- Test profile actually changed config
+-- Test profile does not resurrect the retired cadence key (Issue #106):
+-- the sampling cadence is a fixed design constant, not a profile setting.
 SELECT ok(
-    (SELECT value FROM pgfr_record.config WHERE key = 'sample_interval_seconds') = '300',
-    'Profiles: production_safe should set sample_interval_seconds to 300'
+    NOT EXISTS (SELECT 1 FROM pgfr_record.config WHERE key = 'sample_interval_seconds'),
+    'Profiles: production_safe does not resurrect the retired sample_interval_seconds key'
 );
 
 SELECT ok(

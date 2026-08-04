@@ -105,7 +105,7 @@ The recorder keeps these events as first-class data in `pgfr_record.discontinuit
 
 ### 4. Detection limits are stated in advance
 
-The instrument's blind spots are computable before any data arrives, and stating them converts "the report did not show it" into "no detection above threshold X". The resolution tables below are computed for the operative cadence, which is a fixed 60 seconds for both cron jobs (hardcoded `* * * * *`; the `sample_interval_seconds` config key does not change it).
+The instrument's blind spots are computable before any data arrives, and stating them converts "the report did not show it" into "no detection above threshold X". The resolution tables below are computed for the operative cadence, which is a fixed 60 seconds for both cron jobs (hardcoded `* * * * *`; the once-inert `sample_interval_seconds` config key was retired to make the constant explicit).
 
 #### Mode A resolution: event duration to detection probability
 
