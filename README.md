@@ -288,6 +288,8 @@ psql --single-transaction -f pgfr_analyze/uninstall.sql
 
 See [REFERENCE.md](REFERENCE.md) for the full function reference, table schemas, configuration settings, and detailed documentation.
 
+See [STATISTICS.md](STATISTICS.md) for the statistical semantics of the recorder's measurements: the two measurement modes, what the instrument systematically cannot see, and how to read its estimates.
+
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for attribution.
