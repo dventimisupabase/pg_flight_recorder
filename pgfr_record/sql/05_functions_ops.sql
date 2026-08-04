@@ -264,17 +264,30 @@ BEGIN
             -- Don't fail enable() if validation has issues
             NULL;
         END;
-        -- pg_cron writes one row to cron.job_run_details per job execution with
-        -- no built-in purge. pgfr schedules ~10 jobs (4 of them every minute),
-        -- so at default cadence this is roughly 5,000 rows/day forever. Errors
-        -- from failed jobs still appear in the Postgres server log via
-        -- cron.log_min_messages (default WARNING) — see README "pg_cron run history".
+        -- pg_cron writes one row to cron.job_run_details per job execution
+        -- with no built-in purge. The counts in the warning are computed from
+        -- the jobs actually on the schedule (Issue #107: a hardcoded figure
+        -- here went stale when the job roster changed), with per-minute jobs
+        -- contributing 1440 rows/day each and the daily/monthly jobs roughly
+        -- one each. Errors from failed jobs still appear in the Postgres
+        -- server log via cron.log_min_messages (default WARNING); see README
+        -- "pg_cron run history".
         DECLARE
             v_cron_log_run TEXT;
+            v_job_count INTEGER;
+            v_per_minute INTEGER;
+            v_rows_per_day INTEGER;
         BEGIN
             v_cron_log_run := current_setting('cron.log_run', true);
             IF v_cron_log_run IS NULL OR lower(v_cron_log_run) IN ('on', 'true', 'yes', '1') THEN
-                RAISE WARNING 'pg_cron run history [WARNING]: cron.log_run is on — cron.job_run_details grows unbounded (~5000 rows/day from pgfr jobs at default cadence). Recommended: ALTER SYSTEM SET cron.log_run = off (requires restart). Alternative: schedule a periodic DELETE on cron.job_run_details. See README "pg_cron run history".';
+                SELECT count(*),
+                       count(*) FILTER (WHERE schedule = '* * * * *')
+                INTO v_job_count, v_per_minute
+                FROM cron.job
+                WHERE jobname LIKE 'pgfr%';
+                v_rows_per_day := v_per_minute * 1440 + (v_job_count - v_per_minute);
+                RAISE WARNING 'pg_cron run history [WARNING]: cron.log_run is on; cron.job_run_details grows unbounded (roughly % rows/day from the % pgfr jobs, % of them every minute). Recommended: ALTER SYSTEM SET cron.log_run = off (requires restart). Alternative: schedule a periodic DELETE on cron.job_run_details. See README "pg_cron run history".',
+                    v_rows_per_day, v_job_count, v_per_minute;
             END IF;
         EXCEPTION WHEN OTHERS THEN
             -- Don't fail enable() if the GUC is unavailable
