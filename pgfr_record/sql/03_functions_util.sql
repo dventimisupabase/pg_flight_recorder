@@ -387,6 +387,32 @@ CREATE UNLOGGED TABLE IF NOT EXISTS pgfr_record.collection_stats (
 CREATE INDEX IF NOT EXISTS collection_stats_type_started_idx
     ON pgfr_record.collection_stats(collection_type, started_at DESC);
 
+-- Additive (Issue #100): enumerated skip classification so consumers stop
+-- string-matching skipped_reason prose. Written at skip call sites; legacy
+-- rows are classified on read via pgfr_record._skip_kind(skipped_reason).
+ALTER TABLE pgfr_record.collection_stats
+    ADD COLUMN IF NOT EXISTS skip_kind TEXT;
+
+COMMENT ON COLUMN pgfr_record.collection_stats.skip_kind IS
+    'Enumerated reason class for skipped rows (circuit_breaker, load_shedding); NULL for non-skips and for rows written before the column existed. Read via coalesce(skip_kind, pgfr_record._skip_kind(skipped_reason)) so legacy rows classify identically.';
+
+-- Classifies legacy skipped_reason prose into the enumerated skip_kind
+-- vocabulary. Single source of truth shared by health_check(), the pgfr_analyze
+-- alert/review consumers, and coverage gap attribution (Issue #100); new code
+-- must never LIKE-match skipped_reason directly.
+CREATE OR REPLACE FUNCTION pgfr_record._skip_kind(p_reason TEXT)
+RETURNS TEXT
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT CASE
+        WHEN p_reason LIKE '%Circuit breaker%' THEN 'circuit_breaker'
+        WHEN p_reason LIKE '%Load shedding%'   THEN 'load_shedding'
+        ELSE 'unknown'
+    END
+$$;
+
+COMMENT ON FUNCTION pgfr_record._skip_kind(TEXT) IS
+    'Maps legacy collection_stats.skipped_reason prose to the enumerated skip_kind vocabulary (circuit_breaker, load_shedding, unknown). Consumers read coalesce(skip_kind, _skip_kind(skipped_reason)).';
+
 -- Checks if circuit breaker conditions are met (excessive errors or collection failures)
 -- Returns TRUE if circuit breaker is tripped and collection should be skipped
 CREATE OR REPLACE FUNCTION pgfr_record._check_circuit_breaker(p_collection_type TEXT)
@@ -462,17 +488,25 @@ LANGUAGE sql AS $$
     WHERE id = p_stat_id
 $$;
 
--- Records a skipped collection event with the reason for skipping
+-- Records a skipped collection event with the reason for skipping.
+-- p_skip_kind carries the enumerated classification (circuit_breaker,
+-- load_shedding); when omitted it is derived from the prose so the column
+-- never silently disagrees with the reason text.
+-- The 2-arg signature predates skip_kind; drop it on upgrade so the defaulted
+-- 3-arg version does not create an ambiguous overload pair.
+DROP FUNCTION IF EXISTS pgfr_record._record_collection_skip(TEXT, TEXT);
 CREATE OR REPLACE FUNCTION pgfr_record._record_collection_skip(
     p_collection_type TEXT,
-    p_reason TEXT
+    p_reason TEXT,
+    p_skip_kind TEXT DEFAULT NULL
 )
 RETURNS VOID
 LANGUAGE sql AS $$
     INSERT INTO pgfr_record.collection_stats (
-        collection_type, started_at, completed_at, skipped, skipped_reason
+        collection_type, started_at, completed_at, skipped, skipped_reason, skip_kind
     )
-    VALUES (p_collection_type, now(), now(), true, p_reason)
+    VALUES (p_collection_type, now(), now(), true, p_reason,
+            COALESCE(p_skip_kind, pgfr_record._skip_kind(p_reason)))
 $$;
 
 -- Increments the sections_succeeded counter to record successful section completion

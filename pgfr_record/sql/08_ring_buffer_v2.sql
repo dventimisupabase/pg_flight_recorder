@@ -700,7 +700,8 @@ begin
     if pgfr_record._check_circuit_breaker('sample') then
         perform pgfr_record._record_collection_skip(
             'sample',
-            'Circuit breaker tripped - recent runs exceeded threshold');
+            'Circuit breaker tripped - recent runs exceeded threshold',
+            'circuit_breaker');
         return v_captured_at;
     end if;
 
@@ -729,7 +730,8 @@ begin
                     'Load shedding: high load (%s active / %s max = %s%% >= %s%% threshold)',
                     v_active_clients, v_max_connections, round(v_active_pct, 1),
                     v_load_threshold_pct
-                )
+                ),
+                'load_shedding'
             );
             return v_captured_at;
         end if;

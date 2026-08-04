@@ -139,6 +139,15 @@ The legacy `ring_buffer_health()`, `rebuild_ring_buffers()`, and
 | `pgfr_analyze.preflight_check()` | `record` | Pre-installation validation checks |
 | `pgfr_analyze.preflight_check_with_summary()` | `record` | Validation with text summary |
 
+### Coverage and gap accounting
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `pgfr_analyze.coverage(start timestamptz, end timestamptz)` | `record` | Expected vs observed collection ticks per collector (`sample`, `snapshot`, `consumption`) at the fixed one-minute cadence: `(collector, expected_samples, observed_samples, coverage_ratio)` |
+| `pgfr_analyze.coverage(interval)` | `record` | Interval convenience overload |
+| `pgfr_analyze.coverage_gaps(start timestamptz, end timestamptz)` | `record` | Contiguous runs of missing ticks with attributed reasons: `retention_horizon`, `circuit_breaker`, `load_shedding`, `restart`, `cron_inactive`, `unknown`. Breaker/shedding gaps are informative missingness; see [STATISTICS.md](STATISTICS.md) |
+| `pgfr_analyze.coverage_gaps(interval)` | `record` | Interval convenience overload |
+
 ### Semantics registry
 
 | Function | Returns | Description |
@@ -571,6 +580,7 @@ Grouped by concurrency/duration profile rather than raw `query_preview` text (un
 | `error_message` | text | Error message if failed |
 | `skipped` | bool | Whether collection was skipped |
 | `skipped_reason` | text | Reason for skip (load shedding, circuit breaker, etc.) |
+| `skip_kind` | text | Enumerated skip class (`circuit_breaker`, `load_shedding`); NULL for non-skips and pre-upgrade rows, which classify via `pgfr_record._skip_kind(skipped_reason)` |
 | `sections_total` | int | Total sections attempted |
 | `sections_succeeded` | int | Sections that succeeded |
 

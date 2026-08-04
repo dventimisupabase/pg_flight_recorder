@@ -366,7 +366,7 @@ BEGIN
     FROM pgfr_record.collection_stats
     WHERE skipped = true
       AND started_at > now() - interval '1 hour'
-      AND skipped_reason LIKE '%Circuit breaker%';
+      AND COALESCE(skip_kind, pgfr_record._skip_kind(skipped_reason)) = 'circuit_breaker';
     RETURN QUERY SELECT
         'Circuit Breaker'::text,
         CASE
