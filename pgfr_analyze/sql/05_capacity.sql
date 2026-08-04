@@ -1,6 +1,17 @@
 -- SPDX-License-Identifier: Apache-2.0
 -- Copyright 2026 David A. Ventimiglia
 
+-- Issue #111: capacity_summary() gained numeric_value, which changes its
+-- return type; CREATE OR REPLACE cannot do that, and capacity_dashboard
+-- depends on the function, so the view drops first (both are recreated
+-- below in this file, comments included).
+do $$
+begin
+    set local client_min_messages = warning;
+    drop view if exists pgfr_analyze.capacity_dashboard;
+    drop function if exists pgfr_analyze.capacity_summary(interval);
+end $$;
+
 CREATE OR REPLACE FUNCTION pgfr_analyze.capacity_summary(
     p_time_window INTERVAL DEFAULT interval '24 hours'
 )
@@ -11,7 +22,8 @@ RETURNS TABLE(
     utilization_pct         NUMERIC,
     headroom_pct            NUMERIC,
     status                  TEXT,
-    recommendation          TEXT
+    recommendation          TEXT,
+    numeric_value           NUMERIC  -- the row's primary figure, machine-readable (Issue #111)
 )
 LANGUAGE plpgsql STABLE AS $$
 DECLARE
@@ -62,7 +74,8 @@ BEGIN
             'insufficient_data'::text,
             format('Need at least 2 snapshots. Only %s found in window. Wait %s for capacity analysis.',
                    v_sample_count,
-                   CASE WHEN v_sample_count = 0 THEN '5 minutes' ELSE 'a few more minutes' END)::text;
+                   CASE WHEN v_sample_count = 0 THEN '5 minutes' ELSE 'a few more minutes' END)::text,
+            NULL::numeric;
         RETURN;
     END IF;
     SELECT setting::integer INTO v_max_connections
@@ -282,6 +295,11 @@ BEGIN
         v_storage_growth_mb_per_day := ((v_current_db_size - v_oldest_db_size)::numeric / (1024.0 * 1024.0))
                                        / NULLIF(v_window_hours / 24.0, 0);
         metric := 'storage_growth';
+        -- The machine-readable figure the dashboard consumes; keeping it a
+        -- column kills the prose-regexp round trip that Issue #111 caught
+        -- (the dashboard used to parse a number out of recommendation text
+        -- that never contained it, yielding NULL always).
+        numeric_value := round(v_storage_growth_mb_per_day, 1);
         current_usage := format('%s current size, growing %s MB/day',
                                pgfr_record._pretty_bytes(v_current_db_size),
                                CASE
@@ -314,6 +332,9 @@ BEGIN
                        round(v_storage_growth_mb_per_day, 1))
         END;
         RETURN NEXT;
+        -- OUT variables persist across RETURN NEXT in plpgsql: reset so the
+        -- transaction-rate row that follows does not inherit this figure.
+        numeric_value := NULL;
     END IF;
     WITH xact_deltas AS (
         SELECT
@@ -377,7 +398,8 @@ Output columns:
   utilization_pct: [derived] [percent] Utilization score on a 0-100 scale. For connections it is peak connections_total over max_connections times 100; the other dimensions map their measured rate (backend writes/min, temp bytes/hour, cache hit ratio shortfall against a 95 percent target, storage growth in MB/day, peak tps) onto 0-100 via a piecewise scale, so only the connections row is a true capacity ratio.
   headroom_pct: [derived] [percent] 100 minus utilization_pct, floored at 0: the unused share of the same 0-100 scale.
   status: [derived] [text] Threshold assessment of the dimension: healthy, warning, critical, or insufficient_data. Connection thresholds come from the capacity_thresholds_warning_pct and capacity_thresholds_critical_pct config; other dimensions use fixed thresholds on their measured rate.
-  recommendation: [derived] [text] Actionable prose built from the status and the measured values for the dimension.';
+  recommendation: [derived] [text] Actionable prose built from the status and the measured values for the dimension.
+  numeric_value: [derived] [mixed] The row''s primary figure as a number rather than prose, in the dimension''s natural units. Currently populated only for storage_growth (MB/day, negative reported as its true value; the prose rounds negatives to ~0); NULL for the other dimensions. Exists so consumers like capacity_dashboard never parse numbers back out of recommendation text (Issue #111).';
 
 -- Generates a human-readable markdown capacity report grouped by severity
 -- Calls capacity_summary() and formats results as prose text
@@ -503,7 +525,8 @@ capacity_metrics AS (
         utilization_pct,
         headroom_pct,
         status,
-        recommendation
+        recommendation,
+        numeric_value
     FROM pgfr_analyze.capacity_summary(interval '24 hours')
     WHERE metric != 'insufficient_data'
 ),
@@ -542,7 +565,8 @@ storage_metric AS (
     SELECT
         status AS storage_status,
         utilization_pct AS storage_utilization_pct,
-        recommendation AS storage_recommendation
+        recommendation AS storage_recommendation,
+        numeric_value AS storage_growth_mb_per_day
     FROM capacity_metrics
     WHERE metric = 'storage_growth'
 )
@@ -566,11 +590,7 @@ SELECT
     io.io_saturation_pct,
     COALESCE(s.storage_status, 'insufficient_data') AS storage_status,
     s.storage_utilization_pct,
-    CASE
-        WHEN s.storage_recommendation ~ 'growing [0-9\.]+' THEN
-            (regexp_match(s.storage_recommendation, 'growing ([0-9\.]+)'))[1]::numeric
-        ELSE NULL
-    END AS storage_growth_mb_per_day,
+    s.storage_growth_mb_per_day,
     CASE
         WHEN 'critical' IN (
             c.connections_status,
@@ -635,7 +655,7 @@ COMMENT ON COLUMN pgfr_analyze.capacity_dashboard.storage_status IS
 COMMENT ON COLUMN pgfr_analyze.capacity_dashboard.storage_utilization_pct IS
 '[derived] [percent] Storage growth utilization score from capacity_summary(): a piecewise 0-100 mapping of the MB/day growth rate (reaches 60 at 1 GB/day and saturates toward 100 at 10 GB/day).';
 COMMENT ON COLUMN pgfr_analyze.capacity_dashboard.storage_growth_mb_per_day IS
-'[derived] [mb/day] [interval-mean] Mean database size growth over the 24-hour window: last db_size_bytes minus first, divided by the window length in days (a two-point difference, not a regression). Extracted by regexp from the storage recommendation text; the current recommendation wording never contains the matched "growing" pattern, so this column is NULL in practice.';
+'[derived] [mb/day] [interval-mean] Mean database size growth over the 24-hour window: last db_size_bytes minus first, divided by the window length in days (a two-point difference, not a regression). Carried numerically from capacity_summary().numeric_value (Issue #111 replaced the earlier prose-regexp extraction, which never matched and left this NULL). NULL only when fewer than 2 sized snapshots fall in the window.';
 COMMENT ON COLUMN pgfr_analyze.capacity_dashboard.overall_status IS
 '[derived] [text] Worst status across connections, memory, I/O, and storage: critical if any dimension is critical, else warning if any is warning, else insufficient_data if any dimension lacks data, else healthy.';
 COMMENT ON COLUMN pgfr_analyze.capacity_dashboard.critical_issues IS
