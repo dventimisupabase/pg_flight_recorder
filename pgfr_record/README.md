@@ -215,7 +215,7 @@ fall under `_partition_inventory()`'s existing archive-tier retention
 
 ## pg_cron run history
 
-Every scheduled job writes a row to `cron.job_run_details`, and pg_cron has no built-in purge. pgfr_record schedules ~10 jobs (four fire every minute), so at default cadence expect ~5,000 rows/day growing forever on top of any other pg_cron jobs.
+Every scheduled job writes a row to `cron.job_run_details`, and pg_cron has no built-in purge. pgfr_record schedules 7 jobs (two fire every minute: `pgfr_snapshot` and `pgfr_sample_ring`), so expect roughly 2,900 rows/day growing forever on top of any other pg_cron jobs; `enable()`'s warning computes the exact figure from the jobs actually scheduled.
 
 `pgfr_record.enable()` raises a `WARNING` when it detects `cron.log_run` is on. To silence it, pick one:
 
