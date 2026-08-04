@@ -368,7 +368,16 @@ END;
 $$;
 COMMENT ON FUNCTION pgfr_analyze.capacity_summary(INTERVAL) IS
 
-'Capacity planning summary across all resource dimensions. Analyzes connections, memory (shared_buffers, work_mem), I/O (cache hit ratio), storage growth, and transaction rates over the specified time window. Returns utilization, status (healthy/warning/critical), and actionable recommendations. Part of Phase 1 MVP capacity planning enhancements (FR-2.1).';
+'Capacity planning summary across all resource dimensions. Analyzes connections, memory (shared_buffers, work_mem), I/O (cache hit ratio), storage growth, and transaction rates over the specified time window. Returns utilization, status (healthy/warning/critical), and actionable recommendations. Part of Phase 1 MVP capacity planning enhancements (FR-2.1).
+
+Output columns:
+  metric: [dimension] [text] Capacity dimension name: connections, memory_shared_buffers, memory_work_mem, io_buffer_cache, storage_growth, or transaction_rate; a single insufficient_data row appears instead when fewer than 2 snapshots fall in the window.
+  current_usage: [derived] [text] Human-readable usage summary for the dimension, formatted from snapshot gauges (connection counts, database size) and counter deltas (backend buffer writes, temp bytes, transactions) over the window.
+  provisioned_capacity: [dimension] [text] Configured capacity for the dimension: max_connections, the shared_buffers or work_mem setting, a fixed cache hit ratio target string, or a workload or disk dependent placeholder.
+  utilization_pct: [derived] [percent] Utilization score on a 0-100 scale. For connections it is peak connections_total over max_connections times 100; the other dimensions map their measured rate (backend writes/min, temp bytes/hour, cache hit ratio shortfall against a 95 percent target, storage growth in MB/day, peak tps) onto 0-100 via a piecewise scale, so only the connections row is a true capacity ratio.
+  headroom_pct: [derived] [percent] 100 minus utilization_pct, floored at 0: the unused share of the same 0-100 scale.
+  status: [derived] [text] Threshold assessment of the dimension: healthy, warning, critical, or insufficient_data. Connection thresholds come from the capacity_thresholds_warning_pct and capacity_thresholds_critical_pct config; other dimensions use fixed thresholds on their measured rate.
+  recommendation: [derived] [text] Actionable prose built from the status and the measured values for the dimension.';
 
 -- Generates a human-readable markdown capacity report grouped by severity
 -- Calls capacity_summary() and formats results as prose text
@@ -596,6 +605,32 @@ LEFT JOIN io_metric io ON true
 LEFT JOIN storage_metric s ON true;
 COMMENT ON VIEW pgfr_analyze.capacity_dashboard IS
 'At-a-glance capacity planning dashboard. Shows current status (healthy/warning/critical) across all resource dimensions: connections, memory, I/O, storage. Includes utilization percentages, composite memory pressure score, and array of critical issues requiring attention. Based on last 24 hours of data. Part of Phase 1 MVP capacity planning enhancements (FR-3.1).';
+COMMENT ON COLUMN pgfr_analyze.capacity_dashboard.last_updated IS
+'[dimension] [timestamp] Capture time of the most recent pgfr_record.snapshots row; freshness marker for the whole dashboard.';
+COMMENT ON COLUMN pgfr_analyze.capacity_dashboard.connections_status IS
+'[derived] [text] Connections dimension status from capacity_summary() over the last 24 hours: healthy, warning, or critical from thresholds on connection utilization; insufficient_data when the connections row is absent.';
+COMMENT ON COLUMN pgfr_analyze.capacity_dashboard.connections_utilization_pct IS
+'[derived] [percent] Peak connections_total over max_connections times 100, over the last 24 hours (from the connections row of capacity_summary()).';
+COMMENT ON COLUMN pgfr_analyze.capacity_dashboard.connections_headroom IS
+'[derived] [percent] 100 minus connections_utilization_pct, floored at 0: the unused share of max_connections at the 24-hour peak.';
+COMMENT ON COLUMN pgfr_analyze.capacity_dashboard.memory_status IS
+'[derived] [text] Worst of the shared_buffers and work_mem statuses from capacity_summary() (critical over warning over healthy); insufficient_data when neither memory row exists.';
+COMMENT ON COLUMN pgfr_analyze.capacity_dashboard.memory_pressure_score IS
+'[derived] [percent] Composite memory pressure on a 0-100 scale: 0.6 times the shared_buffers utilization score plus 0.4 times the work_mem utilization score, clamped to 0-100. Both inputs are piecewise scores from capacity_summary(), not ratios of a physical memory capacity.';
+COMMENT ON COLUMN pgfr_analyze.capacity_dashboard.io_status IS
+'[derived] [text] Buffer-cache dimension status from capacity_summary() (the io_buffer_cache row); insufficient_data when absent.';
+COMMENT ON COLUMN pgfr_analyze.capacity_dashboard.io_saturation_pct IS
+'[derived] [percent] Buffer-cache utilization score from capacity_summary(): a piecewise 0-100 mapping of the cache hit ratio shortfall against a 95 percent target, computed from blks_hit and blks_read deltas over the last 24 hours; not a ratio of device I/O capacity.';
+COMMENT ON COLUMN pgfr_analyze.capacity_dashboard.storage_status IS
+'[derived] [text] Storage growth dimension status from capacity_summary(); insufficient_data when absent.';
+COMMENT ON COLUMN pgfr_analyze.capacity_dashboard.storage_utilization_pct IS
+'[derived] [percent] Storage growth utilization score from capacity_summary(): a piecewise 0-100 mapping of the MB/day growth rate (reaches 60 at 1 GB/day and saturates toward 100 at 10 GB/day).';
+COMMENT ON COLUMN pgfr_analyze.capacity_dashboard.storage_growth_mb_per_day IS
+'[derived] [mb/day] [interval-mean] Mean database size growth over the 24-hour window: last db_size_bytes minus first, divided by the window length in days (a two-point difference, not a regression). Extracted by regexp from the storage recommendation text; the current recommendation wording never contains the matched "growing" pattern, so this column is NULL in practice.';
+COMMENT ON COLUMN pgfr_analyze.capacity_dashboard.overall_status IS
+'[derived] [text] Worst status across connections, memory, I/O, and storage: critical if any dimension is critical, else warning if any is warning, else insufficient_data if any dimension lacks data, else healthy.';
+COMMENT ON COLUMN pgfr_analyze.capacity_dashboard.critical_issues IS
+'[derived] [text] Array of prefixed recommendation strings (CONNECTIONS:, MEMORY:, I/O:, STORAGE:) for every dimension whose status is critical or warning; empty when nothing needs attention.';
 
 -- NOTE: Storm and Regression dashboard views removed in 2.21
 -- Use detect_query_storms() and detect_regressions() for on-demand analysis

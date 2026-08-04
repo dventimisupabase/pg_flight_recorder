@@ -166,6 +166,16 @@ begin
     v_sql := 'create or replace view pgfr_record.query_map_all as '
              || array_to_string(v_parts, ' union all ');
     execute v_sql;
+
+    -- Column semantics (Issue #99). The view is recreated by the execute
+    -- above on every install, which drops prior column comments, so the
+    -- comments must be reapplied here rather than as standalone statements.
+    comment on column pgfr_record.query_map_all.slot is
+        '[dimension] [bigint] Ring buffer slot number (0..num_slots-1) identifying which per-partition query_map_N table this dictionary row comes from.';
+    comment on column pgfr_record.query_map_all.id is
+        '[dimension] [bigint] Per-slot dictionary id (identity column of query_map_N); this is the qmap_id referenced by the encoded integer[] groups in wait_samples.data and by lock_samples.blocked_qid/blocking_qid.';
+    comment on column pgfr_record.query_map_all.query_id is
+        '[dimension] [bigint] Query identifier from pg_stat_activity.query_id (compute_query_id / pg_stat_statements hash, PG14+); the dictionary value mapped to (slot, id).';
 end;
 $$;
 
@@ -558,6 +568,21 @@ comment on view pgfr_record.recent_waits_v2 is
 'Ring buffer v2 reader: decodes wait_samples integer[] encoding to readable rows. '
 'One row per (sample, database, wait_event). '
 'For count and query_id resolution, use ash.decode_sample()-style decoding.';
+
+comment on column pgfr_record.recent_waits_v2.captured_at is
+    '[dimension] [timestamp] Sampling tick time, reconstructed as pgfr_record.epoch() plus the sample row''s sample_ts offset in seconds.';
+comment on column pgfr_record.recent_waits_v2.datid is
+    '[dimension] [oid] OID of the database the sampled backends were connected to (0 for backends with no database).';
+comment on column pgfr_record.recent_waits_v2.active_count is
+    '[point-sample] [count] Number of sampled backends (active or idle in transaction) connected to this database at the sampling instant, across all wait events; repeated on every decoded wait row of the same (tick, database) sample. Sample counts estimate time-in-state when aggregated over ticks, never event counts.';
+comment on column pgfr_record.recent_waits_v2.state is
+    '[dimension] [text] Backend state label decoded from wait_event_map: active, idle in transaction, or idle in transaction (aborted).';
+comment on column pgfr_record.recent_waits_v2.wait_event_type is
+    '[dimension] [text] Wait event type decoded from wait_event_map; synthetic CPU* means active with no wait event, IdleTx means idle in transaction.';
+comment on column pgfr_record.recent_waits_v2.wait_event is
+    '[dimension] [text] Wait event name decoded from wait_event_map; synthetic CPU* and IdleTx label on-CPU and idle-in-transaction backends respectively.';
+comment on column pgfr_record.recent_waits_v2.slot is
+    '[dimension] [bigint] Ring buffer partition slot number (0..num_slots-1) the sample row currently lives in; the slot is truncated and reused on rotation.';
 
 --------------------------------------------------------------------------------
 -- 11. activity_samples: flat per-backend rows, LIST-partitioned by slot
@@ -1040,6 +1065,19 @@ FROM decoded d
 JOIN pgfr_record.wait_event_map wem ON wem.id = d.wait_id
 ORDER BY d.captured_at DESC, d.waiter_count DESC;
 
+COMMENT ON COLUMN pgfr_record.recent_waits.captured_at IS
+    '[dimension] [timestamp] Sampling tick time, reconstructed as pgfr_record.epoch() plus the sample row''s sample_ts offset in seconds; rows older than the ring retention window (num_slots * rotation_period) are filtered out.';
+COMMENT ON COLUMN pgfr_record.recent_waits.backend_type IS
+    '[dimension] [text] Always NULL: v2 wait_samples does not store per-backend type; the column is kept for legacy view shape compatibility.';
+COMMENT ON COLUMN pgfr_record.recent_waits.wait_event_type IS
+    '[dimension] [text] Wait event type decoded from wait_event_map; synthetic CPU* means active with no wait event, IdleTx means idle in transaction.';
+COMMENT ON COLUMN pgfr_record.recent_waits.wait_event IS
+    '[dimension] [text] Wait event name decoded from wait_event_map; synthetic CPU* and IdleTx label on-CPU and idle-in-transaction backends respectively.';
+COMMENT ON COLUMN pgfr_record.recent_waits.state IS
+    '[dimension] [text] Backend state label decoded from wait_event_map: active, idle in transaction, or idle in transaction (aborted).';
+COMMENT ON COLUMN pgfr_record.recent_waits.count IS
+    '[point-sample] [count] Number of sampled backends in one database''s (state, wait_event) group at the sampling instant, decoded from wait_samples.data. Sample counts estimate time-in-state when aggregated over ticks, never event counts.';
+
 DROP VIEW IF EXISTS pgfr_record.recent_activity;
 CREATE VIEW pgfr_record.recent_activity AS
 WITH retention_cutoff AS (
@@ -1074,6 +1112,39 @@ FROM pgfr_record.activity_samples as2,
 WHERE (pgfr_record.epoch() + as2.sample_ts * interval '1 second') > rc.cutoff
   AND as2.pid IS NOT NULL
 ORDER BY as2.sample_ts DESC, as2.query_start ASC;
+
+COMMENT ON COLUMN pgfr_record.recent_activity.captured_at IS
+    '[dimension] [timestamp] Sampling tick time, reconstructed as pgfr_record.epoch() plus the sample row''s sample_ts offset in seconds; rows older than the ring retention window (num_slots * rotation_period) are filtered out.';
+COMMENT ON COLUMN pgfr_record.recent_activity.pid IS
+    '[dimension] [bigint] Backend process ID of the sampled session; PIDs are reused by the OS, so correlate together with captured_at.';
+COMMENT ON COLUMN pgfr_record.recent_activity.usename IS
+    '[dimension] [text] Role name the sampled session was authenticated as.';
+COMMENT ON COLUMN pgfr_record.recent_activity.application_name IS
+    '[dimension] [text] application_name reported by the sampled session.';
+COMMENT ON COLUMN pgfr_record.recent_activity.client_addr IS
+    '[dimension] [text] Always NULL: client address is not surfaced from v2 activity_samples; the column is kept for legacy view shape compatibility.';
+COMMENT ON COLUMN pgfr_record.recent_activity.backend_type IS
+    '[dimension] [text] Backend type from pg_stat_activity; client backend only, unless include_bg_workers is enabled (then also autovacuum, logical replication, parallel, and background workers).';
+COMMENT ON COLUMN pgfr_record.recent_activity.state IS
+    '[dimension] [text] Session state at the sampling instant: active, idle in transaction, or idle in transaction (aborted); other states are never sampled.';
+COMMENT ON COLUMN pgfr_record.recent_activity.wait_event_type IS
+    '[dimension] [text] Raw wait event type from pg_stat_activity at the sampling instant; NULL when the backend was not waiting (no CPU*/IdleTx synthesis in this view).';
+COMMENT ON COLUMN pgfr_record.recent_activity.wait_event IS
+    '[dimension] [text] Raw wait event name from pg_stat_activity at the sampling instant; NULL when the backend was not waiting.';
+COMMENT ON COLUMN pgfr_record.recent_activity.backend_start IS
+    '[dimension] [timestamp] Always NULL: backend start time is not surfaced from v2 activity_samples; the column is kept for legacy view shape compatibility.';
+COMMENT ON COLUMN pgfr_record.recent_activity.xact_start IS
+    '[dimension] [timestamp] Start time of the session''s current transaction as reported by pg_stat_activity at the sampling instant; NULL if no transaction was open.';
+COMMENT ON COLUMN pgfr_record.recent_activity.query_start IS
+    '[dimension] [timestamp] Start time of the session''s current (or last) query as reported by pg_stat_activity at the sampling instant.';
+COMMENT ON COLUMN pgfr_record.recent_activity.session_age IS
+    '[point-sample] [duration] Always NULL: would be session age as of the sample instant, but backend_start is not surfaced from v2 activity_samples; kept for legacy view shape compatibility.';
+COMMENT ON COLUMN pgfr_record.recent_activity.xact_age IS
+    '[point-sample] [duration] How long the session''s transaction had been open as of the sample instant (captured_at minus xact_start); a per-tick reading, not a completed-transaction duration.';
+COMMENT ON COLUMN pgfr_record.recent_activity.running_for IS
+    '[point-sample] [duration] How long the current query had been running as of the sample instant (captured_at minus query_start); a per-tick reading, not a completed-query duration.';
+COMMENT ON COLUMN pgfr_record.recent_activity.query_preview IS
+    '[dimension] [text] First 500 characters of the session''s query text at the sampling instant.';
 
 DROP VIEW IF EXISTS pgfr_record.recent_locks;
 CREATE VIEW pgfr_record.recent_locks AS
@@ -1110,6 +1181,31 @@ LEFT JOIN pgfr_record.lock_type_map ltm ON ltm.id = ls.lock_type
 WHERE (pgfr_record.epoch() + ls.sample_ts * interval '1 second') > rc.cutoff
 ORDER BY ls.sample_ts DESC, ls.blocked_duration_s DESC NULLS LAST;
 
+COMMENT ON COLUMN pgfr_record.recent_locks.captured_at IS
+    '[dimension] [timestamp] Sampling tick time, reconstructed as pgfr_record.epoch() plus the sample row''s sample_ts offset in seconds; rows older than the ring retention window (num_slots * rotation_period) are filtered out.';
+COMMENT ON COLUMN pgfr_record.recent_locks.blocked_pid IS
+    '[dimension] [bigint] Process ID of the backend that was waiting on a heavyweight lock at the sampling instant.';
+COMMENT ON COLUMN pgfr_record.recent_locks.blocked_user IS
+    '[dimension] [text] Always NULL: v2 lock_samples does not store the blocked session''s role name; the column is kept for legacy view shape compatibility.';
+COMMENT ON COLUMN pgfr_record.recent_locks.blocked_app IS
+    '[dimension] [text] Always NULL: v2 lock_samples does not store the blocked session''s application_name; the column is kept for legacy view shape compatibility.';
+COMMENT ON COLUMN pgfr_record.recent_locks.blocked_duration IS
+    '[point-sample] [duration] How long the blocked backend had been waiting as of the sample instant, measured from pg_locks.waitstart (falling back to query_start) at collection time; a per-tick reading, not a completed-wait duration.';
+COMMENT ON COLUMN pgfr_record.recent_locks.blocking_pid IS
+    '[dimension] [bigint] Process ID of a backend blocking the waiter, from pg_blocking_pids() at the sampling instant; one row per blocked/blocking pair.';
+COMMENT ON COLUMN pgfr_record.recent_locks.blocking_user IS
+    '[dimension] [text] Always NULL: v2 lock_samples does not store the blocking session''s role name; the column is kept for legacy view shape compatibility.';
+COMMENT ON COLUMN pgfr_record.recent_locks.blocking_app IS
+    '[dimension] [text] Always NULL: v2 lock_samples does not store the blocking session''s application_name; the column is kept for legacy view shape compatibility.';
+COMMENT ON COLUMN pgfr_record.recent_locks.lock_type IS
+    '[dimension] [text] Heavyweight lock type the waiter was queued on (pg_locks.locktype), decoded from lock_type_map with the raw smallint code as text fallback.';
+COMMENT ON COLUMN pgfr_record.recent_locks.locked_relation IS
+    '[dimension] [text] Relation the contended lock targets, resolved via regclass at read time, with an OID:<n> text fallback when the relation no longer resolves; NULL for non-relation lock types.';
+COMMENT ON COLUMN pgfr_record.recent_locks.blocked_query_preview IS
+    '[dimension] [text] Always NULL: v2 lock_samples stores only a query_map id for the blocked query, not its text; the column is kept for legacy view shape compatibility.';
+COMMENT ON COLUMN pgfr_record.recent_locks.blocking_query_preview IS
+    '[dimension] [text] Always NULL: v2 lock_samples stores only a query_map id for the blocking query, not its text; the column is kept for legacy view shape compatibility.';
+
 DROP VIEW IF EXISTS pgfr_record.recent_idle_in_transaction;
 CREATE VIEW pgfr_record.recent_idle_in_transaction AS
 WITH retention_cutoff AS (
@@ -1135,4 +1231,21 @@ WHERE (pgfr_record.epoch() + as2.sample_ts * interval '1 second') > rc.cutoff
   AND as2.pid IS NOT NULL
   AND as2.state = 'idle in transaction'
 ORDER BY as2.xact_start ASC NULLS LAST;
+
+COMMENT ON COLUMN pgfr_record.recent_idle_in_transaction.captured_at IS
+    '[dimension] [timestamp] Sampling tick time, reconstructed as pgfr_record.epoch() plus the sample row''s sample_ts offset in seconds; rows older than the ring retention window (num_slots * rotation_period) are filtered out.';
+COMMENT ON COLUMN pgfr_record.recent_idle_in_transaction.pid IS
+    '[dimension] [bigint] Backend process ID of the session sampled in idle in transaction state; PIDs are reused by the OS, so correlate together with captured_at.';
+COMMENT ON COLUMN pgfr_record.recent_idle_in_transaction.usename IS
+    '[dimension] [text] Role name the sampled session was authenticated as.';
+COMMENT ON COLUMN pgfr_record.recent_idle_in_transaction.application_name IS
+    '[dimension] [text] application_name reported by the sampled session.';
+COMMENT ON COLUMN pgfr_record.recent_idle_in_transaction.client_addr IS
+    '[dimension] [text] Always NULL: client address is not surfaced from v2 activity_samples; the column is kept for legacy view shape compatibility.';
+COMMENT ON COLUMN pgfr_record.recent_idle_in_transaction.xact_start IS
+    '[dimension] [timestamp] Start time of the open transaction the session was idling in, as reported by pg_stat_activity at the sampling instant.';
+COMMENT ON COLUMN pgfr_record.recent_idle_in_transaction.idle_duration IS
+    '[point-sample] [duration] How long the transaction had been open as of the sample instant (captured_at minus xact_start); a per-tick reading of open-transaction age, not the time spent idle since the last statement.';
+COMMENT ON COLUMN pgfr_record.recent_idle_in_transaction.query_preview IS
+    '[dimension] [text] First 500 characters of the last query the idle-in-transaction session executed, as reported by pg_stat_activity at the sampling instant.';
 

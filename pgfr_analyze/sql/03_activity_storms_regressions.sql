@@ -119,7 +119,30 @@ LANGUAGE sql STABLE AS $$
     CROSS JOIN sample_progress sp
     CROSS JOIN wait_array wa
 $$;
-COMMENT ON FUNCTION pgfr_analyze.activity_at(TIMESTAMPTZ) IS 'Retrieves active session details at a specific point in time.';
+COMMENT ON FUNCTION pgfr_analyze.activity_at(TIMESTAMPTZ) IS 'Retrieves active session details at a specific point in time.
+
+Output columns:
+  sample_captured_at: [dimension] [timestamp] Capture time of the ring sample tick nearest to the requested time; all sample-derived columns describe this tick, not the requested instant.
+  sample_offset_seconds: [derived] [seconds] Absolute gap between the requested time and sample_captured_at, computed from the two timestamps; large values mean the sample columns describe a different moment than requested.
+  active_sessions: [point-sample] [count] Sessions observed in state active in activity_samples at the nearest sample tick, not at the requested instant; a point-in-time reading with no claim about activity between ticks.
+  waiting_sessions: [point-sample] [count] Sessions with a non-null wait_event in activity_samples at the nearest sample tick, not at the requested instant.
+  idle_in_transaction: [point-sample] [count] Sessions in state idle in transaction in activity_samples at the nearest sample tick, not at the requested instant.
+  top_wait_event_1: [dimension] [text] Label (type:event, decoded via wait_event_map) of the non-idle wait event with the most waiters at the nearest sample tick; NULL if no non-idle waits were observed.
+  top_wait_count_1: [point-sample] [count] Backends observed waiting on top_wait_event_1 at the nearest sample tick; measures occupancy at that instant, never event frequency.
+  top_wait_event_2: [dimension] [text] Label (type:event) of the second-ranked non-idle wait event at the nearest sample tick; NULL if fewer than two distinct waits were observed.
+  top_wait_count_2: [point-sample] [count] Backends observed waiting on top_wait_event_2 at the nearest sample tick; occupancy at that instant, never event frequency.
+  top_wait_event_3: [dimension] [text] Label (type:event) of the third-ranked non-idle wait event at the nearest sample tick; NULL if fewer than three distinct waits were observed.
+  top_wait_count_3: [point-sample] [count] Backends observed waiting on top_wait_event_3 at the nearest sample tick; occupancy at that instant, never event frequency.
+  blocked_pids: [point-sample] [count] Distinct blocked pids in lock_samples at the nearest sample tick, not at the requested instant; 0 when no blocking was observed at that tick.
+  longest_blocked_duration: [point-sample] [duration] Largest blocked_duration_s among lock_samples rows at the nearest sample tick, that is how long the longest-blocked session had been blocked as of the sample instant; NULL when no blocking was observed.
+  vacuums_running: [point-sample] [count] Placeholder: command-progress sampling is not collected in the v2 ring, so this is always 0.
+  copies_running: [point-sample] [count] Placeholder: command-progress sampling is not collected in the v2 ring, so this is always 0.
+  indexes_building: [point-sample] [count] Placeholder: command-progress sampling is not collected in the v2 ring, so this is always 0.
+  analyzes_running: [point-sample] [count] Placeholder: command-progress sampling is not collected in the v2 ring, so this is always 0.
+  snapshot_captured_at: [dimension] [timestamp] Capture time of the snapshot nearest to the requested time; the snapshot-derived columns describe this snapshot, not the requested instant.
+  snapshot_offset_seconds: [derived] [seconds] Absolute gap between the requested time and snapshot_captured_at, computed from the two timestamps.
+  autovacuum_workers: [gauge] [count] Autovacuum workers running at the nearest snapshot instant, not at the requested time; exact at that instant, undefined between snapshots.
+  checkpoint_occurred: [derived] [boolean] True when checkpoint_time differs between the nearest snapshot and its immediate predecessor, meaning a checkpoint completed somewhere in the interval between those two snapshots.';
 
 -- Detects query storms by comparing recent query execution counts to baseline
 CREATE OR REPLACE FUNCTION pgfr_analyze.detect_query_storms(
@@ -239,7 +262,16 @@ BEGIN
         st.recent_count DESC;
 END;
 $$;
-COMMENT ON FUNCTION pgfr_analyze.detect_query_storms(INTERVAL, NUMERIC) IS 'Detect query storms by comparing recent execution counts to baseline. Classifies as RETRY_STORM, CACHE_MISS, SPIKE, or NORMAL with severity levels (LOW, MEDIUM, HIGH, CRITICAL).';
+COMMENT ON FUNCTION pgfr_analyze.detect_query_storms(INTERVAL, NUMERIC) IS 'Detect query storms by comparing recent execution counts to baseline. Classifies as RETRY_STORM, CACHE_MISS, SPIKE, or NORMAL with severity levels (LOW, MEDIUM, HIGH, CRITICAL).
+
+Output columns:
+  queryid: [dimension] [bigint] pg_stat_statements query identifier, as recorded in statement_snapshots.
+  query_fingerprint: [dimension] [text] First 100 characters of the recorded query_preview for this queryid.
+  storm_type: [derived] [text] Classification (RETRY_STORM, CACHE_MISS, SPIKE, NORMAL) computed from query text patterns (RETRY, FOR UPDATE) and the ratio of the recent window total to the baseline per-snapshot average of calls_delta.
+  severity: [derived] [text] LOW, MEDIUM, HIGH, or CRITICAL, from multiplier against the storm_severity_* config thresholds; RETRY_STORM is always CRITICAL.
+  recent_count: [counter-delta] [count] Sum of per-snapshot calls_delta over the recent window (p_lookback, default 1 hour): the exact number of executions recorded in that window, modulo counter resets.
+  baseline_count: [counter-delta] [count] Average calls_delta per snapshot over the baseline period (storm_baseline_days, default 7 days, excluding the recent window; at least 2 distinct days required), truncated to bigint; 0 when no baseline exists.
+  multiplier: [derived] [ratio] Dimensionless ratio of recent_count to the baseline per-snapshot average of calls_delta (the denominator); NULL when the baseline average is zero or missing. Note the asymmetry: the numerator is a whole-window total, the denominator a per-snapshot average.';
 
 -- Diagnose probable causes for a query's performance regression
 CREATE OR REPLACE FUNCTION pgfr_analyze._diagnose_regression_causes(
@@ -476,6 +508,19 @@ BEGIN
         reg.primary_change_pct DESC;
 END;
 $$;
-COMMENT ON FUNCTION pgfr_analyze.detect_regressions(INTERVAL, NUMERIC) IS 'Detect performance regressions using buffer metrics (default) or timing. Classifies severity based on percentage change (LOW <200%, MEDIUM <500%, HIGH <1000%, CRITICAL >1000%). Configure via regression_detection_metric.';
+COMMENT ON FUNCTION pgfr_analyze.detect_regressions(INTERVAL, NUMERIC) IS 'Detect performance regressions using buffer metrics (default) or timing. Classifies severity based on percentage change (LOW <200%, MEDIUM <500%, HIGH <1000%, CRITICAL >1000%). Configure via regression_detection_metric.
+
+Output columns:
+  queryid: [dimension] [bigint] pg_stat_statements query identifier, as recorded in statement_snapshots.
+  query_fingerprint: [dimension] [text] First 100 characters of the recorded query_preview for this queryid.
+  severity: [derived] [text] LOW, MEDIUM, HIGH, or CRITICAL, from the change percentage of the configured detection metric against the regression_severity_* config thresholds.
+  baseline_avg_ms: [derived] [milliseconds] Average of per-snapshot mean_exec_time for this queryid over the baseline period (regression_baseline_days, default 7 days, excluding the recent window; at least 2 distinct days required), rounded to 2 decimals.
+  current_avg_ms: [derived] [milliseconds] Average of per-snapshot mean_exec_time for this queryid over the recent window (p_lookback, default 1 hour), rounded to 2 decimals.
+  change_pct: [derived] [percent] Timing change: (current_avg_ms minus baseline_avg_ms) as a percentage of baseline_avg_ms (the denominator); NULL when the baseline average is zero.
+  baseline_avg_buffers: [derived] [blocks] Average per-snapshot total buffer traffic (shared_blks_hit_delta plus shared_blks_read_delta plus temp_blks_read_delta) over the baseline period, rounded to whole blocks; an average of exact counter deltas.
+  current_avg_buffers: [derived] [blocks] Average per-snapshot total buffer traffic (same three deltas) over the recent window, rounded to whole blocks.
+  buffer_change_pct: [derived] [percent] Buffer change: (current_avg_buffers minus baseline_avg_buffers) as a percentage of baseline_avg_buffers (the denominator); NULL when the baseline average is zero.
+  detection_metric: [dimension] [text] Name of the metric that drove detection and severity: the regression_detection_metric config value, buffers (default) or time.
+  probable_causes: [derived] [text] Array of heuristic diagnostic strings from _diagnose_regression_causes: live pg_stat_statements temp spills and cache hit ratio, recent checkpoint activity from snapshots, or generic advice when nothing specific is found.';
 -- Generates a health report of flight recorder operations, including collection performance metrics,
 -- success rates, and schema size with qualitative assessments

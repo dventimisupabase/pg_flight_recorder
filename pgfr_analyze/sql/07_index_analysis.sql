@@ -55,7 +55,15 @@ LANGUAGE sql STABLE AS $$
     ORDER BY iu.index_size_bytes DESC
 $$;
 COMMENT ON FUNCTION pgfr_analyze.unused_indexes(INTERVAL) IS
-'Identify unused or rarely used indexes. Returns indexes that may be candidates for removal to save space and improve write performance. Default lookback is 7 days.';
+'Identify unused or rarely used indexes. Returns indexes that may be candidates for removal to save space and improve write performance. Default lookback is 7 days.
+
+Output columns:
+  schemaname: [dimension] [text] Schema of the table the index belongs to, falling back to parsing relid::regclass when the stored name is NULL.
+  relname: [dimension] [text] Table the index belongs to, with regclass fallback.
+  indexrelname: [dimension] [text] Index name, with regclass fallback; primary key indexes (names ending in _pkey) are excluded.
+  index_size: [derived] [text] Pretty-printed rendering of the index_size_bytes gauge from the latest snapshot in the lookback window.
+  last_scan_count: [counter-delta] [count] idx_scan delta between the earliest and latest snapshots inside the lookback window; despite the name it is a count of index scans over the window, not a timestamp. Only indexes with fewer than 100 scans are returned.
+  recommendation: [derived] [text] Drop or keep advice from thresholds on last_scan_count: 0 scans suggests DROP INDEX, under 10 suggests considering a drop, otherwise keep.';
 
 
 -- Analyzes index efficiency and usage patterns
@@ -119,7 +127,18 @@ LANGUAGE sql STABLE AS $$
     LIMIT p_limit
 $$;
 COMMENT ON FUNCTION pgfr_analyze.index_efficiency(TIMESTAMPTZ, TIMESTAMPTZ, INTEGER) IS
-'Analyze index efficiency and usage patterns. Returns selectivity (fetch/read ratio) and scans-per-GB metrics. Low selectivity may indicate poor index choices.';
+'Analyze index efficiency and usage patterns. Returns selectivity (fetch/read ratio) and scans-per-GB metrics. Low selectivity may indicate poor index choices.
+
+Output columns:
+  schemaname: [dimension] [text] Schema of the table the index belongs to, from the end snapshot, falling back to parsing relid::regclass when the stored name is NULL.
+  relname: [dimension] [text] Table the index belongs to, from the end snapshot with regclass fallback.
+  indexrelname: [dimension] [text] Index name, from the end snapshot with regclass fallback.
+  idx_scan_delta: [counter-delta] [count] Index scans (pg_stat_user_indexes.idx_scan) between the last index snapshot at or before p_start_time and the first at or after p_end_time; only indexes with a positive delta are returned, and a missing start snapshot makes this the raw end counter.
+  idx_tup_read_delta: [counter-delta] [count] Index entries returned by scans (idx_tup_read) over the comparison window.
+  idx_tup_fetch_delta: [counter-delta] [count] Live table rows fetched by index scans (idx_tup_fetch) over the comparison window.
+  selectivity: [derived] [percent] idx_tup_fetch_delta as a percent of idx_tup_read_delta over the comparison window, a ratio of two exact counter deltas; NULL when idx_tup_read_delta is 0. Low values mean many index entries are read per live row actually fetched.
+  index_size: [derived] [text] Pretty-printed rendering of the index_size_bytes gauge from the end snapshot.
+  scans_per_gb: [derived] [count/gb] idx_scan_delta divided by the end-snapshot index size in GB (index_size_bytes over 1073741824): index scans over the comparison window per GB of index; NULL when the size is 0 or NULL.';
 
 
 -- =============================================================================

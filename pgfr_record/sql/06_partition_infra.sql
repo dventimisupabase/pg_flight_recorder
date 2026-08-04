@@ -487,6 +487,38 @@ comment on view pgfr_record.partition_gc_health is
 'oldest_pending_truncation: max bound_end of non-empty expired partitions (as int4 offset from epoch()). '
 'See blueprints/SPEC.md §7.2.';
 
+comment on column pgfr_record.partition_gc_health.parent_table is
+'[dimension] [text] Name of the RANGE-partitioned parent table in the '
+'pgfr_record schema; one row per parent, from _partition_inventory().';
+
+comment on column pgfr_record.partition_gc_health.total_partitions is
+'[gauge] [count] Number of partitions currently attached to the parent, per '
+'_partition_inventory() read live from the catalogs at query time. Exact when '
+'read; no history is kept.';
+
+comment on column pgfr_record.partition_gc_health.pending_truncation is
+'[gauge] [count] Partitions past the retention cutoff but still holding data '
+'(is_expired and not is_empty), awaiting the nightly truncate_old_partitions() '
+'pass. Persistently nonzero after the nightly run means truncations are being '
+'skipped (lock timeouts) or GC has stalled.';
+
+comment on column pgfr_record.partition_gc_health.truncated_recent is
+'[gauge] [count] Partitions expired and already empty but not yet ancient '
+'(is_expired and is_empty and not is_ancient): truncated, awaiting the monthly '
+'drop_ancient_partitions() slow path once they age past 2x retention.';
+
+comment on column pgfr_record.partition_gc_health.pending_drop is
+'[gauge] [count] Ancient empty partitions (is_ancient and is_empty, older than '
+'2x the retention window) eligible for DROP by the monthly '
+'drop_ancient_partitions() run.';
+
+comment on column pgfr_record.partition_gc_health.oldest_pending_truncation is
+'[gauge] [epoch-seconds] Upper edge of the pending-truncation backlog: '
+'max(bound_end) across expired, non-empty partitions, as int4 seconds since '
+'pgfr_record.epoch() (2026-01-01 UTC), not the Unix epoch. NULL when nothing '
+'is pending truncation. Despite the name, it is the newest partition bound '
+'among those awaiting truncation.';
+
 -- =============================================================================
 -- End Phase 1: Core Partition Infrastructure
 -- =============================================================================

@@ -61,6 +61,15 @@ comment on view pgfr_analyze.consumption_weekly_metric_series is
 'pgfr_record.consumption_weekly_flows'' 8 basket metrics, mirroring '
 'consumption_metric_series one tier up. See Issue #92.';
 
+comment on column pgfr_analyze.consumption_weekly_metric_series.week_end_date is
+'[dimension] [date] Anchor date of the rolling 7-day bucket (its most recent day), carried through from pgfr_record.consumption_weekly_flows.week_end_date; identifies the week the metric value describes.';
+comment on column pgfr_analyze.consumption_weekly_metric_series.datname is
+'[dimension] [text] Database name the metric row describes, carried through from pgfr_record.consumption_weekly_flows.';
+comment on column pgfr_analyze.consumption_weekly_metric_series.metric_name is
+'[dimension] [text] Name of the basket metric; one of the 8 unpivoted ratio columns of pgfr_record.consumption_weekly_flows (blocks_per_row_returned, wal_bytes_per_row_mutated, temp_bytes_per_xact, fpi_fraction, ckpt_requested_fraction, rollback_fraction, autovacuum_write_share, cache_hit_fraction).';
+comment on column pgfr_analyze.consumption_weekly_metric_series.value is
+'[derived] [mixed] Value of the metric named by metric_name; units vary by metric (0-1 fractions for the *_fraction and *_share metrics, blocks or bytes per row or per transaction for the intensity metrics), so consult the underlying pgfr_record.consumption_weekly_flows column of the same name for units, numerator, and denominator. NULL when the week was reset-excluded or its denominator was zero.';
+
 -- ---------------------------------------------------------------------------
 -- 2. _refresh_consumption_trends_weekly() — always recomputes and upserts
 --    today's row for every (datname, basket metric) combination, 84-day

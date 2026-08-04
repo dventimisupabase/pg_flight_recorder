@@ -438,7 +438,29 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION pgfr_analyze.what_happened_at IS
-'Time-travel debugging: Forensic analysis of system state at any timestamp. Interpolates between samples to estimate connections, transaction rates, and buffer hit ratio. Surfaces exact-timestamp events (checkpoints, query starts, transaction starts) and analyzes sessions, locks, and wait events. Returns confidence score (0-1) based on data proximity. Use for incident investigation: SELECT * FROM pgfr_analyze.what_happened_at(''2024-01-15 10:23:47'');';
+'Time-travel debugging: Forensic analysis of system state at any timestamp. Interpolates between samples to estimate connections, transaction rates, and buffer hit ratio. Surfaces exact-timestamp events (checkpoints, query starts, transaction starts) and analyzes sessions, locks, and wait events. Returns confidence score (0-1) based on data proximity. Use for incident investigation: SELECT * FROM pgfr_analyze.what_happened_at(''2024-01-15 10:23:47'');
+
+Output columns:
+  requested_time: [dimension] [timestamp] The p_timestamp argument echoed back: the instant being reconstructed.
+  sample_before: [dimension] [timestamp] Capture time of the nearest activity_samples ring tick at or before the requested time; NULL when the ring holds no earlier tick.
+  sample_after: [dimension] [timestamp] Capture time of the nearest activity_samples ring tick at or after the requested time; NULL when the ring holds no later tick.
+  snapshot_before: [dimension] [timestamp] captured_at of the nearest snapshots row at or before the requested time.
+  snapshot_after: [dimension] [timestamp] captured_at of the nearest snapshots row at or after the requested time.
+  est_connections_active: [derived] [count] Estimated active connections at the requested time: linear interpolation of the connections_active gauge between the bracketing snapshots (falls back to the single available snapshot value when only one side exists). An estimate, not a measurement; spikes between snapshots are invisible.
+  est_connections_total: [derived] [count] Estimated total connections at the requested time: linear interpolation of the connections_total gauge between the bracketing snapshots, with the same single-snapshot fallback. An estimate, not a measurement.
+  est_xact_rate: [derived] [count/s] [interval-mean] Estimated transaction rate around the requested time: xact_commit plus xact_rollback differenced between the bracketing snapshots and divided by their gap. It is the mean rate over that whole snapshot interval attributed to the requested instant, never an instantaneous rate.
+  est_blks_hit_ratio: [derived] [percent] Buffer cache hit ratio computed from the after-side snapshot cumulative counters: blks_hit as a percent of blks_hit plus blks_read since statistics reset (lifetime totals, not a delta over the window), so it moves slowly and is only loosely tied to the requested instant.
+  events: [derived] [json] Array of exact-timestamp events reconstructed within the context window: checkpoint, WAL archived, and archive failed times from the before-side snapshot, plus up to 10 query starts and 10 transaction starts read from the nearest-before activity sample. Only sessions still visible at that sample tick appear; short-lived sessions that ended before the tick are missed.
+  sessions_active: [point-sample] [count] Number of sessions in state active in the nearest-before activity ring sample: a point-in-time reading as of that tick, not an average over the window.
+  long_running_queries: [point-sample] [count] Number of active sessions in the nearest-before activity sample whose query_start was more than 60 seconds before the tick, as of the sample instant; biased toward long-running queries by construction.
+  longest_query_secs: [point-sample] [seconds] Longest elapsed runtime among those long-running queries, measured from query_start to the sample capture time, as of the sample instant.
+  lock_contention_detected: [derived] [boolean] Flag set when the nearest-before lock_samples tick contains any blocked session row; computed from a single point sample, so false does not rule out contention between ticks.
+  blocked_sessions: [point-sample] [count] Number of blocked-session rows in lock_samples at the nearest-before tick: sessions observed blocked at that instant, biased against waits shorter than the sampling interval.
+  top_wait_events: [point-sample] [json] Top 5 wait events with waiter counts, decoded from the wait_samples ring at the nearest-before tick; waiter counts are as of that instant and estimate time-in-state, never event frequency.
+  confidence: [derived] [text] Qualitative confidence level (high, medium, low, very_low) bucketed from confidence_score.
+  confidence_score: [derived] [fraction] Confidence in the reconstruction on a 0-1 scale: a heuristic computed from the gap between bracketing ring samples plus bonuses for exact-timestamp events and proximity to a sample; not a calibrated probability.
+  data_quality_notes: [derived] [text] Notes on gaps, fallbacks, and timing anchors encountered during reconstruction (sample gap size, missing snapshots, checkpoint anchors).
+  recommendations: [derived] [text] Heuristic follow-up suggestions triggered by blocked sessions, long-running queries, low hit ratio, checkpoint proximity, or archive failures.';
 
 
 -- Timeline reconstruction for incident analysis
@@ -645,7 +667,13 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION pgfr_analyze.incident_timeline IS
-'Reconstructs a unified timeline for incident analysis by merging events from multiple sources: checkpoints, WAL archiving, query/transaction starts, connection opens, lock contention, wait spikes, and snapshots. Returns chronologically ordered events with type, description, and JSON details. Use for incident review: SELECT * FROM pgfr_analyze.incident_timeline(now() - interval ''2 hours'', now() - interval ''1 hour'');';
+'Reconstructs a unified timeline for incident analysis by merging events from multiple sources: checkpoints, WAL archiving, query/transaction starts, connection opens, lock contention, wait spikes, and snapshots. Returns chronologically ordered events with type, description, and JSON details. Use for incident review: SELECT * FROM pgfr_analyze.incident_timeline(now() - interval ''2 hours'', now() - interval ''1 hour'');
+
+Output columns:
+  event_time: [dimension] [timestamp] When the event occurred: exact recorded timestamps for checkpoints, WAL archive events, query/transaction/backend starts, and snapshot captures, but the sample tick time for lock_contention and wait_spike rows, whose resolution is the sampling cadence.
+  event_type: [dimension] [text] Event kind: checkpoint, wal_archived, archive_failed, query_started, transaction_started, connection_opened, lock_contention, wait_spike, or snapshot. Sample-sourced kinds (lock_contention, wait_spike) reflect state observed at ticks, not every occurrence; wait_spike rows only appear when a tick shows 3 or more concurrent waiters on an event.
+  description: [derived] [text] Human-readable one-line summary formatted from the source row (the snapshot row TPS figure is a mean rate between consecutive snapshots).
+  details: [derived] [json] Event-specific attributes copied from the source row: identity fields (pid, user, application, WAL file), gauge and counter values for snapshot and checkpoint events, and point-sample counts for lock and wait events.';
 
 
 -- Blast Radius Analysis
@@ -1153,7 +1181,31 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION pgfr_analyze.blast_radius IS
-'Comprehensive blast radius analysis for incident impact assessment. Analyzes lock impact (blocked sessions, duration, types), query degradation (before vs during), connection spike, affected applications, wait events, and transaction throughput. Returns severity classification (low/medium/high/critical) with impact summary and recommendations. Use for incident postmortems: SELECT * FROM pgfr_analyze.blast_radius(''2024-01-15 10:23:00'', ''2024-01-15 10:35:00'');';
+'Comprehensive blast radius analysis for incident impact assessment. Analyzes lock impact (blocked sessions, duration, types), query degradation (before vs during), connection spike, affected applications, wait events, and transaction throughput. Returns severity classification (low/medium/high/critical) with impact summary and recommendations. Use for incident postmortems: SELECT * FROM pgfr_analyze.blast_radius(''2024-01-15 10:23:00'', ''2024-01-15 10:35:00'');
+
+Output columns:
+  incident_start: [dimension] [timestamp] The p_start_time argument echoed back; the baseline window is the equal-length period immediately before it.
+  incident_end: [dimension] [timestamp] The p_end_time argument echoed back.
+  duration_seconds: [derived] [seconds] Incident window length, p_end_time minus p_start_time, rounded to whole seconds.
+  blocked_sessions_total: [point-sample] [count] Distinct blocked_pid values seen in lock_samples ticks within the incident window: it counts sessions observed blocked in at least one sample, not all blocking events; waits shorter than the sampling interval are mostly missed, and a pid blocked repeatedly counts once.
+  blocked_sessions_max_concurrent: [point-sample] [count] Largest number of distinct blocked sessions seen in any single lock_samples tick within the window: peak observed concurrency as of that sample instant.
+  max_block_duration: [point-sample] [duration] Maximum blocked_duration_s across lock sample rows in the window: the longest a session had already been blocked as of some sample instant; a wait can grow or end unobserved between ticks, so this is a lower bound on the true longest wait.
+  avg_block_duration: [point-sample] [duration] Mean blocked_duration_s across all blocked-session sample rows in the window (denominator: blocked-session sample rows, so a long wait contributes one row per tick and dominates); each duration is as of its sample instant.
+  lock_types: [point-sample] [json] Top 10 lock types among blocked-session sample rows in the window, each with the number of sample rows it appeared in; counts weight by time spent blocked, never by number of blocking events.
+  degraded_queries_count: [derived] [count] Number of queries whose mean_exec_time averaged over statement snapshots in the incident window exceeded 1.5 times their average over the baseline window; capped at 10 by an internal limit.
+  degraded_queries: [derived] [json] Up to 10 worst-degraded queries with baseline_ms, during_ms, and slowdown_pct (percent increase of the during-window mean over the baseline-window mean; denominator is the baseline mean).
+  connections_before: [gauge] [count] Mean of the connections_total gauge across snapshots in the baseline window, rounded to an integer; each reading is exact at its tick, spikes between ticks are invisible.
+  connections_during_avg: [gauge] [count] Mean of the connections_total gauge across snapshots in the incident window, rounded to an integer.
+  connections_during_max: [gauge] [count] Maximum connections_total across snapshots in the incident window; peaks between snapshot ticks are invisible.
+  connection_increase_pct: [derived] [percent] Percent change of connections_during_avg relative to connections_before (denominator: the baseline average); 0 when the baseline average is 0.
+  affected_applications: [point-sample] [json] Blocked-session counts (distinct pids observed blocked in samples, biased against short waits) with max observed wait, grouped by application; the v2 lock_samples ring does not record application names, so every row currently reports app_name unknown.
+  top_wait_events: [point-sample] [json] Wait events decoded from the wait_samples ring during the incident window, ordered by summed per-tick waiter counts, with pct_increase versus the same sum over the baseline window (denominator: the baseline sum; NULL when the event was absent from the baseline). Summed waiter counts estimate time-weighted wait volume, never event frequency.
+  tps_before: [counter-delta] [count/s] [interval-mean] Committed-transaction rate over the baseline window: the xact_commit counter differenced between consecutive snapshots, divided by each gap, then averaged. A mean rate; within-interval bursts are invisible, and a counter reset inside the window corrupts the affected delta.
+  tps_during: [counter-delta] [count/s] [interval-mean] The same estimator over the incident window: mean per-gap rate of the xact_commit counter across snapshots inside the window.
+  tps_change_pct: [derived] [percent] Percent change of tps_during relative to tps_before (denominator: tps_before); 0 when the baseline TPS is 0.
+  severity: [derived] [text] Overall incident severity (low, medium, high, critical): the worst of five fixed-threshold scores over blocked sessions, block duration, connection increase, TPS drop, and degraded-query count.
+  impact_summary: [derived] [text] Human-readable impact statements generated from the same thresholds (blocked sessions, TPS drop, degraded queries, connection increase).
+  recommendations: [derived] [text] Heuristic remediation suggestions triggered by the same thresholds.';
 
 
 -- Blast Radius Report

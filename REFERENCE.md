@@ -139,6 +139,12 @@ The legacy `ring_buffer_health()`, `rebuild_ring_buffers()`, and
 | `pgfr_analyze.preflight_check()` | `record` | Pre-installation validation checks |
 | `pgfr_analyze.preflight_check_with_summary()` | `record` | Validation with text summary |
 
+### Semantics registry
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `pgfr_analyze.column_semantics()` | `record` | Machine-readable registry of column-level statistical semantics (see [STATISTICS.md](STATISTICS.md)). Parses the structured `[class] [units]` prefix of view column comments in both schemas and the `Output columns:` blocks of pgfr_analyze set-returning function comments, so the comments are the single source of truth. Returns `(relation, column_name, semantic_class, units, interval_basis, notes)` |
+
 ## Views
 
 ### pgfr_record (core)
