@@ -8,7 +8,7 @@ Server-side flight recorder for PostgreSQL. Answers "what was happening in my da
 
 **[View the project website](https://dventimisupabase.github.io/pg_flight_recorder/)**
 
-pg_flight_recorder continuously records PostgreSQL system state in the background via pg_cron: no external agents, sidecars, or polling. It samples wait events and active sessions once a minute, and snapshots WAL activity, checkpoints, I/O, table and index stats, query performance, replication state, vacuum progress, and configuration on the same cadence. When something goes wrong, the data is already there.
+pg_flight_recorder continuously records PostgreSQL system state in the background via pg_cron: no external agents, sidecars, or polling. It samples wait events, active sessions, and lock contention once a minute, and snapshots WAL activity, checkpoints, I/O, table and index stats, query performance, replication state, vacuum progress, and configuration on the same cadence. When something goes wrong, the data is already there.
 
 ## Architecture
 
@@ -16,17 +16,17 @@ Two collection mechanisms run every minute, both scheduled by `pgfr_record.enabl
 
 | Mechanism | Job | What it captures | Where it lands |
 |-----------|-----|------------------|----------------|
-| **Sampling** | `pgfr_sample_ring` (500ms timeout) | Wait events and active sessions, observed at the sample instant | Ring buffer partitions, TRUNCATE-rotated every 2 hours |
+| **Sampling** | `pgfr_sample_ring` (500ms timeout) | Wait events, active sessions, and blocked/blocking lock pairs, observed at the sample instant | Ring buffer partitions, TRUNCATE-rotated every 2 hours |
 | **Snapshots** | `pgfr_snapshot` (10s timeout) | Cumulative counters and gauges: WAL, checkpoints, bgwriter, per-backend-type I/O, transactions, temp files, archiver, XID/MultiXID ages, xmin horizon attribution, replication, vacuum progress, statements, tables, indexes, configuration, consumption ledger | Daily-partitioned snapshot tables |
 
-Just before each ring rotation destroys a slot, that slot's data is rolled up into durable, bounded-size summary tables (`wait_event_rollups_archive_v2`, `activity_rollups_archive_v2`), so trend visibility survives past the ring window as compact aggregates. There is no full-resolution downstream archive. Snapshot retention is enforced by partition truncate and drop, never DELETE.
+Just before each ring rotation destroys a slot, that slot's data is rolled up into durable, bounded-size summary tables (`wait_event_rollups_archive_v2`, `lock_rollups_archive_v2`, `activity_rollups_archive_v2`), so trend visibility survives past the ring window as compact aggregates. There is no full-resolution downstream archive. Snapshot retention is enforced by partition truncate and drop, never DELETE.
 
 Retention tiers at default settings:
 
 | Tier | Contents | Retention |
 |------|----------|-----------|
 | Ring buffer | Raw per-minute samples (per-session detail, query previews) | 2-4 hours (3 slots, 2-hour rotation) |
-| Ring rollups | Per-rotation-window wait/activity summaries | 7 days (`retention_archive_days`) |
+| Ring rollups | Per-rotation-window wait/lock/activity summaries | 7 days (`retention_archive_days`) |
 | Snapshots | All daily-partitioned counter and gauge tables | 30 days (`retention_snapshots_days`) |
 | Consumption daily rollups | One row per day per database | Indefinite (tiny by construction) |
 
@@ -81,7 +81,7 @@ Other install channels:
 
 | Job | Schedule | Timeout | Does |
 |-----|----------|---------|------|
-| `pgfr_sample_ring` | every minute | 500ms | Sample wait events and active sessions into the ring |
+| `pgfr_sample_ring` | every minute | 500ms | Sample wait events, active sessions, and lock pairs into the ring |
 | `pgfr_snapshot` | every minute | 10s | Capture all snapshot tables |
 | `pgfr_rotate_ring` | every 2 hours | 10s | Roll up and truncate the oldest ring slot |
 | `pgfr_cleanup` | daily 03:00 | 60s | Legacy-table retention plus daily consumption rollup |
