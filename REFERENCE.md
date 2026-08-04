@@ -148,6 +148,12 @@ The legacy `ring_buffer_health()`, `rebuild_ring_buffers()`, and
 | `pgfr_analyze.coverage_gaps(start timestamptz, end timestamptz)` | `record` | Contiguous runs of missing ticks with attributed reasons: `retention_horizon`, `circuit_breaker`, `load_shedding`, `restart`, `cron_inactive`, `unknown`. Breaker/shedding gaps are informative missingness; see [STATISTICS.md](STATISTICS.md) |
 | `pgfr_analyze.coverage_gaps(interval)` | `record` | Interval convenience overload |
 
+### Self-overhead
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `pgfr_analyze.self_overhead()` | `record` | Self-measured observer-effect budget (see [STATISTICS.md](STATISTICS.md)): per-tick collection time, recorder buffer-traffic share, storage footprint, and the recorder's share of `pg_stat_statements` execution time, each with the method stated per row |
+
 ### Semantics registry
 
 | Function | Returns | Description |
