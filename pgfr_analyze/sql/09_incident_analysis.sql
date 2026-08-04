@@ -354,6 +354,37 @@ BEGIN
         v_notes := array_append(v_notes, 'No sample data in ring buffer');
     END IF;
 
+    -- Coverage disclosure (Issue #102): the ring sampler's coverage over the
+    -- 30-minute context window around the requested instant, with the MNAR
+    -- caveat when gaps are stress-correlated (circuit breaker/load shedding).
+    DECLARE
+        v_cov_observed INTEGER;
+        v_cov_expected INTEGER;
+        v_cov_mnar     BOOLEAN;
+    BEGIN
+        SELECT c.observed_samples, c.expected_samples
+          INTO v_cov_observed, v_cov_expected
+          FROM pgfr_analyze.coverage(p_timestamp - interval '15 minutes',
+                                     p_timestamp + interval '15 minutes') c
+         WHERE c.collector = 'sample';
+        IF v_cov_expected IS NOT NULL THEN
+            v_notes := array_append(v_notes,
+                format('Ring sample coverage: %s of %s expected ticks in the 30-minute context window',
+                       v_cov_observed, v_cov_expected));
+        END IF;
+        SELECT bool_or(g.attributed_reason IN ('circuit_breaker', 'load_shedding'))
+          INTO v_cov_mnar
+          FROM pgfr_analyze.coverage_gaps(p_timestamp - interval '15 minutes',
+                                          p_timestamp + interval '15 minutes') g
+         WHERE g.collector = 'sample';
+        IF COALESCE(v_cov_mnar, false) THEN
+            v_notes := array_append(v_notes,
+                'Some sample gaps are breaker- or shedding-attributed: absence of samples is not absence of activity');
+        END IF;
+    EXCEPTION WHEN OTHERS THEN
+        NULL;  -- coverage disclosure must never break the reconstruction
+    END;
+
     -- Bonus for exact-timestamp events
     IF jsonb_array_length(v_events) > 0 THEN
         v_confidence_score := LEAST(1.0, v_confidence_score + 0.1);
@@ -479,6 +510,24 @@ RETURNS TABLE(
 )
 LANGUAGE plpgsql AS $$
 BEGIN
+    -- Coverage disclosure first (Issue #102): one synthetic event at the
+    -- window start stating what the recorder actually saw, so the timeline
+    -- reads as evidence-with-coverage rather than an exhaustive record.
+    RETURN QUERY
+    SELECT p_start_time,
+           'coverage'::TEXT,
+           format('Recorder coverage for this window: %s',
+                  COALESCE((SELECT string_agg(format('%s/%s %s', c.observed_samples,
+                                                     c.expected_samples, c.collector), ', ')
+                            FROM pgfr_analyze.coverage(p_start_time, p_end_time) c),
+                           'no expected ticks')),
+           COALESCE((SELECT jsonb_object_agg(c.collector,
+                        jsonb_build_object('observed', c.observed_samples,
+                                           'expected', c.expected_samples,
+                                           'ratio', c.coverage_ratio))
+                     FROM pgfr_analyze.coverage(p_start_time, p_end_time) c),
+                    '{}'::jsonb);
+
     RETURN QUERY
     WITH all_events AS (
         -- Checkpoint events from snapshots
@@ -1118,6 +1167,35 @@ BEGIN
         v_impact_summary := array_append(v_impact_summary, 'No significant impact detected');
     END IF;
 
+    -- Coverage disclosure (Issue #102): blocked-session figures are point
+    -- samples; state how much of the incident window the sampler actually saw.
+    DECLARE
+        v_cov_observed INTEGER;
+        v_cov_expected INTEGER;
+        v_cov_mnar     BOOLEAN;
+    BEGIN
+        SELECT c.observed_samples, c.expected_samples
+          INTO v_cov_observed, v_cov_expected
+          FROM pgfr_analyze.coverage(p_start_time, p_end_time) c
+         WHERE c.collector = 'sample';
+        IF v_cov_expected IS NOT NULL THEN
+            v_impact_summary := array_append(v_impact_summary,
+                format('Sample coverage: %s of %s expected ticks over the incident window',
+                       v_cov_observed, v_cov_expected));
+        END IF;
+        SELECT bool_or(g.attributed_reason IN ('circuit_breaker', 'load_shedding'))
+          INTO v_cov_mnar
+          FROM pgfr_analyze.coverage_gaps(p_start_time, p_end_time) g
+         WHERE g.collector = 'sample';
+        IF COALESCE(v_cov_mnar, false) THEN
+            v_impact_summary := array_append(v_impact_summary,
+                'Sample gaps in this window are breaker- or shedding-attributed: absence of samples is not absence of activity');
+        END IF;
+    EXCEPTION WHEN OTHERS THEN
+        NULL;  -- coverage disclosure must never break the analysis
+    END;
+
+
     -- =========================================================================
     -- Recommendations
     -- =========================================================================
@@ -1254,7 +1332,15 @@ BEGIN
         WHEN 'medium' THEN '█████░░░░░'
         ELSE '██░░░░░░░░'
     END;
-    v_result := v_result || format('Severity: %s %s', v_severity_bar, upper(v_data.severity)) || E'\n\n';
+    v_result := v_result || format('Severity: %s %s', v_severity_bar, upper(v_data.severity)) || E'\n';
+    -- Coverage disclosure (Issue #102): lock figures are point samples.
+    v_result := v_result || COALESCE(
+        (SELECT format('Coverage: %s/%s sample ticks (%s%%); blocked-session figures are point samples, biased against waits shorter than the sampling interval',
+                       c.observed_samples, c.expected_samples,
+                       round(c.coverage_ratio * 100, 1))
+         FROM pgfr_analyze.coverage(p_start_time, p_end_time) c
+         WHERE c.collector = 'sample'),
+        'Coverage: no expected sample ticks in window') || E'\n\n';
 
     -- =========================================================================
     -- Lock Impact Section
@@ -1357,9 +1443,14 @@ BEGIN
         END
     ) || E'\n';
 
-    v_result := v_result || format('  Throughput:   %s TPS → %s TPS    %s',
+    -- Units and interval basis sourced from the semantics registry (#99)
+    -- rather than a hard-coded 'TPS' string; falls back to the literal on
+    -- comment-stripped (dbdev) installs.
+    v_result := v_result || format('  Throughput:   %s -> %s (%s)    %s',
         round(v_data.tps_before, 0)::integer,
         round(v_data.tps_during, 0)::integer,
+        pgfr_analyze._interval_basis('pgfr_analyze.blast_radius()', 'tps_during',
+                                     'count/s, interval-mean'),
         CASE
             WHEN v_data.tps_change_pct > 0 THEN format('+%s%%', v_data.tps_change_pct::integer)
             WHEN v_data.tps_change_pct < 0 THEN format('%s%%', v_data.tps_change_pct::integer)

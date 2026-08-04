@@ -6,7 +6,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(45);
+SELECT plan(47);
 
 -- =============================================================================
 -- 1. FUNCTION EXISTENCE (2 tests)
@@ -428,6 +428,21 @@ SELECT ok(
 -- =============================================================================
 -- CLEANUP
 -- =============================================================================
+
+-- Issue #102: coverage disclosure in impact_summary and the report header
+SELECT ok(
+    EXISTS (
+        SELECT 1 FROM pgfr_analyze.blast_radius(now() - interval '1 hour', now()) b,
+             unnest(b.impact_summary) AS entry
+        WHERE entry ILIKE '%coverage%'
+    ),
+    'blast_radius states sample coverage in impact_summary'
+);
+
+SELECT ok(
+    pgfr_analyze.blast_radius_report(now() - interval '1 hour', now()) ILIKE '%Coverage:%',
+    'blast_radius_report carries a coverage line'
+);
 
 SELECT * FROM finish();
 ROLLBACK;

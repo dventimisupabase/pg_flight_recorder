@@ -145,6 +145,14 @@ Output columns:
   checkpoint_occurred: [derived] [boolean] True when checkpoint_time differs between the nearest snapshot and its immediate predecessor, meaning a checkpoint completed somewhere in the interval between those two snapshots.';
 
 -- Detects query storms by comparing recent query execution counts to baseline
+-- Issue #102: detect_query_storms() gained sample-count columns, which
+-- changes its return type; CREATE OR REPLACE cannot do that.
+do $$
+begin
+    set local client_min_messages = warning;
+    drop function if exists pgfr_analyze.detect_query_storms(interval, numeric);
+end $$;
+
 CREATE OR REPLACE FUNCTION pgfr_analyze.detect_query_storms(
     p_lookback INTERVAL DEFAULT NULL,
     p_threshold_multiplier NUMERIC DEFAULT NULL
@@ -156,7 +164,9 @@ RETURNS TABLE(
     severity TEXT,
     recent_count BIGINT,
     baseline_count BIGINT,
-    multiplier NUMERIC
+    multiplier NUMERIC,
+    recent_samples INTEGER,
+    baseline_samples INTEGER
 )
 LANGUAGE plpgsql STABLE AS $$
 DECLARE
@@ -188,11 +198,18 @@ BEGIN
 
     RETURN QUERY
     WITH recent_stats AS (
-        -- Recent query call deltas from statement_snapshots
+        -- Recent query call deltas from statement_snapshots. Both the
+        -- per-tick average (the rate the multiplier compares) and the window
+        -- total (reported as recent_count) are computed; comparing the
+        -- window SUM against the baseline per-tick AVG, as this function did
+        -- before Issue #102, inflated the multiplier by roughly the number
+        -- of ticks in the lookback window (~60x at default cadence).
         SELECT
             ss.queryid,
             left(ss.query_preview, 100) AS query_preview,
-            SUM(COALESCE(ss.calls_delta, 0)) AS total_calls
+            SUM(COALESCE(ss.calls_delta, 0)) AS total_calls,
+            AVG(COALESCE(ss.calls_delta, 0)) AS avg_calls,
+            COUNT(*) AS n_samples
         FROM pgfr_record.statement_snapshots ss
         JOIN pgfr_record.snapshots s ON s.id = ss.snapshot_id
         WHERE s.captured_at >= now() - v_lookback
@@ -203,6 +220,7 @@ BEGIN
         SELECT
             ss.queryid,
             AVG(COALESCE(ss.calls_delta, 0)) AS avg_calls,
+            COUNT(*) AS n_samples,
             COUNT(DISTINCT date_trunc('day', s.captured_at)) AS days_sampled
         FROM pgfr_record.statement_snapshots ss
         JOIN pgfr_record.snapshots s ON s.id = ss.snapshot_id
@@ -218,9 +236,9 @@ BEGIN
             CASE
                 WHEN r.query_preview ILIKE '%RETRY%' OR r.query_preview ILIKE '%FOR UPDATE%'
                     THEN 'RETRY_STORM'
-                WHEN r.total_calls > COALESCE(b.avg_calls, 0) * 10
+                WHEN r.avg_calls > COALESCE(b.avg_calls, 0) * 10
                     THEN 'CACHE_MISS'
-                WHEN r.total_calls > COALESCE(b.avg_calls, 1) * v_threshold
+                WHEN r.avg_calls > COALESCE(b.avg_calls, 1) * v_threshold
                     THEN 'SPIKE'
                 ELSE 'NORMAL'
             END AS storm_type,
@@ -228,12 +246,14 @@ BEGIN
             COALESCE(b.avg_calls, 0)::BIGINT AS baseline_count,
             CASE
                 WHEN COALESCE(b.avg_calls, 0) > 0
-                THEN ROUND(r.total_calls::numeric / b.avg_calls, 2)
+                THEN ROUND(r.avg_calls::numeric / b.avg_calls, 2)
                 ELSE NULL
-            END AS multiplier
+            END AS multiplier,
+            r.n_samples::INTEGER AS recent_samples,
+            COALESCE(b.n_samples, 0)::INTEGER AS baseline_samples
         FROM recent_stats r
         LEFT JOIN baseline_stats b ON b.queryid = r.queryid
-        WHERE r.total_calls > COALESCE(b.avg_calls, 1) * v_threshold
+        WHERE r.avg_calls > COALESCE(b.avg_calls, 1) * v_threshold
            OR (r.query_preview ILIKE '%RETRY%' OR r.query_preview ILIKE '%FOR UPDATE%')
     )
     SELECT
@@ -249,7 +269,9 @@ BEGIN
         END AS severity,
         st.recent_count,
         st.baseline_count,
-        st.multiplier
+        st.multiplier,
+        st.recent_samples,
+        st.baseline_samples
     FROM storms st
     ORDER BY
         CASE
@@ -267,11 +289,13 @@ COMMENT ON FUNCTION pgfr_analyze.detect_query_storms(INTERVAL, NUMERIC) IS 'Dete
 Output columns:
   queryid: [dimension] [bigint] pg_stat_statements query identifier, as recorded in statement_snapshots.
   query_fingerprint: [dimension] [text] First 100 characters of the recorded query_preview for this queryid.
-  storm_type: [derived] [text] Classification (RETRY_STORM, CACHE_MISS, SPIKE, NORMAL) computed from query text patterns (RETRY, FOR UPDATE) and the ratio of the recent window total to the baseline per-snapshot average of calls_delta.
+  storm_type: [derived] [text] Classification (RETRY_STORM, CACHE_MISS, SPIKE, NORMAL) computed from query text patterns (RETRY, FOR UPDATE) and the ratio of the recent per-snapshot average of calls_delta to the baseline per-snapshot average (like units on both sides).
   severity: [derived] [text] LOW, MEDIUM, HIGH, or CRITICAL, from multiplier against the storm_severity_* config thresholds; RETRY_STORM is always CRITICAL.
   recent_count: [counter-delta] [count] Sum of per-snapshot calls_delta over the recent window (p_lookback, default 1 hour): the exact number of executions recorded in that window, modulo counter resets.
   baseline_count: [counter-delta] [count] Average calls_delta per snapshot over the baseline period (storm_baseline_days, default 7 days, excluding the recent window; at least 2 distinct days required), truncated to bigint; 0 when no baseline exists.
-  multiplier: [derived] [ratio] Dimensionless ratio of recent_count to the baseline per-snapshot average of calls_delta (the denominator); NULL when the baseline average is zero or missing. Note the asymmetry: the numerator is a whole-window total, the denominator a per-snapshot average.';
+  multiplier: [derived] [ratio] Dimensionless ratio of the recent per-snapshot average of calls_delta (numerator, over recent_samples snapshots) to the baseline per-snapshot average (denominator, over baseline_samples snapshots); NULL when the baseline average is zero or missing. Like units on both sides (Issue #102 fixed the earlier window-total vs per-snapshot asymmetry, which inflated this by roughly the tick count of the lookback window).
+  recent_samples: [derived] [count] Number of statement snapshots behind the recent window''s average: the denominator disclosure for the multiplier''s numerator.
+  baseline_samples: [derived] [count] Number of statement snapshots behind the baseline average; 0 when no baseline exists. The denominator disclosure for the multiplier''s denominator.';
 
 -- Diagnose probable causes for a query's performance regression
 CREATE OR REPLACE FUNCTION pgfr_analyze._diagnose_regression_causes(
@@ -344,6 +368,14 @@ END;
 $$;
 COMMENT ON FUNCTION pgfr_analyze._diagnose_regression_causes(BIGINT) IS 'Internal: Analyze a query to suggest probable causes for performance regression.';
 
+-- Issue #102: detect_regressions() gained z_score and sample-count columns,
+-- which changes its return type; CREATE OR REPLACE cannot do that.
+do $$
+begin
+    set local client_min_messages = warning;
+    drop function if exists pgfr_analyze.detect_regressions(interval, numeric);
+end $$;
+
 -- Detects performance regressions by comparing recent query metrics to baseline
 CREATE OR REPLACE FUNCTION pgfr_analyze.detect_regressions(
     p_lookback INTERVAL DEFAULT NULL,
@@ -360,7 +392,10 @@ RETURNS TABLE(
     current_avg_buffers NUMERIC,
     buffer_change_pct NUMERIC,
     detection_metric TEXT,
-    probable_causes TEXT[]
+    probable_causes TEXT[],
+    z_score NUMERIC,
+    baseline_samples INTEGER,
+    current_samples INTEGER
 )
 LANGUAGE plpgsql STABLE AS $$
 DECLARE
@@ -424,6 +459,7 @@ BEGIN
                 + COALESCE(ss.temp_blks_read_delta, 0)) AS avg_total_buffers,
             STDDEV(COALESCE(ss.shared_blks_hit_delta, 0) + COALESCE(ss.shared_blks_read_delta, 0)
                 + COALESCE(ss.temp_blks_read_delta, 0)) AS stddev_total_buffers,
+            COUNT(*) AS sample_count,
             COUNT(DISTINCT date_trunc('day', s.captured_at)) AS days_sampled
         FROM pgfr_record.statement_snapshots ss
         JOIN pgfr_record.snapshots s ON s.id = ss.snapshot_id
@@ -446,21 +482,26 @@ BEGIN
             b.avg_total_buffers::numeric AS baseline_avg_buffers,
             r.avg_total_buffers::numeric AS current_avg_buffers,
             ROUND(((r.avg_total_buffers - b.avg_total_buffers) / NULLIF(b.avg_total_buffers, 0))::numeric * 100, 2) AS buffer_change_pct,
-            -- Z-score calculation for statistical significance (based on detection metric)
+            -- Z-score for statistical significance (based on detection
+            -- metric). NULL, not 0, when the baseline dispersion is
+            -- unavailable: "no dispersion information" is a different fact
+            -- from "exactly at the baseline mean" (Issue #102).
             CASE
                 WHEN v_detection_metric = 'time' THEN
                     CASE
                         WHEN COALESCE(b.stddev_mean_time, 0) > 0
                         THEN (r.avg_mean_time - b.avg_mean_time) / b.stddev_mean_time
-                        ELSE 0
+                        ELSE NULL
                     END
                 ELSE
                     CASE
                         WHEN COALESCE(b.stddev_total_buffers, 0) > 0
                         THEN (r.avg_total_buffers - b.avg_total_buffers) / b.stddev_total_buffers
-                        ELSE 0
+                        ELSE NULL
                     END
             END AS z_score,
+            r.sample_count AS current_samples,
+            b.sample_count AS baseline_samples,
             -- Change percentage based on detection metric
             CASE
                 WHEN v_detection_metric = 'time' THEN
@@ -495,7 +536,10 @@ BEGIN
         ROUND(reg.current_avg_buffers, 0) AS current_avg_buffers,
         reg.buffer_change_pct,
         v_detection_metric AS detection_metric,
-        pgfr_analyze._diagnose_regression_causes(reg.queryid) AS probable_causes
+        pgfr_analyze._diagnose_regression_causes(reg.queryid) AS probable_causes,
+        ROUND(reg.z_score::numeric, 2) AS z_score,
+        reg.baseline_samples::INTEGER AS baseline_samples,
+        reg.current_samples::INTEGER AS current_samples
     FROM regressions reg
     WHERE reg.z_score > 2 OR reg.primary_change_pct > v_medium_max  -- Statistical filter or significant change
     ORDER BY
@@ -521,6 +565,9 @@ Output columns:
   current_avg_buffers: [derived] [blocks] Average per-snapshot total buffer traffic (same three deltas) over the recent window, rounded to whole blocks.
   buffer_change_pct: [derived] [percent] Buffer change: (current_avg_buffers minus baseline_avg_buffers) as a percentage of baseline_avg_buffers (the denominator); NULL when the baseline average is zero.
   detection_metric: [dimension] [text] Name of the metric that drove detection and severity: the regression_detection_metric config value, buffers (default) or time.
-  probable_causes: [derived] [text] Array of heuristic diagnostic strings from _diagnose_regression_causes: live pg_stat_statements temp spills and cache hit ratio, recent checkpoint activity from snapshots, or generic advice when nothing specific is found.';
+  probable_causes: [derived] [text] Array of heuristic diagnostic strings from _diagnose_regression_causes: live pg_stat_statements temp spills and cache hit ratio, recent checkpoint activity from snapshots, or generic advice when nothing specific is found.
+  z_score: [derived] [ratio] Effect size of the detected change: (recent average minus baseline average) of the detection metric, divided by the baseline standard deviation over baseline_samples snapshots. NULL when the baseline dispersion is unavailable (fewer than 2 distinct values), which is different from 0 (exactly at the baseline mean). Rows pass the internal filter when z_score exceeds 2 or the change percentage exceeds regression_severity_medium_max.
+  baseline_samples: [derived] [count] Number of statement snapshots behind the baseline averages and standard deviation: the sample-size disclosure for the baseline side.
+  current_samples: [derived] [count] Number of statement snapshots behind the recent-window averages (at least 2 by construction): the sample-size disclosure for the current side.';
 -- Generates a health report of flight recorder operations, including collection performance metrics,
 -- success rates, and schema size with qualitative assessments

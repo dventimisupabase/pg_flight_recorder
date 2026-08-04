@@ -402,6 +402,15 @@ BEGIN
     v_result := '# Capacity Report' || E'\n';
     v_result := v_result || 'Generated: ' || to_char(now(), 'YYYY-MM-DD HH24:MI:SS') ||
                 ' | Window: ' || p_time_window::text || E'\n';
+    -- Coverage disclosure (Issue #102): capacity figures derive from snapshot
+    -- ticks; say how many of the window's expected ticks actually exist.
+    v_result := v_result || COALESCE(
+        (SELECT format('Coverage: %s/%s snapshot ticks (%s%%); rates below are interval means over the window (see STATISTICS.md)',
+                       c.observed_samples, c.expected_samples,
+                       round(c.coverage_ratio * 100, 1))
+         FROM pgfr_analyze.coverage(p_time_window) c
+         WHERE c.collector = 'snapshot'),
+        'Coverage: no expected snapshot ticks in window') || E'\n';
 
     -- Process each metric from capacity_summary
     FOR v_row IN
