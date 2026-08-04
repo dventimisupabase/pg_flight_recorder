@@ -4,7 +4,7 @@
 [![Test Suite](https://github.com/dventimisupabase/pg_flight_recorder/actions/workflows/test.yml/badge.svg)](https://github.com/dventimisupabase/pg_flight_recorder/actions/workflows/test.yml)
 [![Lint](https://github.com/dventimisupabase/pg_flight_recorder/actions/workflows/lint.yml/badge.svg)](https://github.com/dventimisupabase/pg_flight_recorder/actions/workflows/lint.yml)
 
-Complete reference for [pg_flight_recorder](README.md). For installation and getting started, see the [README](README.md). For per-extension overviews, see [pgfr_record](pgfr_record/README.md) and [pgfr_analyze](pgfr_analyze/README.md).
+Complete reference for [pg_flight_recorder](README.md). For installation and getting started, see the [README](README.md). For per-extension overviews, see [pgfr_record](pgfr_record/README.md) and [pgfr_analyze](pgfr_analyze/README.md). For the statistical semantics of the recorder's measurements (sampling error, coverage, detection limits), see [STATISTICS.md](STATISTICS.md).
 
 ## Functions: pgfr_record (core)
 
