@@ -94,12 +94,35 @@ create table if not exists pgfr_record.snapshots_v2_default
 -- Additive upgrade path: ensure MultiXID age column exists on pre-existing installs
 alter table pgfr_record.snapshots_v2 add column if not exists datminmxid_age integer;
 
+-- Issue #73 foundation: column parity with the legacy snapshots heap, so the
+-- eventual cutover is a mechanical source flip instead of a shape migration.
+-- bgw_buffers_backend/_fsync were removed from pg_stat_bgwriter in PG17 but
+-- PG15/16 still report them and the legacy heap stores them; the 13
+-- xmin-horizon columns were only ever written to the legacy heap.
+alter table pgfr_record.snapshots_v2 add column if not exists bgw_buffers_backend bigint;
+alter table pgfr_record.snapshots_v2 add column if not exists bgw_buffers_backend_fsync bigint;
+alter table pgfr_record.snapshots_v2 add column if not exists activity_xmin xid;
+alter table pgfr_record.snapshots_v2 add column if not exists activity_xmin_age bigint;
+alter table pgfr_record.snapshots_v2 add column if not exists slot_xmin xid;
+alter table pgfr_record.snapshots_v2 add column if not exists slot_xmin_age bigint;
+alter table pgfr_record.snapshots_v2 add column if not exists slot_catalog_xmin xid;
+alter table pgfr_record.snapshots_v2 add column if not exists slot_catalog_xmin_age bigint;
+alter table pgfr_record.snapshots_v2 add column if not exists replication_xmin xid;
+alter table pgfr_record.snapshots_v2 add column if not exists replication_xmin_age bigint;
+alter table pgfr_record.snapshots_v2 add column if not exists prepared_xmin xid;
+alter table pgfr_record.snapshots_v2 add column if not exists prepared_xmin_age bigint;
+alter table pgfr_record.snapshots_v2 add column if not exists xmin_data_horizon_age bigint;
+alter table pgfr_record.snapshots_v2 add column if not exists xmin_any_horizon_age bigint;
+alter table pgfr_record.snapshots_v2 add column if not exists xmin_horizon_detail jsonb;
+
 comment on table pgfr_record.snapshots_v2 is
 'Cluster-level snapshot metrics, daily RANGE-partitioned by int4 sample_ts. '
 'No FK constraints: child tables use snapshot_id as logical (non-enforced) reference. '
 'Retention via truncate_old_partitions() / drop_ancient_partitions() — no DELETE. '
-'bgw_buffers_backend and bgw_buffers_backend_fsync dropped: removed in PG17. '
-'See SPEC §3, Q1.';
+'Column parity with the legacy snapshots heap (Issue #73): bgw_buffers_backend '
+'and bgw_buffers_backend_fsync are populated on PG15/16 only (removed from '
+'pg_stat_bgwriter in PG17), and the xmin-horizon columns are written back by '
+'snapshot()''s xmin section after insert. See SPEC §3, Q1.';
 
 -- ---------------------------------------------------------------------------
 -- 2. replication_snapshots_v2 — daily RANGE partitioned, no FK
@@ -124,6 +147,13 @@ create table if not exists pgfr_record.replication_snapshots_v2 (
 
 create table if not exists pgfr_record.replication_snapshots_v2_default
     partition of pgfr_record.replication_snapshots_v2 default;
+
+-- Issue #73 foundation: parity with the legacy twin's xmin/walsender columns,
+-- which snapshot()'s xmin section reads back for horizon attribution.
+alter table pgfr_record.replication_snapshots_v2 add column if not exists backend_xmin xid;
+alter table pgfr_record.replication_snapshots_v2 add column if not exists backend_xmin_age bigint;
+alter table pgfr_record.replication_snapshots_v2 add column if not exists slot_name text;
+alter table pgfr_record.replication_snapshots_v2 add column if not exists is_logical_walsender boolean;
 
 comment on table pgfr_record.replication_snapshots_v2 is
 'Per-replica replication state, daily RANGE-partitioned by int4 sample_ts. '
@@ -151,9 +181,16 @@ create table if not exists pgfr_record.vacuum_progress_snapshots_v2 (
 create table if not exists pgfr_record.vacuum_progress_snapshots_v2_default
     partition of pgfr_record.vacuum_progress_snapshots_v2 default;
 
+-- Issue #73 foundation: parity with the legacy twin (datid/relname), so
+-- recent_vacuum_progress and report()'s vacuum section can cut over.
+alter table pgfr_record.vacuum_progress_snapshots_v2 add column if not exists datid oid;
+alter table pgfr_record.vacuum_progress_snapshots_v2 add column if not exists relname text;
+
 comment on table pgfr_record.vacuum_progress_snapshots_v2 is
 'In-progress VACUUM state per snapshot tick, daily RANGE-partitioned by int4 sample_ts. '
-'snapshot_id is a logical (non-FK) reference to snapshots_v2.';
+'snapshot_id is a logical (non-FK) reference to snapshots_v2. Column parity with the '
+'legacy twin (Issue #73); on PG17+ max_dead_tuples carries max_dead_tuple_bytes and '
+'num_dead_tuples carries num_dead_item_ids, matching the legacy behavior.';
 
 -- ---------------------------------------------------------------------------
 -- 4. Pre-create today's partitions for all three new tables
@@ -216,6 +253,8 @@ declare
     v_wal_bytes         numeric;
     v_wal_write_time    double precision;  -- PG18+ dropped from pg_stat_wal; stays NULL
     v_wal_sync_time     double precision;  -- PG18+ dropped from pg_stat_wal; stays NULL
+    v_bgw_backend       bigint;            -- PG15/16 only; removed from pg_stat_bgwriter in PG17
+    v_bgw_backend_fsync bigint;            -- same
 begin
     v_sample_ts  := extract(epoch from now() - pgfr_record.epoch())::int4;
     v_pg_version := pgfr_record._pg_version();
@@ -227,11 +266,14 @@ begin
             from pg_stat_checkpointer
         $q$ into v_ckpt_timed, v_ckpt_requested, v_ckpt_write_time, v_ckpt_sync_time, v_ckpt_buffers;
     else
-        select checkpoints_timed, checkpoints_req, checkpoint_write_time,
-               checkpoint_sync_time, buffers_checkpoint
-        into   v_ckpt_timed, v_ckpt_requested, v_ckpt_write_time,
-               v_ckpt_sync_time, v_ckpt_buffers
-        from pg_stat_bgwriter;
+        execute $q$
+            select checkpoints_timed, checkpoints_req, checkpoint_write_time,
+                   checkpoint_sync_time, buffers_checkpoint,
+                   buffers_backend, buffers_backend_fsync
+            from pg_stat_bgwriter
+        $q$ into v_ckpt_timed, v_ckpt_requested, v_ckpt_write_time,
+                 v_ckpt_sync_time, v_ckpt_buffers,
+                 v_bgw_backend, v_bgw_backend_fsync;
     end if;
 
     -- pg_stat_io added in PG16; NULL on PG15
@@ -301,6 +343,7 @@ begin
         checkpoint_lsn, checkpoint_time,
         ckpt_timed, ckpt_requested, ckpt_write_time, ckpt_sync_time, ckpt_buffers,
         bgw_buffers_clean, bgw_maxwritten_clean, bgw_buffers_alloc,
+        bgw_buffers_backend, bgw_buffers_backend_fsync,
         autovacuum_workers, slots_count, slots_max_retained_wal,
         io_checkpointer_reads, io_checkpointer_read_time,
         io_checkpointer_writes, io_checkpointer_write_time,
@@ -334,6 +377,7 @@ begin
         v_ckpt_timed, v_ckpt_requested,
         v_ckpt_write_time, v_ckpt_sync_time, v_ckpt_buffers,
         bg.buffers_clean, bg.maxwritten_clean, bg.buffers_alloc,
+        v_bgw_backend, v_bgw_backend_fsync,
         (select count(*) from pg_stat_activity where state = 'active' and query not like '%autovacuum%')::integer,
         (select count(*) from pg_replication_slots)::integer,
         (select max(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn))
@@ -373,34 +417,66 @@ begin
         snapshot_id, sample_ts,
         pid, client_addr, application_name, state,
         sent_lsn, write_lsn, flush_lsn, replay_lsn,
-        write_lag, flush_lag, replay_lag, sync_state, reply_time
+        write_lag, flush_lag, replay_lag, sync_state, reply_time,
+        backend_xmin, backend_xmin_age, slot_name, is_logical_walsender
     )
     select
         p_snapshot_id, v_sample_ts,
-        pid, client_addr, application_name, state,
-        sent_lsn, write_lsn, flush_lsn, replay_lsn,
-        write_lag, flush_lag, replay_lag, sync_state, reply_time
-    from pg_stat_replication;
+        r.pid, r.client_addr, r.application_name, r.state,
+        r.sent_lsn, r.write_lsn, r.flush_lsn, r.replay_lsn,
+        r.write_lag, r.flush_lag, r.replay_lag, r.sync_state, r.reply_time,
+        r.backend_xmin,
+        case when r.backend_xmin is not null then age(r.backend_xmin) end,
+        sl.slot_name,
+        coalesce(sl.slot_type = 'logical', false)
+    from pg_stat_replication r
+    left join pg_replication_slots sl on sl.active_pid = r.pid;
 
     -- vacuum_progress_snapshots_v2
     perform pgfr_record._ensure_partition('vacuum_progress_snapshots_v2', current_date,
         'snapshot_id, sample_ts desc');
-    insert into pgfr_record.vacuum_progress_snapshots_v2 (
-        snapshot_id, sample_ts,
-        pid, datname, relid, phase,
-        heap_blks_total, heap_blks_scanned, heap_blks_vacuumed,
-        index_vacuum_count, max_dead_tuples, num_dead_tuples
-    )
-    select
-        p_snapshot_id, v_sample_ts,
-        pv.pid, pd.datname, pv.relid, pv.phase,
-        pv.heap_blks_total, pv.heap_blks_scanned, pv.heap_blks_vacuumed,
-        pv.index_vacuum_count,
-        -- PG17+ renamed: max_dead_tuples → max_dead_tuple_bytes, num_dead_tuples → num_dead_item_ids
-        null::bigint,  -- max_dead_tuples (legacy, no longer meaningful)
-        null::bigint   -- num_dead_tuples (legacy)
-    from pg_stat_progress_vacuum pv
-    left join pg_database pd on pd.oid = pv.datid;
+    -- Mirrors the legacy writer exactly (Issue #73 parity): datid/relname
+    -- included, and on PG17+ the renamed dead-tuple counters land in the
+    -- legacy column names, same as the legacy twin.
+    if v_pg_version >= 17 then
+        execute $q$
+            insert into pgfr_record.vacuum_progress_snapshots_v2 (
+                snapshot_id, sample_ts,
+                pid, datid, datname, relid, relname, phase,
+                heap_blks_total, heap_blks_scanned, heap_blks_vacuumed,
+                index_vacuum_count, max_dead_tuples, num_dead_tuples
+            )
+            select
+                $1, $2,
+                pv.pid, pv.datid, pd.datname, pv.relid, pc.relname, pv.phase,
+                pv.heap_blks_total, pv.heap_blks_scanned, pv.heap_blks_vacuumed,
+                pv.index_vacuum_count,
+                pv.max_dead_tuple_bytes,  -- renamed in PG17
+                pv.num_dead_item_ids      -- renamed in PG17
+            from pg_stat_progress_vacuum pv
+            left join pg_database pd on pd.oid = pv.datid
+            left join pg_class pc on pc.oid = pv.relid
+        $q$ using p_snapshot_id, v_sample_ts;
+    else
+        execute $q$
+            insert into pgfr_record.vacuum_progress_snapshots_v2 (
+                snapshot_id, sample_ts,
+                pid, datid, datname, relid, relname, phase,
+                heap_blks_total, heap_blks_scanned, heap_blks_vacuumed,
+                index_vacuum_count, max_dead_tuples, num_dead_tuples
+            )
+            select
+                $1, $2,
+                pv.pid, pv.datid, pd.datname, pv.relid, pc.relname, pv.phase,
+                pv.heap_blks_total, pv.heap_blks_scanned, pv.heap_blks_vacuumed,
+                pv.index_vacuum_count,
+                pv.max_dead_tuples,
+                pv.num_dead_tuples
+            from pg_stat_progress_vacuum pv
+            left join pg_database pd on pd.oid = pv.datid
+            left join pg_class pc on pc.oid = pv.relid
+        $q$ using p_snapshot_id, v_sample_ts;
+    end if;
 
 exception when others then
     raise warning 'pgfr_record: _snapshot_v2 failed [%]: %', sqlstate, sqlerrm;

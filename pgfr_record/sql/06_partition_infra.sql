@@ -357,6 +357,9 @@ declare
     v_rec             record;
     v_truncated_count int := 0;
     v_skipped_count   int := 0;
+    v_cutoff          int4;
+    v_arc_cutoff      int4;
+    v_max_ts          int4;
 begin
     for v_rec in
         select parent_table, partition_name
@@ -380,6 +383,59 @@ begin
                     v_rec.partition_name;
             when others then
                 -- Unexpected error: log and continue to next partition.
+                v_skipped_count := v_skipped_count + 1;
+                raise warning 'pgfr_record: Failed to truncate pgfr_record.%: %',
+                    v_rec.partition_name, sqlerrm;
+        end;
+    end loop;
+
+    -- Default partitions have no range bounds, so _partition_inventory()
+    -- never sees them and rows landing there (backdated inserts, ticks with
+    -- no pre-created partition) were retained forever (Issue #73
+    -- foundation). Truncate a default partition once EVERYTHING in it is
+    -- older than its parent's tier cutoff; a single in-retention row keeps
+    -- the whole partition, which errs on the side of keeping data.
+    v_cutoff := extract(epoch from (
+        now() - make_interval(days => coalesce(
+            pgfr_record._get_config('retention_snapshots_days', '30')::int, 30))
+        - pgfr_record.epoch()))::int4;
+    v_arc_cutoff := extract(epoch from (
+        now() - make_interval(days => coalesce(
+            pgfr_record._get_config('retention_archive_days', '7')::int, 7))
+        - pgfr_record.epoch()))::int4;
+
+    for v_rec in
+        select parent.relname as parent_table, child.relname as partition_name
+        from pg_inherits i
+        join pg_class parent on parent.oid = i.inhparent
+        join pg_class child  on child.oid  = i.inhrelid
+        join pg_namespace n  on n.oid = parent.relnamespace
+        where n.nspname = 'pgfr_record'
+          and child.relname like '%\_default'
+        order by parent.relname
+    loop
+        begin
+            execute format('select max(sample_ts) from pgfr_record.%I', v_rec.partition_name)
+            into v_max_ts;
+            if v_max_ts is null then
+                continue;  -- empty: nothing to reclaim
+            end if;
+            -- Parenthesized: plpgsql's IF-expression scanner stops at the
+            -- first depth-zero THEN, which the bare CASE's inner THEN trips.
+            if v_max_ts < (case when v_rec.parent_table like '%\_archive\_v2'
+                                then v_arc_cutoff else v_cutoff end) then
+                set local lock_timeout = '50ms';
+                execute format('truncate pgfr_record.%I', v_rec.partition_name);
+                v_truncated_count := v_truncated_count + 1;
+                raise notice 'pgfr_record: Truncated expired default partition pgfr_record.%',
+                    v_rec.partition_name;
+            end if;
+        exception
+            when lock_not_available then
+                v_skipped_count := v_skipped_count + 1;
+                raise notice 'pgfr_record: Skipped pgfr_record.% (lock_timeout exceeded, will retry next run)',
+                    v_rec.partition_name;
+            when others then
                 v_skipped_count := v_skipped_count + 1;
                 raise warning 'pgfr_record: Failed to truncate pgfr_record.%: %',
                     v_rec.partition_name, sqlerrm;
