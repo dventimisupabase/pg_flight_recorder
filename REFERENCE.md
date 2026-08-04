@@ -165,10 +165,10 @@ The legacy `ring_buffer_health()`, `rebuild_ring_buffers()`, and
 | View | Source | Description |
 |------|--------|-------------|
 | `pgfr_record.deltas` | Snapshots | Snapshot-over-snapshot changes for all metrics |
-| `pgfr_record.recent_waits` | Ring buffer + archives | Wait events (last 6-10h from ring, 7d from archives) |
-| `pgfr_record.recent_activity` | Ring buffer + archives | Active sessions with wait events and query previews |
-| `pgfr_record.recent_locks` | Ring buffer + archives | Lock contention: blocked/blocking pairs |
-| `pgfr_record.recent_idle_in_transaction` | Ring buffer + archives | Sessions idle in transaction with duration |
+| `pgfr_record.recent_waits` | Ring buffer only | Wait events; raw samples span roughly the last 2-4h at defaults (3 slots x 2h rotation, current slot partial). Older windows live in the aggregated 7-day rollup archives, which are separate tables, not a fallback of these views |
+| `pgfr_record.recent_activity` | Ring buffer only | Active sessions with wait events and query previews (same 2-4h raw window) |
+| `pgfr_record.recent_locks` | Ring buffer only | Lock contention: blocked/blocking pairs (same 2-4h raw window) |
+| `pgfr_record.recent_idle_in_transaction` | Ring buffer only | Sessions idle in transaction with duration (same 2-4h raw window) |
 | `pgfr_record.recent_replication` | Snapshots | Replication status: lag, LSN positions |
 | `pgfr_record.recent_vacuum_progress` | Snapshots | Vacuum operations in progress with % scanned/vacuumed |
 | `pgfr_record.archiver_status` | Snapshots | WAL archiver status with delta calculations |
@@ -632,7 +632,7 @@ The collection cadence itself is not a setting: both collectors run at a fixed o
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `schema_version` | `2.28` | Schema version (do not modify) |
-| `mode` | `normal` | Collection mode: `normal`, `light`, `emergency`, `kill` |
+| `mode` | `normal` | Collection mode: `normal`, `light`, `emergency` |
 | `enabled` | `true` | Whether collection is enabled |
 
 ### Collection intervals and retention
@@ -640,7 +640,7 @@ The collection cadence itself is not a setting: both collectors run at a fixed o
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `retention_snapshots_days` | `30` | Snapshot retention (days) |
-| `retention_archive_days` | `7` | Archive-tier partition retention (days). No active subscribers after the archive retirement, but kept as a placeholder for future archive-tier tables. |
+| `retention_archive_days` | `7` | Archive-tier partition retention (days) for the three ring rollup tables (`wait_event_rollups_archive_v2`, `lock_rollups_archive_v2`, `activity_rollups_archive_v2`), selected by their `_archive_v2` suffix in `_partition_inventory()` |
 | `retention_statements_days` | `30` | Statement snapshot retention (days) |
 | `retention_collection_stats_days` | `30` | Collection stats retention (days) |
 
@@ -877,17 +877,19 @@ SELECT * FROM pgfr_record.get_current_profile();
 
 ### Collection modes
 
+Modes control which optional collectors run; the one-minute collection cadence and the ring sampler itself run in every mode. To stop collection entirely, use `pgfr_record.disable()` (there is no `kill` mode; `set_mode()` rejects anything but the three modes below).
+
 | Mode | Behavior |
 |------|----------|
 | `normal` | Full collection: snapshots, samples, locks, progress, statements |
-| `light` | Reduced: skips lock contention and vacuum progress collection |
-| `emergency` | Minimal: snapshots only, no ring buffer sampling |
-| `kill` | All collection disabled |
+| `light` | Skips vacuum-progress collection; lock sampling stays on |
+| `emergency` | Skips lock and vacuum-progress collection; snapshots and ring sampling continue |
 
 ```sql
-SELECT pgfr_record.set_mode('kill');      -- Emergency stop
-SELECT pgfr_record.set_mode('normal');    -- Resume
+SELECT pgfr_record.set_mode('emergency'); -- Shed optional collectors
+SELECT pgfr_record.set_mode('normal');    -- Resume full collection
 SELECT * FROM pgfr_record.get_mode();     -- Check current mode
+SELECT pgfr_record.disable();             -- Emergency stop (unschedules all jobs)
 ```
 
 ### Automatic protections
@@ -901,4 +903,4 @@ SELECT * FROM pgfr_record.get_mode();     -- Check current mode
 
 ### Manual mode control
 
-Use `pgfr_record.set_mode()` to manually switch collection modes: `normal`, `light`, `emergency`, `kill`.
+Use `pgfr_record.set_mode()` to manually switch collection modes: `normal`, `light`, `emergency`. Use `pgfr_record.disable()` / `pgfr_record.enable()` to stop and restart collection entirely.

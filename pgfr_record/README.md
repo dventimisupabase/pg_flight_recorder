@@ -14,7 +14,7 @@ pgfr_record installs a set of tables, views, and pg_cron jobs that continuously 
 - **xmin horizon attribution**: captures who is pinning the xmin horizon (long-running txns, stale replication slots, hot-standby-feedback, prepared xacts) so wraparound forensics isn't reduced to live-querying four catalogs after the offender has disconnected
 - **Partition-based retention** for snapshot tables (default 30 days), enforced via partition drop rather than DELETE
 - **Safety mechanisms**: circuit breaker, load shedding
-- **Collection modes**: normal, light, emergency, kill
+- **Collection modes**: normal, light, emergency (modes shed optional collectors; `disable()` stops collection entirely)
 - **Configurable profiles**: default, production_safe, development, troubleshooting, minimal_overhead
 - **Delta views**: snapshot-over-snapshot changes for trend analysis
 
