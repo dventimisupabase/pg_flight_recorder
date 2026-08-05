@@ -504,6 +504,19 @@ BEGIN
         RAISE EXCEPTION 'Unsupported PostgreSQL version: %. Requires 15, 16, 17, or 18.', v_pg_version;
     END IF;
     PERFORM pgfr_record._record_section_success(v_stat_id);
+    -- Issue #73 PR 2: these two collectors were driven by the retired
+    -- AFTER INSERT dual-write trigger; snapshot() now calls them directly.
+    -- Each guards itself so a failure never blocks the rest of snapshot().
+    BEGIN
+        PERFORM pgfr_record._collect_consumption_snapshot(v_snapshot_id);
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'pgfr_record: consumption collection failed: %', SQLERRM;
+    END;
+    BEGIN
+        PERFORM pgfr_record._snapshot_children_v2(v_snapshot_id);
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'pgfr_record: v2 children collection failed: %', SQLERRM;
+    END;
     BEGIN
         PERFORM pgfr_record._set_section_timeout();
         INSERT INTO pgfr_record.replication_snapshots (

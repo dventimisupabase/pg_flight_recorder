@@ -285,11 +285,11 @@ Grouped by concurrency/duration profile rather than raw `query_preview` text (un
 
 ### Snapshots (durable, 30-day default retention)
 
-**`pgfr_record.snapshots`** -- System-level statistics (WAL, checkpoints, I/O, connections, conflicts)
+**`pgfr_record.snapshots`** -- System-level statistics (WAL, checkpoints, I/O, connections, conflicts). Since the Issue #73 cutover this is a compatibility **view** over the daily-partitioned `snapshots_v2` (`snapshot_id` exposed as `id`); INSERT routes through an INSTEAD OF trigger that assigns `id` from the legacy sequence and derives `sample_ts` from `captured_at`, while UPDATE/DELETE auto-route. Retention is partition truncation (`retention_snapshots_days` tier) plus `cleanup()`'s DELETE; the child tables' FK cascades were replaced by explicit orphan reaping in `cleanup()`. The retired heap survives as `snapshots_legacy` until the final cutover PR.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `id` | serial | Snapshot ID |
+| `id` | integer | Snapshot ID (alias of `snapshots_v2.snapshot_id`, cast to the legacy SERIAL type; unique by convention, assigned by the sequence) |
 | `captured_at` | timestamptz | Capture timestamp |
 | `pg_version` | int | PostgreSQL major version |
 | `wal_records` | bigint | Cumulative WAL records |

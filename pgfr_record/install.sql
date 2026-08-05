@@ -23,6 +23,7 @@
 --   10_consumption_sampler.sql consumption ledger: block/WAL/tuple flow + reset-guarded deltas
 --   11_ring_rollups.sql      durable wait/lock/activity rollups fed from rotate_ring()
 --   12_consumption_weekly_flows.sql weekly-grain ratio reconstruction for the 90-day trend window
+--   13_snapshots_cutover.sql snapshots becomes a compat view over snapshots_v2 (Issue #73)
 
 \ir sql/01_schema.sql
 \ir sql/02_tables.sql
@@ -38,6 +39,7 @@
 \ir sql/10_consumption_sampler.sql
 \ir sql/11_ring_rollups.sql
 \ir sql/12_consumption_weekly_flows.sql
+\ir sql/13_snapshots_cutover.sql
 
 -- Post-install: migrate deprecated config key aliases to canonical names.
 -- Idempotent; safe on fresh install (keys won't exist yet) and upgrades.

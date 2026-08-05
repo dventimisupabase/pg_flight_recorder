@@ -65,6 +65,23 @@ BEGIN
         DELETE FROM pgfr_record.snapshots WHERE captured_at < v_snapshots_cutoff RETURNING 1
     )
     SELECT count(*) INTO v_deleted_snapshots FROM deleted;
+    -- The FK cascades from the child heaps died with the snapshots cutover
+    -- (Issue #73: a view cannot be an FK target), so the children are reaped
+    -- explicitly: a child row whose parent id no longer exists is dead,
+    -- which also covers parents removed by partition truncation.
+    DELETE FROM pgfr_record.replication_snapshots
+    WHERE snapshot_id < (SELECT coalesce(min(id), 9223372036854775807) FROM pgfr_record.snapshots);
+    DELETE FROM pgfr_record.vacuum_progress_snapshots
+    WHERE snapshot_id < (SELECT coalesce(min(id), 9223372036854775807) FROM pgfr_record.snapshots);
+    DELETE FROM pgfr_record.table_snapshots
+    WHERE snapshot_id < (SELECT coalesce(min(id), 9223372036854775807) FROM pgfr_record.snapshots);
+    DELETE FROM pgfr_record.index_snapshots
+    WHERE snapshot_id < (SELECT coalesce(min(id), 9223372036854775807) FROM pgfr_record.snapshots);
+    DELETE FROM pgfr_record.config_snapshots
+    WHERE snapshot_id < (SELECT coalesce(min(id), 9223372036854775807) FROM pgfr_record.snapshots);
+    DELETE FROM pgfr_record.db_role_config_snapshots
+    WHERE snapshot_id < (SELECT coalesce(min(id), 9223372036854775807) FROM pgfr_record.snapshots);
+
     WITH deleted AS (
         DELETE FROM pgfr_record.collection_stats WHERE started_at < v_stats_cutoff RETURNING 1
     )

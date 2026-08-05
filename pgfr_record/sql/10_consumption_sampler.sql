@@ -388,30 +388,16 @@ comment on function pgfr_record._collect_consumption_snapshot(bigint) is
 'Consumption ledger collector: inserts one row into consumption_snapshots_v2 per '
 'tick. No-ops under pg_is_in_recovery() (primary only). Non-fatal on failure '
 '(wrapped in EXCEPTION, emits WARNING) so it never blocks the rest of snapshot(). '
-'Called from _snapshot_v2_trigger() alongside _snapshot_v2() — no separate '
-'pg_cron job. See Issue #81.';
+'Called directly from snapshot() after its main insert (the dual-write '
+'trigger that used to drive it is retired, Issue #73); no separate pg_cron '
+'job. See Issue #81.';
 
 -- ---------------------------------------------------------------------------
--- 5. Wire into the existing v2 dual-write trigger.
---    _snapshot_v2_trigger() is CREATE OR REPLACEd here (originally defined in
---    09_phase3_snapshots_v2.sql) to also call the consumption collector. This
---    keeps the new table's concerns in their own file while reusing the
---    existing per-tick trigger rather than registering a new cron job.
+-- 5. The dual-write trigger wiring that used to live here is retired
+--    (Issue #73 PR 2): snapshot() calls _collect_consumption_snapshot()
+--    directly after its main insert, and the trigger machinery is dropped in
+--    09_phase3_snapshots_v2.sql.
 -- ---------------------------------------------------------------------------
-create or replace function pgfr_record._snapshot_v2_trigger()
-returns trigger
-language plpgsql as $$
-begin
-    perform pgfr_record._snapshot_v2(new.id::bigint);
-    perform pgfr_record._collect_consumption_snapshot(new.id::bigint);
-    return new;
-end;
-$$;
-
-comment on function pgfr_record._snapshot_v2_trigger() is
-'AFTER INSERT trigger on snapshots: dual-writes to snapshots_v2 and aligned '
-'child tables, and collects the consumption ledger (consumption_snapshots_v2). '
-'Non-invasive integration with existing snapshot() function. See Issue #81.';
 
 -- ---------------------------------------------------------------------------
 -- 6. consumption_deltas — reset-guarded per-tick component deltas.

@@ -17,7 +17,8 @@ SELECT plan(32);
 SELECT has_schema('pgfr_record', 'Schema pgfr_record should exist');
 
 -- Test all 14 tables exist (snapshots + ring buffers + aggregates + config + collection_stats)
-SELECT has_table('pgfr_record', 'snapshots', 'Table pgfr_record.snapshots should exist');
+-- Issue #73 cutover: snapshots is now a compatibility view over snapshots_v2.
+SELECT has_view('pgfr_record', 'snapshots', 'pgfr_record.snapshots exists as the compat view');
 SELECT has_table('pgfr_record', 'replication_snapshots', 'Table pgfr_record.replication_snapshots should exist');
 SELECT has_table('pgfr_record', 'statement_snapshots', 'Table pgfr_record.statement_snapshots should exist');
 -- Aggregates + archives retired alongside the legacy ring (6 has_table
