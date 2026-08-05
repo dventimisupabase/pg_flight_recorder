@@ -128,7 +128,18 @@ declare
     v_at_boundary       boolean := false;
     v_locked            boolean;
     v_rows_inserted     INT;
+    v_stmt_status       TEXT;
 begin
+    -- HIGH_CHURN gate (Issue #126): above 95% PGSS utilization, entries are
+    -- being evicted between ticks and deltas would misattribute re-entered
+    -- queries, so skip the whole tick (mirrors snapshot()'s legacy-path gate;
+    -- pgss_dealloc_warning marks the surrounding collected ticks).
+    select status into v_stmt_status from pgfr_record._check_statements_health();
+    if v_stmt_status = 'HIGH_CHURN' then
+        raise warning 'pgfr_record: Skipping statement_snapshots_v2 collection - high churn detected (>95%% utilization)';
+        return;
+    end if;
+
     -- Ensure partition exists for today (O(1) on happy path)
     perform pgfr_record._ensure_partition('statement_snapshots_v2', CURRENT_DATE);
 
@@ -349,6 +360,7 @@ comment on function pgfr_record._collect_statement_snapshot_sparse(bigint) is
 'Handles: crash recovery (UNLOGGED empty), clean-restart desync (stats_reset check), '
 'daily partition boundary (TRUNCATE+rebuild), advisory lock (skip if rebuild in flight), '
 'PGSS dealloc tracking (cluster-wide, not per-db). '
+'Skips the tick entirely when _check_statements_health() reports HIGH_CHURN (Issue #126). '
 'Wrapped in EXCEPTION block — failure does not abort other collection sections.';
 
 -- Register config keys for sparse collector observability
