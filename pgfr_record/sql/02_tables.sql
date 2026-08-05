@@ -71,7 +71,19 @@ CREATE TABLE IF NOT EXISTS pgfr_record.snapshots (
     max_catalog_oid             BIGINT,
     large_object_count          BIGINT
 );
-CREATE INDEX IF NOT EXISTS snapshots_captured_at_idx ON pgfr_record.snapshots(captured_at);
+-- Post-cutover (Issue #73), snapshots is a view; the index lives on the
+-- retired heap (snapshots_legacy) until the final PR drops it. CREATE INDEX
+-- IF NOT EXISTS validates the target relation before the name check, so it
+-- must be guarded, not just IF-NOT-EXISTS'd.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'pgfr_record' AND c.relname = 'snapshots' AND c.relkind = 'r'
+    ) THEN
+        CREATE INDEX IF NOT EXISTS snapshots_captured_at_idx ON pgfr_record.snapshots(captured_at);
+    END IF;
+END $$;
 
 -- Captures replication metrics from pg_stat_replication for each snapshot
 -- Tracks streaming replication connection state, LSN positions, and lag for each replica
@@ -203,6 +215,15 @@ END $$;
 DO $$
 BEGIN
     SET LOCAL client_min_messages = warning;
+    -- Post-cutover (Issue #73), pgfr_record.snapshots is a view over
+    -- snapshots_v2 (which carries these columns natively); only ALTER while
+    -- the legacy heap is still the live relation.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'pgfr_record' AND c.relname = 'snapshots' AND c.relkind = 'r'
+    ) THEN
+        RETURN;
+    END IF;
     ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS activity_xmin XID;
     ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS activity_xmin_age BIGINT;
     ALTER TABLE pgfr_record.snapshots ADD COLUMN IF NOT EXISTS slot_xmin XID;

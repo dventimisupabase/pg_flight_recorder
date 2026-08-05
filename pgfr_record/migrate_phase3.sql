@@ -1,5 +1,18 @@
 -- SPDX-License-Identifier: Apache-2.0
 -- Copyright 2026 David A. Ventimiglia
+-- =============================================================================
+-- SUPERSEDED (Issue #73 PR 2): the snapshots cutover is now part of the
+-- standard install (pgfr_record/sql/13_snapshots_cutover.sql). Do NOT run
+-- this script on schema_version >= 2.30 installs; the guard below aborts if
+-- pgfr_record.snapshots is already a view.
+-- =============================================================================
+do $$
+begin
+    if exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+               where n.nspname = 'pgfr_record' and c.relname = 'snapshots' and c.relkind = 'v') then
+        raise exception 'migrate_phase3.sql is superseded: pgfr_record.snapshots is already a view (cutover shipped in install, Issue #73)';
+    end if;
+end $$;
 
 -- migrate_phase3.sql — pg_flight_recorder Phase 3 migration
 --

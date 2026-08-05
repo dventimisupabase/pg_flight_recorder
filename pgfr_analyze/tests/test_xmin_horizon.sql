@@ -25,9 +25,11 @@ SELECT ok(
     'fresh DB fires no XMIN_HORIZON_STALL or CATALOG_XMIN_HORIZON_STALL');
 
 -- Synthetic fixture: insert a snapshot we can mutate.
+-- Issue #73 cutover: snapshots is a view; ON CONFLICT needs a unique index
+-- the partitioned base cannot host, so delete-then-insert instead.
+DELETE FROM pgfr_record.snapshots WHERE id = 10001;
 INSERT INTO pgfr_record.snapshots (id, captured_at, pg_version, datfrozenxid_age)
-VALUES (10001, now() - interval '5 minutes', current_setting('server_version_num')::int / 10000, 100)
-ON CONFLICT (id) DO UPDATE SET captured_at = EXCLUDED.captured_at;
+VALUES (10001, now() - interval '5 minutes', current_setting('server_version_num')::int / 10000, 100);
 
 -- 2. XMIN_HORIZON_STALL: high at 60% of autovacuum_freeze_max_age.
 UPDATE pgfr_record.snapshots

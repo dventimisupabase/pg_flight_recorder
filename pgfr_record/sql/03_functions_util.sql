@@ -291,7 +291,7 @@ $$;
 
 -- Non-profile settings (system defaults that profiles don't manage)
 INSERT INTO pgfr_record.config (key, value) VALUES
-    ('schema_version', '2.29'),
+    ('schema_version', '2.30'),
     ('mode', 'normal'),
     ('statements_enabled', 'auto'),
     ('statements_top_n', '50'),

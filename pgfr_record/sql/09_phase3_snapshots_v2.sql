@@ -218,197 +218,29 @@ end $$;
 --    Separate function so it can be tested independently and added to
 --    existing snapshot() call chain without restructuring.
 -- ---------------------------------------------------------------------------
-create or replace function pgfr_record._snapshot_v2(p_snapshot_id bigint)
+-- Issue #73 PR 2: the dual-write path is retired. snapshot() now writes
+-- snapshots_v2 directly through the pgfr_record.snapshots compat view (see
+-- 13_snapshots_cutover.sql), so _snapshot_v2()'s catalog re-read and main
+-- insert are superseded; only the replication/vacuum v2 twin collection
+-- survives, extracted here and called from snapshot() alongside
+-- _collect_consumption_snapshot().
+do $$
+begin
+    set local client_min_messages = warning;
+    drop trigger if exists snapshot_v2_dual_write on pgfr_record.snapshots;
+    drop function if exists pgfr_record._snapshot_v2_trigger();
+    drop function if exists pgfr_record._snapshot_v2(bigint);
+end $$;
+
+create or replace function pgfr_record._snapshot_children_v2(p_snapshot_id bigint)
 returns void
 language plpgsql as $$
 declare
-    v_sample_ts         int4;
-    v_pg_version        integer;
-    v_ckpt_timed        bigint;
-    v_ckpt_requested    bigint;
-    v_ckpt_write_time   double precision;
-    v_ckpt_sync_time    double precision;
-    v_ckpt_buffers      bigint;
-    v_io_ckpt_reads     bigint;
-    v_io_ckpt_read_t    double precision;
-    v_io_ckpt_writes    bigint;
-    v_io_ckpt_write_t   double precision;
-    v_io_ckpt_fsyncs    bigint;
-    v_io_ckpt_fsync_t   double precision;
-    v_io_av_reads       bigint;
-    v_io_av_read_t      double precision;
-    v_io_av_writes      bigint;
-    v_io_av_write_t     double precision;
-    v_io_cli_reads      bigint;
-    v_io_cli_read_t     double precision;
-    v_io_cli_writes     bigint;
-    v_io_cli_write_t    double precision;
-    v_io_bgw_reads      bigint;
-    v_io_bgw_read_t     double precision;
-    v_io_bgw_writes     bigint;
-    v_io_bgw_write_t    double precision;
-    v_confl_logicalslot bigint := 0;
-    v_wal_records       bigint;
-    v_wal_fpi           bigint;
-    v_wal_bytes         numeric;
-    v_wal_write_time    double precision;  -- PG18+ dropped from pg_stat_wal; stays NULL
-    v_wal_sync_time     double precision;  -- PG18+ dropped from pg_stat_wal; stays NULL
-    v_bgw_backend       bigint;            -- PG15/16 only; removed from pg_stat_bgwriter in PG17
-    v_bgw_backend_fsync bigint;            -- same
+    v_sample_ts  int4;
+    v_pg_version integer;
 begin
     v_sample_ts  := extract(epoch from now() - pgfr_record.epoch())::int4;
     v_pg_version := pgfr_record._pg_version();
-
-    -- pg_stat_checkpointer was added in PG17; fall back to pg_stat_bgwriter on PG15/16
-    if v_pg_version >= 17 then
-        execute $q$
-            select num_timed, num_requested, write_time, sync_time, buffers_written
-            from pg_stat_checkpointer
-        $q$ into v_ckpt_timed, v_ckpt_requested, v_ckpt_write_time, v_ckpt_sync_time, v_ckpt_buffers;
-    else
-        execute $q$
-            select checkpoints_timed, checkpoints_req, checkpoint_write_time,
-                   checkpoint_sync_time, buffers_checkpoint,
-                   buffers_backend, buffers_backend_fsync
-            from pg_stat_bgwriter
-        $q$ into v_ckpt_timed, v_ckpt_requested, v_ckpt_write_time,
-                 v_ckpt_sync_time, v_ckpt_buffers,
-                 v_bgw_backend, v_bgw_backend_fsync;
-    end if;
-
-    -- pg_stat_io added in PG16; NULL on PG15
-    if v_pg_version >= 16 then
-        execute $q$
-            select
-                sum(reads)      filter (where backend_type = 'checkpointer'),
-                sum(read_time)  filter (where backend_type = 'checkpointer'),
-                sum(writes)     filter (where backend_type = 'checkpointer'),
-                sum(write_time) filter (where backend_type = 'checkpointer'),
-                sum(fsyncs)     filter (where backend_type = 'checkpointer'),
-                sum(fsync_time) filter (where backend_type = 'checkpointer'),
-                sum(reads)      filter (where backend_type = 'autovacuum worker'),
-                sum(read_time)  filter (where backend_type = 'autovacuum worker'),
-                sum(writes)     filter (where backend_type = 'autovacuum worker'),
-                sum(write_time) filter (where backend_type = 'autovacuum worker'),
-                sum(reads)      filter (where backend_type = 'client backend'),
-                sum(read_time)  filter (where backend_type = 'client backend'),
-                sum(writes)     filter (where backend_type = 'client backend'),
-                sum(write_time) filter (where backend_type = 'client backend'),
-                sum(reads)      filter (where backend_type = 'background writer'),
-                sum(read_time)  filter (where backend_type = 'background writer'),
-                sum(writes)     filter (where backend_type = 'background writer'),
-                sum(write_time) filter (where backend_type = 'background writer')
-            from pg_stat_io
-        $q$ into
-            v_io_ckpt_reads,  v_io_ckpt_read_t,  v_io_ckpt_writes,  v_io_ckpt_write_t,
-            v_io_ckpt_fsyncs, v_io_ckpt_fsync_t,
-            v_io_av_reads,    v_io_av_read_t,    v_io_av_writes,    v_io_av_write_t,
-            v_io_cli_reads,   v_io_cli_read_t,   v_io_cli_writes,   v_io_cli_write_t,
-            v_io_bgw_reads,   v_io_bgw_read_t,   v_io_bgw_writes,   v_io_bgw_write_t;
-    end if;
-    -- PG15: all io_* vars remain NULL
-
-    -- confl_active_logicalslot added in PG17
-    if v_pg_version >= 17 then
-        execute $q$
-            select confl_active_logicalslot
-            from pg_stat_database_conflicts
-            where datid = (select oid from pg_database where datname = current_database())
-        $q$ into v_confl_logicalslot;
-        v_confl_logicalslot := coalesce(v_confl_logicalslot, 0);
-    end if;
-
-    -- pg_stat_wal dropped wal_write_time / wal_sync_time in PG18. Capture via
-    -- version-guarded EXECUTE so the parser never sees the removed columns on
-    -- PG18+. CASE-WHEN guards don't work here: column refs are resolved at
-    -- parse time, not runtime.
-    if v_pg_version >= 18 then
-        execute $q$select wal_records, wal_fpi, wal_bytes from pg_stat_wal$q$
-            into v_wal_records, v_wal_fpi, v_wal_bytes;
-        -- v_wal_write_time, v_wal_sync_time remain NULL
-    else
-        execute $q$
-            select wal_records, wal_fpi, wal_bytes, wal_write_time, wal_sync_time
-            from pg_stat_wal
-        $q$ into v_wal_records, v_wal_fpi, v_wal_bytes, v_wal_write_time, v_wal_sync_time;
-    end if;
-
-    -- ensure today's partition exists (O(1) on happy path)
-    perform pgfr_record._ensure_partition('snapshots_v2', current_date,
-        'snapshot_id, sample_ts desc');
-
-    insert into pgfr_record.snapshots_v2 (
-        snapshot_id, sample_ts, captured_at, pg_version,
-        wal_records, wal_fpi, wal_bytes, wal_write_time, wal_sync_time,
-        checkpoint_lsn, checkpoint_time,
-        ckpt_timed, ckpt_requested, ckpt_write_time, ckpt_sync_time, ckpt_buffers,
-        bgw_buffers_clean, bgw_maxwritten_clean, bgw_buffers_alloc,
-        bgw_buffers_backend, bgw_buffers_backend_fsync,
-        autovacuum_workers, slots_count, slots_max_retained_wal,
-        io_checkpointer_reads, io_checkpointer_read_time,
-        io_checkpointer_writes, io_checkpointer_write_time,
-        io_checkpointer_fsyncs, io_checkpointer_fsync_time,
-        io_autovacuum_reads, io_autovacuum_read_time,
-        io_autovacuum_writes, io_autovacuum_write_time,
-        io_client_reads, io_client_read_time,
-        io_client_writes, io_client_write_time,
-        io_bgwriter_reads, io_bgwriter_read_time,
-        io_bgwriter_writes, io_bgwriter_write_time,
-        temp_files, temp_bytes,
-        xact_commit, xact_rollback, blks_read, blks_hit,
-        connections_active, connections_total, connections_max,
-        db_size_bytes, datfrozenxid_age, datminmxid_age,
-        archived_count, last_archived_wal, last_archived_time,
-        failed_count, last_failed_wal, last_failed_time, archiver_stats_reset,
-        confl_tablespace, confl_lock, confl_snapshot,
-        confl_bufferpin, confl_deadlock, confl_active_logicalslot,
-        max_catalog_oid, large_object_count
-    )
-    select
-        p_snapshot_id,
-        v_sample_ts,
-        now(),
-        v_pg_version,
-        v_wal_records, v_wal_fpi, v_wal_bytes,
-        v_wal_write_time, v_wal_sync_time,
-        -- checkpoint_lsn and checkpoint_time come from pg_control_checkpoint(),
-        -- not pg_stat_checkpointer (which only has counters and timing)
-        pgcc.checkpoint_lsn, pgcc.checkpoint_time,
-        v_ckpt_timed, v_ckpt_requested,
-        v_ckpt_write_time, v_ckpt_sync_time, v_ckpt_buffers,
-        bg.buffers_clean, bg.maxwritten_clean, bg.buffers_alloc,
-        v_bgw_backend, v_bgw_backend_fsync,
-        (select count(*) from pg_stat_activity where state = 'active' and query not like '%autovacuum%')::integer,
-        (select count(*) from pg_replication_slots)::integer,
-        (select max(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn))
-            from pg_replication_slots where active)::bigint,
-        -- io stats from pg_stat_io (PG16+); NULL on PG15
-        v_io_ckpt_reads,  v_io_ckpt_read_t,  v_io_ckpt_writes,  v_io_ckpt_write_t,
-        v_io_ckpt_fsyncs, v_io_ckpt_fsync_t,
-        v_io_av_reads,    v_io_av_read_t,    v_io_av_writes,    v_io_av_write_t,
-        v_io_cli_reads,   v_io_cli_read_t,   v_io_cli_writes,   v_io_cli_write_t,
-        v_io_bgw_reads,   v_io_bgw_read_t,   v_io_bgw_writes,   v_io_bgw_write_t,
-        db.temp_files, db.temp_bytes,
-        db.xact_commit, db.xact_rollback, db.blks_read, db.blks_hit,
-        (select count(*) filter (where state = 'active') from pg_stat_activity)::integer,
-        (select count(*) from pg_stat_activity)::integer,
-        current_setting('max_connections')::integer,
-        pg_database_size(current_database())::bigint,
-        age((select datfrozenxid from pg_database where datname = current_database())),
-        mxid_age((select datminmxid from pg_database where datname = current_database())),
-        ar.archived_count, ar.last_archived_wal, ar.last_archived_time,
-        ar.failed_count, ar.last_failed_wal, ar.last_failed_time, ar.stats_reset,
-        cs.confl_tablespace, cs.confl_lock, cs.confl_snapshot,
-        cs.confl_bufferpin, cs.confl_deadlock,
-        v_confl_logicalslot,
-        (select max(oid) from pg_class),
-        (select count(*) from pg_largeobject_metadata)
-    from pg_control_checkpoint() pgcc
-    cross join pg_stat_bgwriter bg
-    cross join (select * from pg_stat_database where datname = current_database()) db
-    cross join pg_stat_archiver ar
-    cross join (select * from pg_stat_database_conflicts where datid =
-                    (select oid from pg_database where datname = current_database())) cs;
 
     -- replication_snapshots_v2
     perform pgfr_record._ensure_partition('replication_snapshots_v2', current_date,
@@ -479,16 +311,12 @@ begin
     end if;
 
 exception when others then
-    raise warning 'pgfr_record: _snapshot_v2 failed [%]: %', sqlstate, sqlerrm;
+    raise warning 'pgfr_record: _snapshot_children_v2 failed [%]: %', sqlstate, sqlerrm;
 end;
 $$;
 
-comment on function pgfr_record._snapshot_v2(bigint) is
-'Dual-write counterpart of snapshot(): inserts into snapshots_v2, '
-'replication_snapshots_v2, vacuum_progress_snapshots_v2. '
-'Called at end of snapshot() for dual operation during Phase 3 migration. '
-'Failure is non-fatal: wrapped in EXCEPTION, emits WARNING. '
-'Drop once migration to v2-only is complete. See SPEC §3.';
+comment on function pgfr_record._snapshot_children_v2(bigint) is
+'Collects the replication_snapshots_v2 and vacuum_progress_snapshots_v2 twins for one snapshot tick. Called from snapshot() after its main insert (the dual-write trigger that used to drive this is retired, Issue #73). Non-fatal on failure.';
 
 -- ---------------------------------------------------------------------------
 -- 6. Wire _snapshot_v2() into the existing snapshot() function
@@ -498,25 +326,11 @@ comment on function pgfr_record._snapshot_v2(bigint) is
 -- end of snapshot() by adding a call in its final block.
 -- Rather than rewriting the large snapshot() function, we patch it via a
 -- trigger on snapshots that dual-writes to snapshots_v2.
-create or replace function pgfr_record._snapshot_v2_trigger()
-returns trigger
-language plpgsql as $$
-begin
-    perform pgfr_record._snapshot_v2(new.id::bigint);
-    return new;
-end;
-$$;
-
-comment on function pgfr_record._snapshot_v2_trigger() is
-'AFTER INSERT trigger on snapshots: dual-writes to snapshots_v2 and aligned '
-'child tables. Non-invasive integration with existing snapshot() function. '
-'Drop trigger and function once migration to v2-only snapshot() is complete.';
-
-drop trigger if exists snapshot_v2_dual_write on pgfr_record.snapshots;
-create trigger snapshot_v2_dual_write
-    after insert on pgfr_record.snapshots
-    for each row
-    execute function pgfr_record._snapshot_v2_trigger();
+-- The AFTER INSERT dual-write trigger and its function are retired
+-- (Issue #73 PR 2): fresh installs cut snapshots over to the compat view in
+-- the same run (13_snapshots_cutover.sql), and snapshot() drives the v2
+-- children and the consumption ledger directly. The standing drops live
+-- above, next to _snapshot_children_v2().
 
 -- ---------------------------------------------------------------------------
 -- 7. pgfr_precreate_partitions cron scheduling is consolidated into
