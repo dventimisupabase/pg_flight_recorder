@@ -9,7 +9,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(13);
+SELECT plan(14);
 
 -- -----------------------------------------------------------------------------
 -- 1. Shape
@@ -17,11 +17,14 @@ SELECT plan(13);
 
 SELECT has_view('pgfr_record', 'snapshots', 'snapshots is the compat view');
 
-SELECT is(
-    (SELECT c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-     WHERE n.nspname = 'pgfr_record' AND c.relname = 'snapshots_legacy'),
-    'r',
-    'the retired heap survives as snapshots_legacy until the final PR');
+SELECT hasnt_table('pgfr_record', 'snapshots_legacy',
+    'the retired heap is dropped at the end of the conversion (Issue #73 PR 3)');
+
+-- Issue #121 regression: export_for_upgrade() errored on standard installs
+-- (min(sample_ts) on heaps that never had the column).
+SELECT lives_ok(
+    $$SELECT * FROM pgfr_record.export_for_upgrade()$$,
+    'export_for_upgrade() executes (Issue #121)');
 
 SELECT is(
     (SELECT count(*)::int FROM pg_constraint

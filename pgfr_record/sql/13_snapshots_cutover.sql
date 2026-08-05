@@ -16,9 +16,9 @@
 --      FK target, and a table partitioned by sample_ts cannot host the unique
 --      index on snapshot_id the FKs would need (cleanup() reaps the child
 --      heaps explicitly instead, see 05_functions_ops.sql),
---   3. decouple the id sequence from the heap (so the final PR's drop cannot
---      cascade it away) and rename the heap to snapshots_legacy (kept until
---      PR 3 as a rollback anchor).
+--   3. decouple the id sequence from the heap, rename the heap out of the
+--      way, and (final step, at the end of this file) drop it: everything it
+--      held lives in snapshots_v2 with ids preserved.
 --
 -- The steady-state objects (recreated on every install):
 --   - the view, built dynamically from snapshots_v2's columns (snapshot_id
@@ -34,6 +34,11 @@
 -- are preserved: the backfill carries legacy ids, and the sequence continues
 -- the same series.
 --------------------------------------------------------------------------------
+
+-- The id sequence outlives the heap (decoupled during conversion); make its
+-- existence unconditional so the INSTEAD OF trigger can never lose its id
+-- source, whatever install history preceded this run.
+create sequence if not exists pgfr_record.snapshots_id_seq;
 
 do $$
 declare
@@ -94,7 +99,9 @@ begin
         execute format('alter table %s drop constraint %I', v_rec.tbl, v_rec.conname);
     end loop;
 
-    -- 3. Keep the id series alive independently of the heap, then retire it.
+    -- 3. Keep the id series alive independently of the heap, then move the
+    --    heap out of the way (dropped at the end of this file, after the
+    --    dependent views are rebound).
     alter sequence pgfr_record.snapshots_id_seq owned by none;
     alter table pgfr_record.snapshots rename to snapshots_legacy;
 end $$;
@@ -195,6 +202,14 @@ drop trigger if exists snapshots_view_insert on pgfr_record.snapshots;
 create trigger snapshots_view_insert
     instead of insert on pgfr_record.snapshots
     for each row execute function pgfr_record._snapshots_view_insert();
+
+-- ---------------------------------------------------------------------------
+-- Final step (Issue #73, PR 3): the retired heap is dropped. Every legacy
+-- row was backfilled into snapshots_v2 above (ids preserved) and every
+-- dependent view was rebound, so nothing references it; a plain DROP (no
+-- CASCADE) errors loudly if that ever stops being true.
+-- ---------------------------------------------------------------------------
+drop table if exists pgfr_record.snapshots_legacy;
 
 -- ---------------------------------------------------------------------------
 -- Column-level semantic annotations (Issue #99 grammar, see STATISTICS.md).

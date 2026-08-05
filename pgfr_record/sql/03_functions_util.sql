@@ -289,9 +289,15 @@ LANGUAGE sql STABLE AS $$
     ) AS t(profile, key, value, description);
 $$;
 
+-- schema_version is the one seed that must OVERWRITE on re-install: it
+-- records which install script last ran, and upgrades were silently keeping
+-- the old value under the shared ON CONFLICT DO NOTHING below.
+INSERT INTO pgfr_record.config (key, value, updated_at)
+VALUES ('schema_version', '2.31', now())
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+
 -- Non-profile settings (system defaults that profiles don't manage)
 INSERT INTO pgfr_record.config (key, value) VALUES
-    ('schema_version', '2.30'),
     ('mode', 'normal'),
     ('statements_enabled', 'auto'),
     ('statements_top_n', '50'),
