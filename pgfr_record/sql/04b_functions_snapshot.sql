@@ -841,6 +841,35 @@ BEGIN
                        )
                    END
              WHERE id = v_snapshot_id;
+            -- Issue #73 foundation: dual-write the xmin horizon to the v2
+            -- twin so snapshots_v2 reaches column parity before the cutover.
+            -- Guarded so a v2 hiccup can never fail the legacy write-back.
+            BEGIN
+                UPDATE pgfr_record.snapshots_v2
+                   SET activity_xmin         = v_activity_xmin,
+                       activity_xmin_age     = v_activity_age,
+                       slot_xmin             = v_slot_xmin,
+                       slot_xmin_age         = v_slot_age,
+                       slot_catalog_xmin     = v_slot_catalog_xmin,
+                       slot_catalog_xmin_age = v_slot_catalog_age,
+                       replication_xmin      = v_replication_xmin,
+                       replication_xmin_age  = v_replication_age,
+                       prepared_xmin         = v_prepared_xmin,
+                       prepared_xmin_age     = v_prepared_age,
+                       xmin_data_horizon_age = v_data_age,
+                       xmin_any_horizon_age  = v_any_age,
+                       xmin_horizon_detail   = CASE
+                           WHEN v_dominant_source IS NULL THEN NULL
+                           ELSE jsonb_build_object(
+                               'source', v_dominant_source,
+                               'age', v_any_age,
+                               'holder', v_dominant_detail
+                           )
+                       END
+                 WHERE snapshot_id = v_snapshot_id;
+            EXCEPTION WHEN OTHERS THEN
+                RAISE WARNING 'pgfr_record: snapshots_v2 xmin dual-write failed: %', SQLERRM;
+            END;
             PERFORM pgfr_record._record_section_success(v_stat_id);
         END;
     EXCEPTION WHEN OTHERS THEN
