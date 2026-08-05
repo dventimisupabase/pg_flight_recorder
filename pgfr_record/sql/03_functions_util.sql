@@ -293,7 +293,7 @@ $$;
 -- records which install script last ran, and upgrades were silently keeping
 -- the old value under the shared ON CONFLICT DO NOTHING below.
 INSERT INTO pgfr_record.config (key, value, updated_at)
-VALUES ('schema_version', '2.31', now())
+VALUES ('schema_version', '2.32', now())
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
 
 -- Non-profile settings (system defaults that profiles don't manage)

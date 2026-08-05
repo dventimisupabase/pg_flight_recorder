@@ -19,7 +19,7 @@
 
 begin;
 
-select plan(28);
+select plan(30);
 
 -- ---------------------------------------------------------------------------
 -- Helper: ensure a clean test partition exists
@@ -683,6 +683,74 @@ begin
 end $$;
 
 select ok(true, 'T28: _rebuild_statement_last_state stores caller-supplied p_sample_ts (B7 guard)');
+
+-- ===========================================================================
+-- T29: control for the HIGH_CHURN gate test (Issue #126)
+--      With a healthy PGSS, a current-tick last_state with poisoned calls
+--      makes the collector insert one row per PGSS entry. Proves the setup
+--      T30 reuses, so T30's zero-row assertion is meaningful.
+-- ===========================================================================
+do $$
+begin
+    if not exists (select 1 from pg_extension where extname = 'pg_stat_statements') then
+        raise notice 'T29: pg_stat_statements not available — skipping';
+        return;
+    end if;
+
+    -- Fresh last_state at a current tick (avoids the reset and day-boundary
+    -- rebuild paths), then poison calls so every PGSS row qualifies.
+    perform pgfr_record._rebuild_statement_last_state(
+        extract(epoch from now() - pgfr_record.epoch())::int4);
+    update pgfr_record.statement_last_state set calls = -1;
+
+    perform pgfr_record._collect_statement_snapshot_sparse(-88887);
+end $$;
+
+select case
+    when not exists (select 1 from pg_extension where extname = 'pg_stat_statements')
+    then skip('T29: pg_stat_statements not available — HIGH_CHURN control skipped')
+    else ok(
+        exists (select 1 from pgfr_record.statement_snapshots_v2 where snapshot_id = -88887),
+        'T29: healthy PGSS with poisoned last_state inserts rows (control for T30)')
+end;
+
+-- ===========================================================================
+-- T30: HIGH_CHURN gates the v2 sparse collector (Issue #126)
+--      Same setup as T29, but _check_statements_health() is mocked to report
+--      HIGH_CHURN; the collector must skip the tick and insert nothing.
+--      The mock is rolled back with the rest of the transaction.
+-- ===========================================================================
+create or replace function pgfr_record._check_statements_health()
+returns table(
+    current_statements bigint,
+    max_statements integer,
+    utilization_pct numeric,
+    dealloc_count bigint,
+    status text
+)
+language sql as $mock$
+    select 4900::bigint, 5000, 98.0::numeric, 42::bigint, 'HIGH_CHURN'::text;
+$mock$;
+
+do $$
+begin
+    if not exists (select 1 from pg_extension where extname = 'pg_stat_statements') then
+        raise notice 'T30: pg_stat_statements not available — skipping';
+        return;
+    end if;
+
+    update pgfr_record.statement_last_state set calls = -1;
+
+    perform pgfr_record._collect_statement_snapshot_sparse(-88888);
+end $$;
+
+select case
+    when not exists (select 1 from pg_extension where extname = 'pg_stat_statements')
+    then skip('T30: pg_stat_statements not available — HIGH_CHURN gate test skipped')
+    else ok(
+        not exists (select 1 from pgfr_record.statement_snapshots_v2 where snapshot_id = -88888),
+        'T30: HIGH_CHURN skips v2 sparse statement collection entirely (Issue #126)')
+end;
 
 -- Cleanup: rebuild last_state to a clean state after tests
 do $$
