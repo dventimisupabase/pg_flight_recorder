@@ -545,8 +545,8 @@ BEGIN
     RAISE NOTICE 'To export all data, run:';
     RAISE NOTICE '  psql -At -c "SELECT pgfr_record.report(now() - interval ''30 days'', now())" > backup.md';
     RAISE NOTICE '';
-    RAISE NOTICE 'Or for specific tables:';
-    RAISE NOTICE '  pg_dump -t pgfr_record.snapshots -t pgfr_record.statement_snapshots ... > backup.sql';
+    RAISE NOTICE 'Or for specific tables (snapshots is a view; dump its partitioned base):';
+    RAISE NOTICE '  pg_dump -t ''pgfr_record.snapshots_v2*'' -t pgfr_record.statement_snapshots ... > backup.sql';
     RAISE NOTICE '';
 
     -- Return summary of data that would be exported
@@ -556,19 +556,28 @@ BEGIN
     FROM pgfr_record.snapshots;
 
     RETURN QUERY
+    -- Issue #121: this heap has no sample_ts column; the date range comes
+    -- from the parent snapshot ticks.
     SELECT 'statement_snapshots'::TEXT, count(*)::BIGINT,
-           min(sample_ts)::TEXT || ' to ' || max(sample_ts)::TEXT
-    FROM pgfr_record.statement_snapshots;
+           min(s.captured_at)::TEXT || ' to ' || max(s.captured_at)::TEXT
+    FROM pgfr_record.statement_snapshots t
+    JOIN pgfr_record.snapshots s ON s.id = t.snapshot_id;
 
     RETURN QUERY
+    -- Issue #121: this heap has no sample_ts column; the date range comes
+    -- from the parent snapshot ticks.
     SELECT 'table_snapshots'::TEXT, count(*)::BIGINT,
-           min(sample_ts)::TEXT || ' to ' || max(sample_ts)::TEXT
-    FROM pgfr_record.table_snapshots;
+           min(s.captured_at)::TEXT || ' to ' || max(s.captured_at)::TEXT
+    FROM pgfr_record.table_snapshots t
+    JOIN pgfr_record.snapshots s ON s.id = t.snapshot_id;
 
     RETURN QUERY
+    -- Issue #121: this heap has no sample_ts column; the date range comes
+    -- from the parent snapshot ticks.
     SELECT 'index_snapshots'::TEXT, count(*)::BIGINT,
-           min(sample_ts)::TEXT || ' to ' || max(sample_ts)::TEXT
-    FROM pgfr_record.index_snapshots;
+           min(s.captured_at)::TEXT || ' to ' || max(s.captured_at)::TEXT
+    FROM pgfr_record.index_snapshots t
+    JOIN pgfr_record.snapshots s ON s.id = t.snapshot_id;
 
     -- Archives + aggregates (activity_samples_archive, lock_samples_archive,
     -- wait_samples_archive, wait_event_aggregates, activity_aggregates,

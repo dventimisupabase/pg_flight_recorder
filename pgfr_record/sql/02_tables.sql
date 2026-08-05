@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS pgfr_record.snapshots (
     large_object_count          BIGINT
 );
 -- Post-cutover (Issue #73), snapshots is a view; the index lives on the
--- retired heap (snapshots_legacy) until the final PR drops it. CREATE INDEX
+-- transient pre-cutover heap on fresh installs. CREATE INDEX
 -- IF NOT EXISTS validates the target relation before the name check, so it
 -- must be guarded, not just IF-NOT-EXISTS'd.
 DO $$
