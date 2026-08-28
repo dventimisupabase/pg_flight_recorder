@@ -20,6 +20,32 @@ $$;
 COMMENT ON FUNCTION pgfr_record._introspect_columns(text) IS
     'Live column names + type names for a schema-qualified source_view, in attnum order. Raises undefined_table if the relation does not currently exist (unmet precondition, e.g. an extension not installed).';
 
+-- payload->>i (the ->> operator) extracts a jsonb array element as its
+-- JSON-text representation -- for a scalar this is fine ('123', 'true'),
+-- but for a nested array value (e.g. pg_settings.enumvals, a text[]) it
+-- yields JSON syntax ('["a", "b"]', square brackets), which is not valid
+-- Postgres array literal syntax ('{a,b}', curly braces) and fails
+-- ::type[] with "malformed array literal". Array-typed columns need
+-- jsonb_array_elements_text() reassembled into a real array instead, with
+-- an explicit guard for a captured NULL (a JSON null scalar at that
+-- position, not an empty array, which jsonb_array_elements_text() cannot
+-- iterate).
+CREATE OR REPLACE FUNCTION pgfr_record._jsonb_element_cast(p_type_name text, p_index int)
+RETURNS text
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT CASE
+        WHEN p_type_name LIKE '%[]' THEN
+            format(
+                '(CASE WHEN payload->%s = ''null''::jsonb THEN NULL::%s ELSE ARRAY(SELECT jsonb_array_elements_text(payload->%s))::%s END)',
+                p_index, p_type_name, p_index, p_type_name
+            )
+        ELSE
+            format('(payload->>%s)::%s', p_index, p_type_name)
+    END;
+$$;
+COMMENT ON FUNCTION pgfr_record._jsonb_element_cast(text, int) IS
+    'The correct SQL expression (referencing a payload column in scope) to extract and cast payload array position p_index to p_type_name -- handling array-typed columns (jsonb_array_elements_text reassembly) separately from scalars (a plain ->> cast), since ->> yields JSON-bracket syntax for a nested array value, not a Postgres array literal.';
+
 -- Archives (§4.1, §4.3.1, §4.4). For each enabled, version-applicable
 -- manifest row: create the uniform-shape archive table if absent, and
 -- mint the payload_schemas row for its current live column layout --
@@ -180,7 +206,11 @@ BEGIN
                 IF v_variant_pos IS NULL THEN
                     v_exprs := v_exprs || format('NULL::%s AS %I', v_current.type_names[v_pos], v_col);
                 ELSE
-                    v_exprs := v_exprs || format('(payload->>%s)::%s AS %I', v_variant_pos - 1, v_variant.type_names[v_variant_pos], v_col);
+                    v_exprs := v_exprs || format(
+                        '%s AS %I',
+                        pgfr_record._jsonb_element_cast(v_variant.type_names[v_variant_pos], v_variant_pos - 1),
+                        v_col
+                    );
                 END IF;
             END LOOP;
 

@@ -26,6 +26,7 @@
 --                            scheduled by milestone 5's enable(), not here)
 --   09_column_classes.sql    generate_column_classes(): the counter/odometer/
 --                            gauge/label/key legend (§3.1, §4.5)
+--   10_definitional.sql      state_as_of(), resolve_relation(), resolve_index()
 
 \ir sql/01_schema.sql
 \ir sql/02_manifest.sql
@@ -36,6 +37,7 @@
 \ir sql/07_capture_plan.sql
 \ir sql/08_collector.sql
 \ir sql/09_column_classes.sql
+\ir sql/10_definitional.sql
 
 -- Create every enabled target's archive table + initial partitions,
 -- regenerate the typed presentation views, rebuild the capture plan, and

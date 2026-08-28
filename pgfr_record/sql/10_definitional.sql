@@ -1,0 +1,92 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
+-- Definitional helpers (§4.5): mechanical, deterministic, threshold-free
+-- functions over recorded facts. Nothing here has an opinion; everything
+-- here has exactly one correct answer, which is the agent test (§1
+-- invariant 2, acceptance criterion 11).
+
+-- state_as_of(): LOCF reconstruction (§6). Bounded by the containing
+-- anchor without a separate last-anchor tracking table, using the same
+-- reasoning as run_tier()'s anchor detection: anchor cadence equals
+-- partition width by manifest construction, so "the containing anchor"
+-- for time t is simply the start of t's own partition -- never search
+-- further back than that.
+--
+-- Returns SETOF record (not a fixed shape) because each source_view has
+-- a different column set; callers supply it via a column-definition
+-- list, the standard PostgreSQL idiom for dynamically-shaped set-
+-- returning functions, e.g.:
+--
+--   SELECT * FROM pgfr_record.state_as_of('pg_catalog.pg_stat_database', now())
+--       AS t(captured_at timestamptz, datid oid, datname name, ...);
+--
+-- \d pgfr_record.v_pg_stat_database shows the exact column list to use.
+CREATE OR REPLACE FUNCTION pgfr_record.state_as_of(p_source_view text, p_t timestamptz)
+RETURNS SETOF record
+LANGUAGE plpgsql STABLE AS $$
+DECLARE
+    v_manifest record;
+    v_view     text;
+    v_unit     text;
+    v_bucket   timestamptz;
+    v_key_cols text;
+    v_sql      text;
+BEGIN
+    SELECT * INTO v_manifest FROM pgfr_record.manifest WHERE source_view = p_source_view;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'pgfr_record.state_as_of: unknown source_view %', p_source_view;
+    END IF;
+
+    v_view   := 'pgfr_record.v_' || pgfr_record._short_name(p_source_view);
+    v_unit   := pgfr_record._partition_unit(v_manifest.retention);
+    v_bucket := date_trunc(v_unit, p_t);
+
+    IF v_manifest.keyless OR array_length(v_manifest.natural_key, 1) IS NULL THEN
+        -- Keyless or singleton: one identity. Every capture of a
+        -- non-debounced target (true of every current keyless/singleton
+        -- row) is already a complete snapshot, so LOCF is just "the
+        -- latest capture at or before t".
+        v_sql := format(
+            'SELECT * FROM %s WHERE captured_at = (SELECT max(captured_at) FROM %s WHERE captured_at <= $1 AND captured_at >= $2)',
+            v_view, v_view
+        );
+    ELSE
+        SELECT string_agg(quote_ident(k), ', ') INTO v_key_cols FROM unnest(v_manifest.natural_key) k;
+        v_sql := format(
+            'SELECT DISTINCT ON (%s) * FROM %s WHERE captured_at <= $1 AND captured_at >= $2 ORDER BY %s, captured_at DESC',
+            v_key_cols, v_view, v_key_cols
+        );
+    END IF;
+
+    RETURN QUERY EXECUTE v_sql USING p_t, v_bucket;
+END;
+$$;
+
+COMMENT ON FUNCTION pgfr_record.state_as_of(text, timestamptz) IS
+    'LOCF reconstruction (§6): for each key, the most recent sample at or before t, never searching further back than the start of t''s own partition (anchor cadence = partition width, by manifest construction). Returns SETOF record -- supply a column-definition list matching \d pgfr_record.v_<short_name>, e.g. state_as_of(''pg_catalog.pg_stat_database'', now()) AS t(captured_at timestamptz, datid oid, ...).';
+
+-- resolve_relation() / resolve_index() (§4.5): join through the catalog
+-- identity dimension as of t, OID-reuse-safe by construction. Mechanically
+-- identical -- pg_class covers every relkind, including indexes -- named
+-- separately only so a caller resolving an indexrelid doesn't have to
+-- know that.
+CREATE OR REPLACE FUNCTION pgfr_record.resolve_relation(p_oid oid, p_t timestamptz DEFAULT clock_timestamp())
+RETURNS TABLE(captured_at timestamptz, oid oid, relname name, relnamespace oid, nspname name, relkind "char", relispartition boolean)
+LANGUAGE sql STABLE AS $$
+    SELECT * FROM pgfr_record.state_as_of('pgfr_record.src_catalog_identity', p_t)
+        AS t(captured_at timestamptz, oid oid, relname name, relnamespace oid, nspname name, relkind "char", relispartition boolean)
+    WHERE t.oid = p_oid;
+$$;
+
+COMMENT ON FUNCTION pgfr_record.resolve_relation(oid, timestamptz) IS
+    'What relation was this OID, as of t? Survives OID reuse across DROP/CREATE by reading pgfr_record.src_catalog_identity''s history (§4.5) rather than the live catalog. Defaults t to now(), matching a live lookup when no historical point is specified.';
+
+CREATE OR REPLACE FUNCTION pgfr_record.resolve_index(p_oid oid, p_t timestamptz DEFAULT clock_timestamp())
+RETURNS TABLE(captured_at timestamptz, oid oid, relname name, relnamespace oid, nspname name, relkind "char", relispartition boolean)
+LANGUAGE sql STABLE AS $$
+    SELECT * FROM pgfr_record.resolve_relation(p_oid, p_t);
+$$;
+
+COMMENT ON FUNCTION pgfr_record.resolve_index(oid, timestamptz) IS
+    'What index was this OID, as of t? Identical mechanism to resolve_relation() -- pg_class covers every relkind -- named separately for callers resolving an indexrelid.';
