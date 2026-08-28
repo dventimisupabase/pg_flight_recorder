@@ -1,175 +1,35 @@
 # pgfr_analyze
 
-Reporting and analysis extension for [pgfr_record](https://database.dev/dventimi/pgfr_record). Turns raw flight recorder data into anomaly reports, incident forensics, and capacity planning.
+Optional reporting and analysis extension for [pgfr_record](https://github.com/dventimisupabase/pg_flight_recorder). Reads `pgfr_record`'s captured data and definitional helpers; never writes to the core schema.
 
 ## Contents
 
-- [What it does](#what-it-does)
-- [Key features](#key-features)
-- [Consumption trend engine (in progress)](#consumption-trend-engine-in-progress)
-- [Requirements](#requirements)
+- [Status](#status)
+- [What it's designed to own](#what-its-designed-to-own)
 - [Install](#install)
-- [Quick start](#quick-start)
-- [Functions](#functions)
-  - [Comparison and analysis](#comparison-and-analysis)
-  - [Reporting](#reporting)
-  - [Forensics](#forensics)
-  - [Performance analysis](#performance-analysis)
-  - [Capacity planning](#capacity-planning)
-  - [Configuration tracking](#configuration-tracking)
-  - [Pre-flight](#pre-flight)
-- [Related extensions](#related-extensions)
+- [Related](#related)
 
-## What it does
+## Status
 
-pgfr_analyze reads the snapshot and ring buffer data collected by pgfr_record and provides functions for anomaly detection, performance regression analysis, time-travel forensics, blast radius analysis, capacity planning, and configuration change tracking. It never writes to the core schema -- it only reads and computes.
+Not yet rebuilt for pgfr v2. The schema exists as a placeholder: `CREATE SCHEMA pgfr_analyze` with a `COMMENT ON SCHEMA` explaining the deferral, and no tables, views, or functions. This keeps the two-extension install pipeline working while `pgfr_analyze` is built out, and lets `pgfr_record` ship and be useful on its own in the meantime: everything definitional (what was captured, its shape, what kind of quantity each column is, how identity resolves over time) lives in `pgfr_record`, so a `pgfr_record`-only install already answers real troubleshooting questions. See [REFERENCE.md](../REFERENCE.md#pgfr_analyze) and [pgfr_record/README.md](../pgfr_record/README.md).
 
-## Key features
+## What it's designed to own
 
-- **Anomaly detection**: checkpoint anomalies, buffer pressure, temp file spills, lock contention, XID **and MultiXID** wraparound risk (configurable warning/critical ratios; see `xid_*_ratio` / `mxid_*_ratio` config keys in [REFERENCE.md](../REFERENCE.md#xid--multixid-wraparound-thresholds))
-- **Query storm and regression detection**: find abnormal query patterns and performance regressions with severity classification
-- **Time-travel forensics**: `what_happened_at()` for point-in-time analysis, `incident_timeline()` for event reconstruction
-- **Blast radius analysis**: measure the impact of high-cost queries on system resources
-- **Capacity planning**: `capacity_summary()`, `quarterly_review()`, and the `capacity_dashboard` view
-- **Configuration tracking**: detect PostgreSQL config changes, view config at a point in time, health check recommendations
-- **Comprehensive reporting**: `report()` for full diagnostics, `summary_report()`, `performance_report()`
-
-## Consumption trend engine (in progress)
-
-A multi-phase feature tracking specific-consumption drift in `pgfr_record`'s consumption ledger against the database's own history (see the top-level repo's Issue #83). All four phases have landed:
-
-- `consumption_metric_series` -- long-format unpivot of the 8 basket metrics from `pgfr_record.consumption_daily_flows`
-- `consumption_trends` -- persisted trend assessments (one row per day per metric, kept indefinitely -- tiny by construction)
-- `_refresh_consumption_trends()` -- Theil-Sen slope (robust to outliers) plus a classification distinguishing a genuine level shift (`step`) from a gradual change (`drift`) from noise (`stable`), via model-fit comparison (line vs. best-fitting two-level step) rather than a shift-magnitude threshold, which can't reliably tell the two shapes apart
-- **Composition-drift guard**: a `step` or `drift` classification is overridden to `composition` when the window's workload-shape indicators (`read_write_tuple_ratio`, `xact_per_s`, etc.) also moved beyond threshold between the window's two halves -- the honesty check preventing a workload change (new feature, traffic mix shift) from being reported as a fitness change (bloat, decay). A metric that never moved stays `stable` regardless of workload shape, since there's nothing to misattribute. See `composition_change` on `consumption_trends`.
-- **`consumption_trend_report(datname)`** -- the report entry point. Refreshes `consumption_trends` first (no cron dependency, same as every other function here), then renders a markdown report with `Specific consumption` / `Amplification factors` / `Substrate` sections (Issue #83's own vocabulary, used verbatim), an explicit declared baseline window, a sparkline per metric, and purely factual classification language throughout -- no adjectives, ever, not even for unflagged drift.
-
-**90-day/weekly-aggregated window (Issue #92)**: a second window for real seasonality handling -- "business workloads breathe on a 7-day cycle" -- aggregating by rolling 7-day bucket rather than by day. `_refresh_consumption_trends_weekly()` is a deliberate sibling to `_refresh_consumption_trends()`, not a unified rewrite (see that function's own file header for why), sharing the same `consumption_trends` table (`window_days = 84` distinguishes these rows -- 12 complete weeks, not literally 90 days, since a partial final week would reintroduce the distortion aggregating exists to avoid) and the same `consumption_trend_min_r2` / `consumption_trend_step_r2_margin` / `consumption_trend_shape_guard_pct` thresholds, gated by its own `consumption_trend_min_weeks` (default 8). The composition-drift guard applies here too, at two fixed 6-week halves instead of two fixed 14-day halves. `consumption_trend_report()` shows both windows for every metric: one heading per metric, followed by its 28-day/daily block and its 84-day/weekly block, each with its own baseline, classification, and sparkline -- closing out #92.
-
-## Requirements
-
-- [pgfr_record](https://database.dev/dventimi/pgfr_record) must be installed first
-- Optional: `pg_stat_statements` for query-level analysis
+Everything requiring a threshold, baseline, or opinion, consuming `pgfr_record`'s column classes and definitional helpers, owning none of them: anomaly, regression, and storm detection; trend analysis; capacity views; and `report()`, a markdown diagnostic report for a time window. See `pgfr-v2-context-pack.md`'s Appendix for the full design.
 
 ## Install
 
-```sql
--- Install core first if not already installed
-\i pgfr_record/install.sql
-SELECT pgfr_record.enable();
+Requires `pgfr_record` installed first:
 
--- Then install analyze
-\i pgfr_analyze/install.sql
+```bash
+psql --single-transaction -f pgfr_record/install.sql
+psql --single-transaction -f pgfr_analyze/install.sql
 ```
 
-## Quick start
+Currently installs the placeholder schema only.
 
-```sql
--- Compare two snapshots
-SELECT * FROM pgfr_analyze.compare(now() - '1 hour', now());
+## Related
 
--- Wait event summary over a time range
-SELECT * FROM pgfr_analyze.wait_summary(now() - '1 hour', now());
-
--- Generate a diagnostic report for the last hour
-SELECT pgfr_analyze.report('1 hour');
-
--- Anomaly report over a time range
-SELECT * FROM pgfr_analyze.anomaly_report(now() - '1 hour', now());
-
--- What was happening at a specific time?
-SELECT * FROM pgfr_analyze.what_happened_at('2024-01-15 14:32');
-
--- Reconstruct an incident timeline
-SELECT * FROM pgfr_analyze.incident_timeline(
-    '2024-01-15 14:00'::timestamptz,
-    '2024-01-15 15:00'::timestamptz
-);
-
--- Detect performance regressions
-SELECT * FROM pgfr_analyze.detect_regressions('1 day');
-
--- Detect query storms
-SELECT * FROM pgfr_analyze.detect_query_storms('1 hour');
-
--- Capacity summary
-SELECT * FROM pgfr_analyze.capacity_summary('7 days');
-```
-
-## Functions
-
-### Comparison and analysis
-
-| Function                                         | Description                                |
-|--------------------------------------------------|--------------------------------------------|
-| `compare(start, end)`                            | Compare two snapshots side-by-side         |
-| `wait_summary(start, end)`                       | Wait event breakdown over a time range     |
-| `statement_compare(start, end)`                  | Query performance changes between points   |
-| `activity_at(timestamp)`                         | Activity snapshot closest to a timestamp   |
-| `recent_waits_current()`                         | Current wait event data from ring buffer   |
-| `recent_activity_current()`                      | Current activity data from ring buffer     |
-| `recent_locks_current()`                         | Current lock data from ring buffer         |
-
-### Reporting
-
-| Function                         | Description                      |
-|----------------------------------|----------------------------------|
-| `report(interval)`               | Comprehensive diagnostic report  |
-| `report(start, end)`             | Report for a specific time range |
-| `summary_report(start, end)`     | Summary statistics               |
-| `performance_report(start, end)` | Performance-focused report       |
-| `anomaly_report(start, end)`     | Detailed anomaly analysis        |
-| `check_alerts()`                 | Check active alert conditions    |
-| `consumption_trend_report(datname)` | Specific-consumption drift report against the database's own history |
-
-### Forensics
-
-| Function                        | Description                        |
-|---------------------------------|------------------------------------|
-| `what_happened_at(timestamp)`   | Point-in-time analysis             |
-| `incident_timeline(start, end)` | Reconstruct event timeline         |
-| `blast_radius(queryid)`         | Measure impact of a specific query |
-| `blast_radius_report(interval)` | Report on high-impact queries      |
-
-### Performance analysis
-
-| Function                           | Description                          |
-|------------------------------------|--------------------------------------|
-| `detect_query_storms(interval)`    | Find abnormal query patterns         |
-| `detect_regressions(interval)`     | Find performance regressions         |
-| `table_hotspots(start, end)`       | Tables with high activity            |
-| `table_compare(start, end)`        | Table stats changes over time        |
-| `index_efficiency(start, end)`     | Index usage analysis                 |
-| `unused_indexes(interval)`         | Indexes with no scans                |
-
-### Capacity planning
-
-| Function                           | Description                          |
-|------------------------------------|--------------------------------------|
-| `capacity_summary(interval)`       | Resource utilization summary         |
-| `capacity_report(interval)`        | Text capacity report                 |
-| `quarterly_review()`               | Comprehensive capacity review        |
-| `capacity_dashboard` (view)        | Resource utilization overview        |
-
-### Configuration tracking
-
-| Function                             | Description                   |
-|--------------------------------------|-------------------------------|
-| `config_changes(start, end)`         | PostgreSQL config changes     |
-| `config_at(timestamp)`               | Config at a point in time     |
-| `config_health_check()`              | Configuration recommendations |
-| `db_role_config_changes(start, end)` | Database/role config changes  |
-| `db_role_config_summary()`           | Current db/role overrides     |
-
-### Pre-flight
-
-| Function                           | Description                          |
-|------------------------------------|--------------------------------------|
-| `preflight_check()`                | Pre-installation validation          |
-| `preflight_check_with_summary()`   | Validation with text summary         |
-
-## Related extensions
-
-- [pgfr_record](https://database.dev/dventimi/pgfr_record) -- core snapshot collection (required)
-
-See the [top-level README](https://github.com/dventimisupabase/pg_flight_recorder/blob/main/README.md) and [REFERENCE.md](https://github.com/dventimisupabase/pg_flight_recorder/blob/main/REFERENCE.md) for full documentation.
+- [Top-level README](../README.md): project overview and the two-extension structure.
+- [pgfr_record/README.md](../pgfr_record/README.md): the required core extension.
+- [REFERENCE.md](../REFERENCE.md): the full technical reference.
