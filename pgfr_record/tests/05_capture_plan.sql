@@ -3,7 +3,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(8);
+SELECT plan(10);
 
 SELECT has_function('pgfr_record', 'generate_capture_plan', 'Function pgfr_record.generate_capture_plan should exist');
 SELECT has_table('pgfr_record', 'capture_plan', 'Table pgfr_record.capture_plan should exist');
@@ -38,6 +38,21 @@ SELECT is(
     (SELECT archive_table FROM pgfr_record.capture_plan WHERE source_view = 'pg_catalog.pg_stat_database'),
     'a_pg_stat_database',
     'archive_table should follow the a_<short_name> naming convention'
+);
+SELECT is(
+    (SELECT retention FROM pgfr_record.capture_plan WHERE source_view = 'pg_catalog.pg_settings'),
+    interval '365 days',
+    'retention should be copied through from the manifest row'
+);
+
+-- ---------------------------------------------------------------------------
+-- The cached capture_select_sql (§4.4 mint-together invariant) should
+-- actually be a working SELECT, not just non-null text.
+-- ---------------------------------------------------------------------------
+SELECT lives_ok(
+    (SELECT format('SELECT 1 FROM (%s) q LIMIT 0', capture_select_sql)
+     FROM pgfr_record.capture_plan WHERE source_view = 'pg_catalog.pg_stat_database'),
+    'a target''s cached capture_select_sql should be directly executable SQL'
 );
 
 -- ---------------------------------------------------------------------------

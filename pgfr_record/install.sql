@@ -22,7 +22,8 @@
 --   05_partition_infra.sql   maintain_partitions() and its helpers
 --   06_generators.sql        generate_archives(), generate_presentation_views()
 --   07_capture_plan.sql      capture_plan table + generate_capture_plan()
---                            (the collector that consumes it is milestone 2)
+--   08_collector.sql         run_tier(): the collector core (tier jobs are
+--                            scheduled by milestone 5's enable(), not here)
 
 \ir sql/01_schema.sql
 \ir sql/02_manifest.sql
@@ -31,6 +32,7 @@
 \ir sql/05_partition_infra.sql
 \ir sql/06_generators.sql
 \ir sql/07_capture_plan.sql
+\ir sql/08_collector.sql
 
 -- Create every enabled target's archive table + initial partitions,
 -- regenerate the typed presentation views, and rebuild the capture plan --
