@@ -20,9 +20,18 @@
 --   03_seed_pg15.sql         the PG15 manifest census (pgfr-v2-context-pack.md §3.2)
 --   04_ledger.sql            capture ledger: ledger_runs, ledger_captures
 --   05_partition_infra.sql   maintain_partitions() and its helpers
+--   06_generators.sql        generate_archives() (presentation views and
+--                            the capture plan generator land in a later
+--                            milestone-1 commit)
 
 \ir sql/01_schema.sql
 \ir sql/02_manifest.sql
 \ir sql/03_seed_pg15.sql
 \ir sql/04_ledger.sql
 \ir sql/05_partition_infra.sql
+\ir sql/06_generators.sql
+
+-- Create every enabled target's archive table + initial partitions
+-- against this server's live catalog. Safe to re-run (§7) -- this is the
+-- post-major-upgrade procedure.
+SELECT pgfr_record.generate_archives();

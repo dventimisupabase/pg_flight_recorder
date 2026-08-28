@@ -66,10 +66,17 @@ VALUES
      '{}', interval '1 day', interval '30 days', 'per_relation', NULL, NULL),
     ('pg_catalog.pg_stat_user_functions', 'medium', ARRAY['funcid'], true,
      '{}', interval '1 day', interval '30 days', 'per_relation', 'GUC track_functions <> none', NULL),
-    ('pg_catalog.pg_stat_statements', 'medium', ARRAY['userid','dbid','queryid','toplevel'], true,
+    -- Unqualified on purpose: pg_stat_statements is an extension-provided
+    -- view, not a pg_catalog builtin. CREATE EXTENSION installs it into
+    -- whichever schema was current at the time (public on stock
+    -- PostgreSQL; typically `extensions` on Supabase) -- there is no
+    -- single correct hardcoded schema to qualify it with, so resolution
+    -- relies on search_path via ::regclass, same as any other client of
+    -- an extension-provided object.
+    ('pg_stat_statements', 'medium', ARRAY['userid','dbid','queryid','toplevel'], true,
      '{}', interval '1 day', interval '30 days', 'per_relation', 'pg_stat_statements extension',
      'dict: query (analyze-side dictionary over queryid -> text). Reset via pg_stat_statements_info.stats_reset. Eviction-aware: a vanished queryid is eviction, not reset.'),
-    ('pg_catalog.pg_stat_statements_info', 'fast', '{}', false,
+    ('pg_stat_statements_info', 'fast', '{}', false,
      '{}', NULL, interval '30 days', 'per_relation', 'pg_stat_statements extension',
      'singleton companion to pg_stat_statements; carries the reset signal (stats_reset) that distinguishes a real reset from per-query eviction')
 ON CONFLICT (source_view) DO NOTHING;
