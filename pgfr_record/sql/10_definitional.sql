@@ -71,19 +71,26 @@ COMMENT ON FUNCTION pgfr_record.state_as_of(text, timestamptz) IS
 -- identical -- pg_class covers every relkind, including indexes -- named
 -- separately only so a caller resolving an indexrelid doesn't have to
 -- know that.
-CREATE OR REPLACE FUNCTION pgfr_record.resolve_relation(p_oid oid, p_t timestamptz DEFAULT clock_timestamp())
-RETURNS TABLE(captured_at timestamptz, oid oid, relname name, relnamespace oid, nspname name, relkind "char", relispartition boolean)
+-- DROP + CREATE, not CREATE OR REPLACE: PostgreSQL refuses to change a
+-- RETURNS TABLE shape in place (same restriction as presentation views,
+-- §4.3.2), and relfrozenxid/relminmxid/reltuples were added to
+-- src_catalog_identity after these functions' initial shape shipped.
+DROP FUNCTION IF EXISTS pgfr_record.resolve_index(oid, timestamptz);
+DROP FUNCTION IF EXISTS pgfr_record.resolve_relation(oid, timestamptz);
+
+CREATE FUNCTION pgfr_record.resolve_relation(p_oid oid, p_t timestamptz DEFAULT clock_timestamp())
+RETURNS TABLE(captured_at timestamptz, oid oid, relname name, relnamespace oid, nspname name, relkind "char", relispartition boolean, relfrozenxid xid, relminmxid xid, reltuples real)
 LANGUAGE sql STABLE AS $$
     SELECT * FROM pgfr_record.state_as_of('pgfr_record.src_catalog_identity', p_t)
-        AS t(captured_at timestamptz, oid oid, relname name, relnamespace oid, nspname name, relkind "char", relispartition boolean)
+        AS t(captured_at timestamptz, oid oid, relname name, relnamespace oid, nspname name, relkind "char", relispartition boolean, relfrozenxid xid, relminmxid xid, reltuples real)
     WHERE t.oid = p_oid;
 $$;
 
 COMMENT ON FUNCTION pgfr_record.resolve_relation(oid, timestamptz) IS
-    'What relation was this OID, as of t? Survives OID reuse across DROP/CREATE by reading pgfr_record.src_catalog_identity''s history (§4.5) rather than the live catalog. Defaults t to now(), matching a live lookup when no historical point is specified.';
+    'What relation was this OID, as of t? Survives OID reuse across DROP/CREATE by reading pgfr_record.src_catalog_identity''s history (§4.5) rather than the live catalog. Defaults t to now(), matching a live lookup when no historical point is specified. Carries relfrozenxid/relminmxid/reltuples for per-relation XID/MultiXID wraparound distance tracking.';
 
-CREATE OR REPLACE FUNCTION pgfr_record.resolve_index(p_oid oid, p_t timestamptz DEFAULT clock_timestamp())
-RETURNS TABLE(captured_at timestamptz, oid oid, relname name, relnamespace oid, nspname name, relkind "char", relispartition boolean)
+CREATE FUNCTION pgfr_record.resolve_index(p_oid oid, p_t timestamptz DEFAULT clock_timestamp())
+RETURNS TABLE(captured_at timestamptz, oid oid, relname name, relnamespace oid, nspname name, relkind "char", relispartition boolean, relfrozenxid xid, relminmxid xid, reltuples real)
 LANGUAGE sql STABLE AS $$
     SELECT * FROM pgfr_record.resolve_relation(p_oid, p_t);
 $$;

@@ -3,7 +3,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(23);
+SELECT plan(24);
 
 -- ---------------------------------------------------------------------------
 -- Schema + core tables/views exist
@@ -46,13 +46,13 @@ SELECT throws_ok(
 -- ---------------------------------------------------------------------------
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.manifest),
-    41,
-    'manifest should have 41 total rows (6 Group A + 2 version-gated + 8 Group B + 13 Group C + 6 Group D + 6 Group E)'
+    42,
+    'manifest should have 42 total rows (6 Group A + 2 version-gated + 8 Group B + 13 Group C + 7 Group D + 6 Group E)'
 );
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.manifest WHERE enabled),
-    35,
-    '35 manifest rows should be enabled (41 total - 6 disabled Group E rows)'
+    36,
+    '36 manifest rows should be enabled (42 total - 6 disabled Group E rows)'
 );
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.manifest WHERE NOT enabled),
@@ -66,8 +66,8 @@ SELECT is(
 );
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.manifest WHERE debounce),
-    13,
-    '13 manifest rows should be debounced (7 Group B, excluding the non-debounced pg_stat_statements_info companion + 6 Group D)'
+    14,
+    '14 manifest rows should be debounced (7 Group B, excluding the non-debounced pg_stat_statements_info companion + 7 Group D)'
 );
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.manifest WHERE keyless),
@@ -97,6 +97,11 @@ SELECT results_eq(
     $$SELECT debounce, anchor_every, retention FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_settings'$$,
     $$VALUES (true, interval '1 month', interval '365 days')$$,
     'pg_settings (Group D) should be debounced with a monthly anchor and 365d retention'
+);
+SELECT results_eq(
+    $$SELECT natural_key, debounce, anchor_every, retention FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_database'$$,
+    $$VALUES (ARRAY['oid'], true, interval '1 month', interval '365 days')$$,
+    'pg_database (Group D addition) should be keyed by oid, debounced with a monthly anchor and 365d retention'
 );
 SELECT ok(
     (SELECT NOT enabled FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_stats'),

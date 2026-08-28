@@ -83,9 +83,11 @@ BEGIN
                 -- below for targets where it is *not* part of the key
                 -- (pg_stat_wal_receiver).
                 v_class := 'key';
-            ELSIF v_col = ANY(ARRAY['numbackends','pid','sender_port','client_port','sync_priority']) THEN
+            ELSIF v_col = ANY(ARRAY['numbackends','pid','sender_port','client_port','sync_priority','reltuples']) THEN
                 -- Known exceptions: numeric-typed but not cumulative --
-                -- current counts, process/network identity, or config.
+                -- current counts, process/network identity, config, or a
+                -- periodically-recomputed estimate (reltuples can legitimately
+                -- decrease when ANALYZE reruns, so it is not a counter).
                 v_class := 'gauge';
             ELSIF v_col = 'stats_reset' THEN
                 v_class := 'label';

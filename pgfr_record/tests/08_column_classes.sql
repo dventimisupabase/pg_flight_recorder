@@ -3,7 +3,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(11);
+SELECT plan(13);
 
 SELECT has_function('pgfr_record', 'generate_column_classes', 'Function pgfr_record.generate_column_classes should exist');
 
@@ -72,6 +72,16 @@ SELECT ok(
 SELECT ok(
     (SELECT class FROM pgfr_record.column_classes WHERE source_view = 'pg_catalog.pg_stat_archiver' AND column_name = 'stats_reset') = 'label',
     'the stats_reset column itself should be classified label'
+);
+SELECT ok(
+    (SELECT bool_and(class = 'odometer') FROM pgfr_record.column_classes
+     WHERE source_view = 'pgfr_record.src_catalog_identity' AND column_name IN ('relfrozenxid', 'relminmxid')),
+    'src_catalog_identity''s relfrozenxid/relminmxid should be classified odometer (xid-typed)'
+);
+SELECT is(
+    (SELECT class FROM pgfr_record.column_classes WHERE source_view = 'pgfr_record.src_catalog_identity' AND column_name = 'reltuples'),
+    'gauge',
+    'src_catalog_identity''s reltuples should be overridden to gauge (a periodically-recomputed estimate, not a counter)'
 );
 
 -- ---------------------------------------------------------------------------

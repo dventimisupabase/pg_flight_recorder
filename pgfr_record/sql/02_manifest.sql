@@ -82,6 +82,10 @@ COMMENT ON COLUMN pgfr_record.payload_schemas.fingerprint IS 'Hash of (source_vi
 
 -- The catalog identity dimension (Group D): resolves any relid/indexrelid
 -- as of any captured_at, surviving OID reuse across DROP/CREATE.
+-- relfrozenxid/relminmxid/reltuples were added after the initial v2
+-- rewrite, additively (schema evolution policy: new columns appended at
+-- the end, never reordered), so pgfr_analyze can track per-relation XID/
+-- MultiXID wraparound distance over time without a second capture target.
 CREATE OR REPLACE VIEW pgfr_record.src_catalog_identity AS
 SELECT
     c.oid,
@@ -89,9 +93,12 @@ SELECT
     c.relnamespace,
     n.nspname,
     c.relkind,
-    c.relispartition
+    c.relispartition,
+    c.relfrozenxid,
+    c.relminmxid,
+    c.reltuples
 FROM pg_catalog.pg_class c
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace;
 
 COMMENT ON VIEW pgfr_record.src_catalog_identity IS
-    'Projection over pg_class join pg_namespace. Captured as a Group D (state-history) manifest target so relid/indexrelid can be resolved as of any past captured_at, surviving OID reuse across DROP/CREATE.';
+    'Projection over pg_class join pg_namespace. Captured as a Group D (state-history) manifest target so relid/indexrelid can be resolved as of any past captured_at, surviving OID reuse across DROP/CREATE. Also carries relfrozenxid/relminmxid/reltuples for per-relation XID/MultiXID wraparound distance tracking.';

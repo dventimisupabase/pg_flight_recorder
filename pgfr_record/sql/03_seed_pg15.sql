@@ -132,6 +132,17 @@ VALUES
      'the dimension table: resolves any relid/indexrelid in Group B as of any captured_at, surviving OID reuse across DROP/CREATE')
 ON CONFLICT (source_view) DO NOTHING;
 
+-- Group D addition, seeded after the initial v2 rewrite (additive, per
+-- schema evolution policy): datfrozenxid/datminmxid give the database-level
+-- half of XID/MultiXID wraparound distance tracking (the per-relation half
+-- comes from src_catalog_identity's relfrozenxid/relminmxid, above).
+INSERT INTO pgfr_record.manifest
+    (source_view, cadence_tier, natural_key, debounce, anchor_every, retention, size_class, requires, notes)
+VALUES
+    ('pg_catalog.pg_database', 'on_change', ARRAY['oid'], true, interval '1 month', interval '365 days', 'singleton', NULL,
+     'catalog table, not a view; wraparound distance: datfrozenxid, datminmxid')
+ON CONFLICT (source_view) DO NOTHING;
+
 -- ---------------------------------------------------------------------------
 -- Group E -- enabled = false rows, present with reasons so "why doesn't
 -- pgfr capture X" is queryable. Disabled rows never get an archive table
