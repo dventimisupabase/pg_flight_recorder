@@ -58,15 +58,15 @@ Both `debounce = false OR anchor_every IS NOT NULL` and `keyless = false OR debo
 
 ### The PG15 seed census
 
-`03_seed_pg15.sql` seeds 41 manifest rows. Counts below are the live table on PostgreSQL 15, queried directly rather than assumed:
+`03_seed_pg15.sql` plus one later, additive Group D row (`pg_catalog.pg_database`) seed 42 manifest rows. Counts below are the live table on PostgreSQL 15, queried directly rather than assumed:
 
 | | rows |
 |---|---|
-| Total manifest rows | 41 |
-| Enabled | 35 |
+| Total manifest rows | 42 |
+| Enabled | 36 |
 | Disabled (Group E) | 6 |
 | Version-gated beyond PG15 (`min_major` 16 or 17) | 2 |
-| Active on PG15 (enabled and `min_major <= 15`) | 33 |
+| Active on PG15 (enabled and `min_major <= 15`) | 34 |
 
 **Group A: cumulative counters, singleton / per-db.** Fast tier, 30 days retention, `debounce = false` (cheap, always changing, every sample wanted).
 
@@ -107,7 +107,8 @@ Both `debounce = false OR anchor_every IS NOT NULL` and `keyless = false OR debo
 | `pg_hba_file_rules` | `{line_number}` | requires privileged read; degrades via the ledger when unreadable |
 | `pg_file_settings` | `{sourcefile, sourceline}` | detects applied-vs-file divergence |
 | `pg_extension` | `{oid}` | a catalog table, not a view; captures extension installs/upgrades |
-| `pgfr_record.src_catalog_identity` | `{oid}` | the dimension table: resolves any `relid`/`indexrelid` in Group B as of any `captured_at`, surviving OID reuse across DROP/CREATE |
+| `pgfr_record.src_catalog_identity` | `{oid}` | the dimension table: resolves any `relid`/`indexrelid` in Group B as of any `captured_at`, surviving OID reuse across DROP/CREATE. Also carries `relfrozenxid`/`relminmxid`/`reltuples` for per-relation XID/MultiXID wraparound distance |
+| `pg_database` | `{oid}` | a catalog table, not a view; `datfrozenxid`/`datminmxid` give the database-level half of wraparound distance tracking |
 
 **Group E: disabled, with reasons.** `pg_cursors`, `pg_prepared_statements`, `pg_backend_memory_contexts` (all session-local: they observe pg_cron's own session, not the workload), `pg_timezone_names` (static and enormous), `pg_stats` (per-column planner statistics, a different product, ANALYZE-cadenced), `pg_shmem_allocations` (low routine value; a troubleshooting-profile candidate).
 
@@ -276,8 +277,8 @@ Join through the catalog identity dimension (`pgfr_record.src_catalog_identity`,
 
 ```sql
 SELECT * FROM pgfr_record.resolve_relation('pgfr_record.manifest'::regclass::oid);
---         captured_at         |  oid  | relname  | relnamespace |   nspname   | relkind | relispartition
--- 2026-08-28 20:08:50.640036+00 | 16468 | manifest |        16467 | pgfr_record | r       | f
+--         captured_at         |  oid  | relname  | relnamespace |   nspname   | relkind | relispartition | relfrozenxid | relminmxid | reltuples
+-- 2026-08-28 22:44:09.447148+00 | 17563 | manifest |        17562 | pgfr_record | r       | f              |          726 |          1 |        -1
 ```
 
 A nonexistent OID returns zero rows, not an error.
