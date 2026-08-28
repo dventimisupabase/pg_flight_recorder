@@ -18,6 +18,7 @@
 --   04_helpers.sql          _deltas_col_defs()
 --   05_query_dict.sql       query_dict, refresh_query_dict()
 --   06_query_performance.sql  detect_regressions(), detect_query_storms()
+--   07_xmin_horizon.sql       xmin_horizon_history(), current_xmin_horizon_holder()
 
 \ir sql/01_schema.sql
 \ir sql/02_coverage.sql
@@ -25,3 +26,4 @@
 \ir sql/04_helpers.sql
 \ir sql/05_query_dict.sql
 \ir sql/06_query_performance.sql
+\ir sql/07_xmin_horizon.sql
