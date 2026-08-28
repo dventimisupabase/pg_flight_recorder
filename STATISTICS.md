@@ -4,6 +4,18 @@ pg_flight_recorder is a sampling instrument. Every number it reports is an estim
 
 Written for practitioners, not statisticians. Every claim is computable in plain SQL against your own install.
 
+## Contents
+
+- [Why sample at all](#why-sample-at-all)
+- [Where the census and taxonomy live](#where-the-census-and-taxonomy-live)
+- [The three measurement modes](#the-three-measurement-modes)
+  - [Mode A: point-in-time state sampling](#mode-a-point-in-time-state-sampling)
+  - [Mode B: cumulative-counter differencing](#mode-b-cumulative-counter-differencing)
+  - [Mode C: debounced state-change capture](#mode-c-debounced-state-change-capture)
+- [Detection limits are relative to the active profile](#detection-limits-are-relative-to-the-active-profile)
+- [Error and censoring rules](#error-and-censoring-rules)
+- [Scope](#scope)
+
 ## Why sample at all
 
 The alternative to sampling is exhaustive event logging, for example `log_min_duration_statement = 0`. Exhaustive logging looks like ground truth but is not: it has an observer effect (every event pays a logging cost), and under load the logging pipeline itself drops or backpressures events. Its selection function is load-dependent and undocumented, and it degrades precisely under the conditions of greatest interest. Fixed-cadence sampling with a stated error model is the more truthful instrument, because its blind spots are known, constant, and published.

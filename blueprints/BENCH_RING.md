@@ -8,6 +8,16 @@
 
 ---
 
+## Contents
+
+- [Results](#results)
+  - [Table sizes after 300 s of sustained load](#table-sizes-after-300-s-of-sustained-load)
+  - [Storage efficiency (v2 wait_samples)](#storage-efficiency-v2-wait_samples)
+  - [Wait event map after 300 s load (14 entries)](#wait-event-map-after-300-s-load-14-entries)
+  - [Rotation correctness](#rotation-correctness)
+- [Key findings](#key-findings)
+- [Caveats](#caveats)
+
 ## Results
 
 ### Table sizes after 300 s of sustained load

@@ -6,6 +6,16 @@
 
 ---
 
+## Contents
+
+- [Measured results](#measured-results)
+  - [Run 1 — 2,000 ticks, 100 wait event rows/tick (full slot utilization)](#run-1-2000-ticks-100-wait-event-rowstick-full-slot-utilization)
+  - [Run 2 — 10,000 ticks, 1,000 wait event rows/tick (high-traffic server)](#run-2-10000-ticks-1000-wait-event-rowstick-high-traffic-server)
+- [Extrapolation: long-running transaction](#extrapolation-long-running-transaction)
+- [Side-by-side summary](#side-by-side-summary)
+- [Why this matters in production](#why-this-matters-in-production)
+- [Reproduction](#reproduction)
+
 ## Measured results
 
 ### Run 1 — 2,000 ticks, 100 wait event rows/tick (full slot utilization)

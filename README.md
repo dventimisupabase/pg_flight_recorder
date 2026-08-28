@@ -10,6 +10,15 @@ Server-side flight recorder for PostgreSQL. Answers "what was happening in my da
 
 pg_flight_recorder continuously appends PostgreSQL's own stats views and system views into time-partitioned tables via `pg_cron`, no external agent, sidecar, or polling process required. Every archive table, typed view, and column classification is generated from one table (`pgfr_record.manifest`) plus the live catalog, so the whole install is one design artifact rather than a hand-maintained schema. Retention is partition drop; nothing is ever `UPDATE`d or `DELETE`d.
 
+## Contents
+
+- [Extensions](#extensions)
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [Documentation](#documentation)
+- [Testing](#testing)
+- [License](#license)
+
 ## Extensions
 
 Two extensions:

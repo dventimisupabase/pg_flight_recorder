@@ -2,6 +2,18 @@
 
 Core extension of [pg_flight_recorder](https://github.com/dventimisupabase/pg_flight_recorder). Continuously appends PostgreSQL's own stats views and system views into time-partitioned tables, so you can answer "what was happening in my database?" after the fact, without adding an external agent, sidecar, or polling process.
 
+## Contents
+
+- [The pitch](#the-pitch)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Profiles](#profiles)
+- [Testing](#testing)
+- [Upgrade](#upgrade)
+- [Uninstall](#uninstall)
+- [Related](#related)
+
 ## The pitch
 
 PostgreSQL's cumulative stats system gives you the integral: a running total since the last reset. The system catalogs give you the latest: the current state, with no history. `pgfr_record` gives you the derivative over the stats and the history over the catalogs, by sampling both on a schedule and keeping the samples. The data model is not invented; it is exactly the tables and views already documented in the PostgreSQL manual, presented as a time series.

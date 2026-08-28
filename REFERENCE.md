@@ -8,6 +8,28 @@ Complete reference for [pg_flight_recorder](README.md) v2. For installation and 
 
 Everything below is a fact about `pgfr_record`, the required core extension. `pgfr_analyze` is covered in one section at the end: it is not yet rebuilt for v2.
 
+## Contents
+
+- [The big picture](#the-big-picture)
+- [The manifest](#the-manifest)
+  - [The PG15 seed census](#the-pg15-seed-census)
+- [Payload dictionary](#payload-dictionary)
+- [Archive tables](#archive-tables)
+  - [Partitioning and retention](#partitioning-and-retention)
+- [Presentation views](#presentation-views)
+- [Column classes](#column-classes)
+- [Capture plan and the collector](#capture-plan-and-the-collector)
+  - [The statement_timeout arming gotcha](#the-statement_timeout-arming-gotcha)
+- [Capture ledger](#capture-ledger)
+- [Definitional helpers](#definitional-helpers)
+  - [`state_as_of(source_view, t)`](#state_as_ofsource_view-t)
+  - [`resolve_relation(oid, t)` / `resolve_index(oid, t)`](#resolve_relationoid-t-resolve_indexoid-t)
+  - [`deltas(source_view, from_t, to_t)`](#deltassource_view-from_t-to_t)
+  - [Generated `COMMENT ON`](#generated-comment-on)
+- [Profiles](#profiles)
+- [`health_check()`](#health_check)
+- [`pgfr_analyze`](#pgfr_analyze)
+
 ## The big picture
 
 `pgfr_record` appends debounced, dictionary-encoded jsonb samples of PostgreSQL's own stats views and system views into time-partitioned tables, and drops old partitions. Everything in this reference is machinery driven by one table, `pgfr_record.manifest`: which views, how often, with what identity, kept how long. Every archive table, presentation view, capture-plan entry, and column classification is generated from the manifest plus the live catalog. Re-running `install.sql` regenerates all of it; that is the entire upgrade procedure, including after a PostgreSQL major version upgrade.

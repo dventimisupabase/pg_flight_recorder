@@ -7,6 +7,21 @@
 
 ---
 
+## Contents
+
+- [Breaking Changes Found](#breaking-changes-found)
+  - [Bug 1: `pg_stat_wal` column removals (FIXED)](#bug-1-pg_stat_wal-column-removals-fixed)
+  - [Bug 2: `pg_stat_statements` column renames (FIXED)](#bug-2-pg_stat_statements-column-renames-fixed)
+  - [Bug 3: `_ensure_partition()` wrong call in `sample()` (FIXED)](#bug-3-_ensure_partition-wrong-call-in-sample-fixed)
+- [Test Results: 688 assertions](#test-results-688-assertions)
+- [Non-PG18 Issues (pre-existing, need separate fixes)](#non-pg18-issues-pre-existing-need-separate-fixes)
+  - [A. `03_safety_features` tests 4,6: cron job count](#a-03_safety_features-tests-46-cron-job-count)
+  - [B. `10_xid_wraparound` test 8: relfrozenxid_age](#b-10_xid_wraparound-test-8-relfrozenxid_age)
+  - [C. `test_migration`: `migrate_to_v2` not implemented](#c-test_migration-migrate_to_v2-not-implemented)
+  - [D. `test_partition_infra`: table already exists](#d-test_partition_infra-table-already-exists)
+  - [E. `test_sparse_table_index` T12: no idx_scans on fresh DB](#e-test_sparse_table_index-t12-no-idx_scans-on-fresh-db)
+- [New PG18 Columns Not Yet Captured](#new-pg18-columns-not-yet-captured)
+
 ## Breaking Changes Found
 
 ### Bug 1: `pg_stat_wal` column removals (FIXED)

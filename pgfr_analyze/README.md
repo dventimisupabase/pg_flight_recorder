@@ -2,6 +2,24 @@
 
 Reporting and analysis extension for [pgfr_record](https://database.dev/dventimi/pgfr_record). Turns raw flight recorder data into anomaly reports, incident forensics, and capacity planning.
 
+## Contents
+
+- [What it does](#what-it-does)
+- [Key features](#key-features)
+- [Consumption trend engine (in progress)](#consumption-trend-engine-in-progress)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Functions](#functions)
+  - [Comparison and analysis](#comparison-and-analysis)
+  - [Reporting](#reporting)
+  - [Forensics](#forensics)
+  - [Performance analysis](#performance-analysis)
+  - [Capacity planning](#capacity-planning)
+  - [Configuration tracking](#configuration-tracking)
+  - [Pre-flight](#pre-flight)
+- [Related extensions](#related-extensions)
+
 ## What it does
 
 pgfr_analyze reads the snapshot and ring buffer data collected by pgfr_record and provides functions for anomaly detection, performance regression analysis, time-travel forensics, blast radius analysis, capacity planning, and configuration change tracking. It never writes to the core schema -- it only reads and computes.
