@@ -33,6 +33,7 @@ SELECT jsonb_agg(
         WHEN t IN ('bigint', 'integer', 'smallint', 'oid', 'double precision', 'numeric') THEN '0'
         WHEN t = 'boolean' THEN 'false'
         WHEN t = 'text' THEN '"synthetic"'
+        WHEN t IN ('timestamp with time zone', 'timestamp without time zone') THEN '"2020-01-01T00:00:00+00:00"'
         ELSE '0'
     END)::jsonb ORDER BY ord
 ) AS base_payload
