@@ -12,6 +12,8 @@
 -- directory, so the script works from any working directory.
 --
 -- Files:
---   01_schema.sql   schema, config table, _get_config()
+--   01_schema.sql     schema, config table, _get_config()
+--   02_coverage.sql   coverage(), coverage_gaps()
 
 \ir sql/01_schema.sql
+\ir sql/02_coverage.sql
