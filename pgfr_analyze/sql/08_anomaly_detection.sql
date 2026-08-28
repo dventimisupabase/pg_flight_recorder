@@ -26,10 +26,13 @@ DECLARE
     v_buf_source     text := CASE WHEN pgfr_record._current_major() >= 17 THEN 'pg_catalog.pg_stat_io' ELSE 'pg_catalog.pg_stat_bgwriter' END;
     v_buf_col_defs   text := pgfr_analyze._deltas_col_defs(v_buf_source);
     v_db_col_defs    text := pgfr_analyze._deltas_col_defs('pg_catalog.pg_stat_database');
+    v_activity_col_defs text := pgfr_analyze._state_col_defs('pg_catalog.pg_stat_activity');
+    v_tables_col_defs   text := pgfr_analyze._state_col_defs('pg_catalog.pg_stat_all_tables');
     v_sql            text;
 BEGIN
-    IF v_ckpt_col_defs IS NULL OR v_buf_col_defs IS NULL OR v_db_col_defs IS NULL THEN
-        RAISE EXCEPTION 'pgfr_analyze.anomaly_report: no payload schema minted yet for pg_stat_bgwriter/pg_stat_checkpointer, pg_stat_io, or pg_stat_database';
+    IF v_ckpt_col_defs IS NULL OR v_buf_col_defs IS NULL OR v_db_col_defs IS NULL
+       OR v_activity_col_defs IS NULL OR v_tables_col_defs IS NULL THEN
+        RAISE EXCEPTION 'pgfr_analyze.anomaly_report: no payload schema minted yet for pg_stat_bgwriter/pg_stat_checkpointer, pg_stat_io, pg_stat_database, pg_stat_activity, or pg_stat_all_tables';
     END IF;
 
     -- Checkpoint anomalies: forced (non-timed) checkpoints, and long
@@ -125,8 +128,84 @@ BEGIN
         p_from_t, p_to_t, v_db_col_defs
     );
     RETURN QUERY EXECUTE v_sql;
+
+    -- Idle-in-transaction: a backend holding an open transaction without
+    -- doing anything, blocking vacuum's xmin horizon and holding locks.
+    -- Current-state read via state_as_of(p_to_t), not deltas() -- state and
+    -- xact_start are gauges, not counters.
+    v_sql := format(
+        $q$
+        SELECT
+            'IDLE_IN_TRANSACTION',
+            CASE WHEN %2$L::timestamptz - xact_start > interval '30 minutes' THEN 'HIGH' ELSE 'MEDIUM' END,
+            format('Backend %%s (user %%s) has been idle in transaction for %%s', pid, usename, (age(%2$L::timestamptz, xact_start))::text),
+            extract(epoch FROM (%2$L::timestamptz - xact_start))::numeric, 300::numeric,
+            'Investigate the client holding this transaction open; a long idle transaction blocks vacuum''s xmin horizon and can hold locks'
+        FROM pgfr_record.state_as_of(%1$L, %2$L::timestamptz) AS d(%3$s)
+        WHERE state = 'idle in transaction' AND %2$L::timestamptz - xact_start > interval '5 minutes'
+        $q$,
+        'pg_catalog.pg_stat_activity', p_to_t, v_activity_col_defs
+    );
+    RETURN QUERY EXECUTE v_sql;
+
+    -- Connection leak: backends sitting idle (not in a transaction) for a
+    -- long time, suggesting a connection pool isn't releasing them.
+    v_sql := format(
+        $q$
+        SELECT
+            'CONNECTION_LEAK',
+            CASE WHEN count(*) > 50 THEN 'HIGH' ELSE 'MEDIUM' END,
+            format('%%s backend(s) have been idle for over an hour', count(*)),
+            count(*)::numeric, 20::numeric,
+            'Investigate whether the application''s connection pool is releasing connections; consider a lower idle_session_timeout'
+        FROM pgfr_record.state_as_of(%1$L, %2$L::timestamptz) AS d(%3$s)
+        WHERE state = 'idle' AND %2$L::timestamptz - state_change > interval '1 hour'
+        HAVING count(*) > 20
+        $q$,
+        'pg_catalog.pg_stat_activity', p_to_t, v_activity_col_defs
+    );
+    RETURN QUERY EXECUTE v_sql;
+
+    -- Dead tuple accumulation: relations where dead tuples make up a large
+    -- share of live + dead tuples. Current-state read -- n_live_tup/
+    -- n_dead_tup are gauges, not counters.
+    v_sql := format(
+        $q$
+        SELECT
+            'DEAD_TUPLE_ACCUMULATION',
+            CASE WHEN n_dead_tup::numeric / nullif(n_live_tup + n_dead_tup, 0) > 0.5 THEN 'HIGH' ELSE 'MEDIUM' END,
+            format('%%s.%%s is %%s%%%% dead tuples (%%s of %%s total)', schemaname, relname,
+                round((n_dead_tup::numeric / nullif(n_live_tup + n_dead_tup, 0)) * 100, 1), n_dead_tup, n_live_tup + n_dead_tup),
+            round((n_dead_tup::numeric / nullif(n_live_tup + n_dead_tup, 0)) * 100, 1), 20::numeric,
+            'Investigate why autovacuum is not keeping up: check for long-running transactions holding back the xmin horizon, or tune autovacuum_vacuum_scale_factor for this table'
+        FROM pgfr_record.state_as_of(%1$L, %2$L::timestamptz) AS d(%3$s)
+        WHERE n_dead_tup > 1000 AND (n_dead_tup::numeric / nullif(n_live_tup + n_dead_tup, 0)) > 0.2
+        $q$,
+        'pg_catalog.pg_stat_all_tables', p_to_t, v_tables_col_defs
+    );
+    RETURN QUERY EXECUTE v_sql;
+
+    -- Vacuum starvation: relations with meaningful dead-tuple buildup that
+    -- haven't been (auto)vacuumed in a long time, or never at all.
+    v_sql := format(
+        $q$
+        SELECT
+            'VACUUM_STARVATION',
+            CASE WHEN greatest(last_vacuum, last_autovacuum) IS NULL OR n_dead_tup > 100000 THEN 'HIGH' ELSE 'MEDIUM' END,
+            format('%%s.%%s has %%s dead tuples and %%s', schemaname, relname, n_dead_tup,
+                CASE WHEN greatest(last_vacuum, last_autovacuum) IS NULL THEN 'has never been vacuumed'
+                     ELSE 'was last vacuumed ' || (age(%2$L::timestamptz, greatest(last_vacuum, last_autovacuum)))::text || ' ago' END),
+            n_dead_tup::numeric, 10000::numeric,
+            'Consider a manual VACUUM, or tuning autovacuum_vacuum_cost_limit / autovacuum_naptime so autovacuum keeps pace with this table''s write rate'
+        FROM pgfr_record.state_as_of(%1$L, %2$L::timestamptz) AS d(%3$s)
+        WHERE n_dead_tup > 10000
+          AND (greatest(last_vacuum, last_autovacuum) IS NULL OR %2$L::timestamptz - greatest(last_vacuum, last_autovacuum) > interval '7 days')
+        $q$,
+        'pg_catalog.pg_stat_all_tables', p_to_t, v_tables_col_defs
+    );
+    RETURN QUERY EXECUTE v_sql;
 END;
 $$;
 
 COMMENT ON FUNCTION pgfr_analyze.anomaly_report(timestamptz, timestamptz) IS
-    'Every anomaly flagged between p_from_t and p_to_t, across a growing set of checks (currently: forced checkpoints, checkpoint write time, buffer pressure, backend fsync, temp file spills), each built on pgfr_record.deltas() or a current-state read.';
+    'Every anomaly flagged between p_from_t and p_to_t, across a growing set of checks (currently: forced checkpoints, checkpoint write time, buffer pressure, backend fsync, temp file spills, idle in transaction, connection leak, dead tuple accumulation, vacuum starvation), each built on pgfr_record.deltas() or a current-state read.';

@@ -32,3 +32,25 @@ $$;
 
 COMMENT ON FUNCTION pgfr_analyze._deltas_col_defs(text) IS
     'Column-definition list for pgfr_record.deltas(p_source_view, ...), matching that view''s current schema_id shape: counter/odometer columns renamed to <col>_delta, everything else passed through under its own name. NULL when no payload schema has been minted yet for p_source_view.';
+
+-- Sibling helper for pgfr_record.state_as_of(), whose caller-supplied
+-- column-definition list carries every column under its own name (no
+-- _delta renaming) plus a leading captured_at, per its own documented shape.
+CREATE OR REPLACE FUNCTION pgfr_analyze._state_col_defs(p_source_view text)
+RETURNS text
+LANGUAGE sql STABLE AS $$
+    SELECT 'captured_at timestamptz, ' || string_agg(
+        format('%I %s', u.c, u.t),
+        ', ' ORDER BY u.ord
+    )
+    FROM (
+        SELECT columns, type_names
+        FROM pgfr_record.payload_schemas
+        WHERE source_view = p_source_view
+        ORDER BY schema_id DESC LIMIT 1
+    ) ps,
+    unnest(ps.columns, ps.type_names) WITH ORDINALITY AS u(c, t, ord);
+$$;
+
+COMMENT ON FUNCTION pgfr_analyze._state_col_defs(text) IS
+    'Column-definition list for pgfr_record.state_as_of(p_source_view, ...), matching that view''s current schema_id shape: captured_at followed by every column under its own name. NULL when no payload schema has been minted yet for p_source_view.';

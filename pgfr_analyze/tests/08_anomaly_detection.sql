@@ -11,11 +11,12 @@
 -- which needed a "yesterday" partition for their baseline window).
 
 BEGIN;
-SELECT plan(8);
+SELECT plan(13);
 
 SELECT has_function('pgfr_analyze', 'anomaly_report', ARRAY['timestamptz', 'timestamptz'], 'Function pgfr_analyze.anomaly_report should exist');
 
 SELECT lives_ok($$SELECT pgfr_record.run_tier('fast')$$, 'run_tier(''fast'') should capture a real baseline for pg_stat_bgwriter and pg_stat_database');
+SELECT lives_ok($$SELECT pgfr_record.run_tier('medium')$$, 'run_tier(''medium'') should capture a real baseline for pg_stat_all_tables');
 
 SELECT clock_timestamp() AS t_ref \gset ref_
 
@@ -152,6 +153,96 @@ SELECT is(
     (SELECT severity FROM pgfr_analyze.anomaly_report(:'ref_t_ref'::timestamptz - interval '10 minutes', :'ref_t_ref'::timestamptz) WHERE anomaly_type = 'TEMP_FILE_SPILLS'),
     'HIGH',
     'anomaly_report() should flag a 2GiB temp spill as TEMP_FILE_SPILLS/HIGH'
+);
+
+-- ---------------------------------------------------------------------------
+-- pg_stat_activity (Group C, current-state reads via state_as_of()): a
+-- backend idle in transaction for 10 minutes, and 25 backends idle for 2+
+-- hours (a connection-leak scenario).
+-- ---------------------------------------------------------------------------
+SELECT payload, schema_id FROM pgfr_record.a_pg_stat_activity ORDER BY captured_at DESC LIMIT 1 \gset act_row_
+SELECT array_position(columns, 'pid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' ORDER BY schema_id DESC LIMIT 1 \gset pid_
+SELECT array_position(columns, 'backend_start') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' ORDER BY schema_id DESC LIMIT 1 \gset bs_
+SELECT array_position(columns, 'state') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' ORDER BY schema_id DESC LIMIT 1 \gset state_
+SELECT array_position(columns, 'xact_start') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' ORDER BY schema_id DESC LIMIT 1 \gset xact_
+SELECT array_position(columns, 'state_change') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' ORDER BY schema_id DESC LIMIT 1 \gset chg_
+
+INSERT INTO pgfr_record.a_pg_stat_activity (captured_at, key, key_hash, row_hash, schema_id, payload)
+VALUES (
+    :'ref_t_ref'::timestamptz, NULL, NULL, 8101, :act_row_schema_id,
+    jsonb_set(jsonb_set(jsonb_set(jsonb_set(:'act_row_payload'::jsonb,
+        ARRAY[:'pid_p'], '999001'::jsonb),
+        ARRAY[:'bs_p'], to_jsonb(:'ref_t_ref'::timestamptz - interval '1 hour')),
+        ARRAY[:'state_p'], '"idle in transaction"'::jsonb),
+        ARRAY[:'xact_p'], to_jsonb(:'ref_t_ref'::timestamptz - interval '10 minutes'))
+);
+
+SELECT is(
+    (SELECT severity FROM pgfr_analyze.anomaly_report(:'ref_t_ref'::timestamptz - interval '10 minutes', :'ref_t_ref'::timestamptz) WHERE anomaly_type = 'IDLE_IN_TRANSACTION' AND description LIKE '%999001%'),
+    'MEDIUM',
+    'anomaly_report() should flag a 10-minute idle-in-transaction backend as IDLE_IN_TRANSACTION/MEDIUM'
+);
+
+INSERT INTO pgfr_record.a_pg_stat_activity (captured_at, key, key_hash, row_hash, schema_id, payload)
+SELECT :'ref_t_ref'::timestamptz, NULL, NULL, 8200 + gs, :act_row_schema_id,
+    jsonb_set(jsonb_set(jsonb_set(jsonb_set(:'act_row_payload'::jsonb,
+        ARRAY[:'pid_p'], to_jsonb(999100 + gs)),
+        ARRAY[:'bs_p'], to_jsonb(:'ref_t_ref'::timestamptz - interval '3 hours')),
+        ARRAY[:'state_p'], '"idle"'::jsonb),
+        ARRAY[:'chg_p'], to_jsonb(:'ref_t_ref'::timestamptz - interval '2 hours'))
+FROM generate_series(1, 25) AS gs;
+
+SELECT is(
+    (SELECT severity FROM pgfr_analyze.anomaly_report(:'ref_t_ref'::timestamptz - interval '10 minutes', :'ref_t_ref'::timestamptz) WHERE anomaly_type = 'CONNECTION_LEAK'),
+    'MEDIUM',
+    'anomaly_report() should flag 25 backends idle for 2+ hours as CONNECTION_LEAK/MEDIUM (below the 50-backend HIGH band)'
+);
+
+-- ---------------------------------------------------------------------------
+-- pg_stat_all_tables (Group B, current-state reads via state_as_of()): a
+-- 60%-dead-tuple table, and a never-vacuumed table with 200000 dead tuples.
+-- ---------------------------------------------------------------------------
+SELECT payload, schema_id FROM pgfr_record.a_pg_stat_all_tables ORDER BY captured_at DESC LIMIT 1 \gset tbl_row_
+SELECT array_position(columns, 'relid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset relid_
+SELECT array_position(columns, 'schemaname') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset sn_
+SELECT array_position(columns, 'relname') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset rn_
+SELECT array_position(columns, 'n_live_tup') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset live_
+SELECT array_position(columns, 'n_dead_tup') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset dead_
+SELECT array_position(columns, 'last_vacuum') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset lv_
+SELECT array_position(columns, 'last_autovacuum') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset lav_
+
+INSERT INTO pgfr_record.a_pg_stat_all_tables (captured_at, key, key_hash, row_hash, schema_id, payload)
+VALUES (
+    :'ref_t_ref'::timestamptz, NULL, NULL, 8301, :tbl_row_schema_id,
+    jsonb_set(jsonb_set(jsonb_set(jsonb_set(:'tbl_row_payload'::jsonb,
+        ARRAY[:'relid_p'], '999999901'::jsonb),
+        ARRAY[:'rn_p'], '"synth_dead_tuple_tbl"'::jsonb),
+        ARRAY[:'live_p'], '4000'::jsonb),
+        ARRAY[:'dead_p'], '6000'::jsonb)
+);
+
+SELECT is(
+    (SELECT severity FROM pgfr_analyze.anomaly_report(:'ref_t_ref'::timestamptz - interval '10 minutes', :'ref_t_ref'::timestamptz) WHERE anomaly_type = 'DEAD_TUPLE_ACCUMULATION' AND description LIKE '%synth_dead_tuple_tbl%'),
+    'HIGH',
+    'anomaly_report() should flag a 60% dead-tuple table as DEAD_TUPLE_ACCUMULATION/HIGH'
+);
+
+INSERT INTO pgfr_record.a_pg_stat_all_tables (captured_at, key, key_hash, row_hash, schema_id, payload)
+VALUES (
+    :'ref_t_ref'::timestamptz, NULL, NULL, 8302, :tbl_row_schema_id,
+    jsonb_set(jsonb_set(jsonb_set(jsonb_set(jsonb_set(jsonb_set(:'tbl_row_payload'::jsonb,
+        ARRAY[:'relid_p'], '999999902'::jsonb),
+        ARRAY[:'rn_p'], '"synth_vacuum_starved_tbl"'::jsonb),
+        ARRAY[:'live_p'], '10000000'::jsonb),
+        ARRAY[:'dead_p'], '200000'::jsonb),
+        ARRAY[:'lv_p'], 'null'::jsonb),
+        ARRAY[:'lav_p'], 'null'::jsonb)
+);
+
+SELECT is(
+    (SELECT severity FROM pgfr_analyze.anomaly_report(:'ref_t_ref'::timestamptz - interval '10 minutes', :'ref_t_ref'::timestamptz) WHERE anomaly_type = 'VACUUM_STARVATION' AND description LIKE '%synth_vacuum_starved_tbl%'),
+    'HIGH',
+    'anomaly_report() should flag a never-vacuumed table with 200000 dead tuples as VACUUM_STARVATION/HIGH'
 );
 
 -- ---------------------------------------------------------------------------
