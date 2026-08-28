@@ -11,12 +11,13 @@
 -- which needed a "yesterday" partition for their baseline window).
 
 BEGIN;
-SELECT plan(13);
+SELECT plan(20);
 
 SELECT has_function('pgfr_analyze', 'anomaly_report', ARRAY['timestamptz', 'timestamptz'], 'Function pgfr_analyze.anomaly_report should exist');
 
 SELECT lives_ok($$SELECT pgfr_record.run_tier('fast')$$, 'run_tier(''fast'') should capture a real baseline for pg_stat_bgwriter and pg_stat_database');
 SELECT lives_ok($$SELECT pgfr_record.run_tier('medium')$$, 'run_tier(''medium'') should capture a real baseline for pg_stat_all_tables');
+SELECT lives_ok($$SELECT pgfr_record.run_tier('on_change')$$, 'run_tier(''on_change'') should capture a real baseline for pg_database and src_catalog_identity');
 
 SELECT clock_timestamp() AS t_ref \gset ref_
 
@@ -243,6 +244,149 @@ SELECT is(
     (SELECT severity FROM pgfr_analyze.anomaly_report(:'ref_t_ref'::timestamptz - interval '10 minutes', :'ref_t_ref'::timestamptz) WHERE anomaly_type = 'VACUUM_STARVATION' AND description LIKE '%synth_vacuum_starved_tbl%'),
     'HIGH',
     'anomaly_report() should flag a never-vacuumed table with 200000 dead tuples as VACUUM_STARVATION/HIGH'
+);
+
+-- ---------------------------------------------------------------------------
+-- pg_database / src_catalog_identity (on_change tier, current-state reads):
+-- database- and relation-level XID/MultiXID wraparound distance.
+-- age()/mxid_age() are evaluated against the current transaction counter at
+-- query time, so a synthetic frozen horizon N transactions old (constructed
+-- via modular arithmetic on the running counter) reliably produces an age
+-- of exactly N, with no dependency on how old the database actually is.
+-- ---------------------------------------------------------------------------
+SELECT key, key_hash, schema_id, payload FROM pgfr_record.a_pg_database ORDER BY captured_at DESC LIMIT 1 \gset dbrow_
+SELECT array_position(columns, 'datfrozenxid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_database' ORDER BY schema_id DESC LIMIT 1 \gset fxid_
+SELECT array_position(columns, 'datminmxid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_database' ORDER BY schema_id DESC LIMIT 1 \gset fmxid_
+SELECT array_position(columns, 'datname') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_database' ORDER BY schema_id DESC LIMIT 1 \gset dn_
+SELECT ((pg_current_xact_id()::text::bigint - 250000001 + 4294967296) % 4294967296)::text::xid AS x \gset oldxid_
+SELECT ((next_multixact_id::text::bigint - 250000001 + 4294967296) % 4294967296)::text::xid AS x FROM pg_control_checkpoint() \gset oldmxid_
+
+INSERT INTO pgfr_record.a_pg_database (captured_at, key, key_hash, row_hash, schema_id, payload) VALUES
+    (:'ref_t_ref'::timestamptz, :'dbrow_key'::jsonb, :dbrow_key_hash, 9101, :dbrow_schema_id,
+     jsonb_set(jsonb_set(jsonb_set(:'dbrow_payload'::jsonb,
+        ARRAY[:'fxid_p'], to_jsonb(:'oldxid_x'::text)),
+        ARRAY[:'fmxid_p'], to_jsonb(:'oldmxid_x'::text)),
+        ARRAY[:'dn_p'], '"synth_wraparound_db"'::jsonb));
+
+SELECT is(
+    (SELECT severity FROM pgfr_analyze.anomaly_report(:'ref_t_ref'::timestamptz - interval '10 minutes', :'ref_t_ref'::timestamptz) WHERE anomaly_type = 'XID_WRAPAROUND_RISK' AND description LIKE '%synth_wraparound_db%'),
+    'MEDIUM',
+    'anomaly_report() should flag a 250M-transaction-old datfrozenxid as XID_WRAPAROUND_RISK/MEDIUM (below the 1.5B HIGH band)'
+);
+SELECT is(
+    (SELECT severity FROM pgfr_analyze.anomaly_report(:'ref_t_ref'::timestamptz - interval '10 minutes', :'ref_t_ref'::timestamptz) WHERE anomaly_type = 'MXID_WRAPAROUND_RISK' AND description LIKE '%synth_wraparound_db%'),
+    'MEDIUM',
+    'anomaly_report() should flag a 250M-multixact-old datminmxid as MXID_WRAPAROUND_RISK/MEDIUM (below the 1.5B HIGH band)'
+);
+
+SELECT key, key_hash, schema_id, payload FROM pgfr_record.a_src_catalog_identity ORDER BY captured_at DESC LIMIT 1 \gset catrow_
+SELECT array_position(columns, 'oid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pgfr_record.src_catalog_identity' ORDER BY schema_id DESC LIMIT 1 \gset roid_
+SELECT array_position(columns, 'relfrozenxid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pgfr_record.src_catalog_identity' ORDER BY schema_id DESC LIMIT 1 \gset rfxid_
+SELECT array_position(columns, 'relminmxid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pgfr_record.src_catalog_identity' ORDER BY schema_id DESC LIMIT 1 \gset rfmxid_
+SELECT array_position(columns, 'relname') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pgfr_record.src_catalog_identity' ORDER BY schema_id DESC LIMIT 1 \gset rn_
+SELECT array_position(columns, 'relkind') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pgfr_record.src_catalog_identity' ORDER BY schema_id DESC LIMIT 1 \gset rk_
+SELECT ((pg_current_xact_id()::text::bigint - 1600000001 + 4294967296) % 4294967296)::text::xid AS x \gset oldrelxid_
+SELECT ((next_multixact_id::text::bigint - 1600000001 + 4294967296) % 4294967296)::text::xid AS x FROM pg_control_checkpoint() \gset oldrelmxid_
+SELECT (:'catrow_key'::jsonb->>'oid')::bigint + 1 AS oid \gset newoid_
+
+-- The synthetic oid must be mutated in both the archive row's key column
+-- (what state_as_of()'s DISTINCT ON groups by at the storage layer) and the
+-- payload's own embedded oid field (what the presentation view -- and so
+-- state_as_of()'s actual natural-key comparison -- reads); otherwise both
+-- rows collapse into one identity and only one survives DISTINCT ON.
+INSERT INTO pgfr_record.a_src_catalog_identity (captured_at, key, key_hash, row_hash, schema_id, payload) VALUES
+    (:'ref_t_ref'::timestamptz, :'catrow_key'::jsonb, :catrow_key_hash, 9201, :catrow_schema_id,
+     jsonb_set(jsonb_set(jsonb_set(:'catrow_payload'::jsonb,
+        ARRAY[:'rfxid_p'], to_jsonb(:'oldrelxid_x'::text)),
+        ARRAY[:'rn_p'], '"synth_wraparound_tbl"'::jsonb),
+        ARRAY[:'rk_p'], '"r"'::jsonb)),
+    (:'ref_t_ref'::timestamptz, jsonb_set(:'catrow_key'::jsonb, '{oid}', to_jsonb(:'newoid_oid'::text)), :catrow_key_hash + 1, 9202, :catrow_schema_id,
+     jsonb_set(jsonb_set(jsonb_set(jsonb_set(:'catrow_payload'::jsonb,
+        ARRAY[:'roid_p'], to_jsonb(:'newoid_oid'::text)),
+        ARRAY[:'rfmxid_p'], to_jsonb(:'oldrelmxid_x'::text)),
+        ARRAY[:'rn_p'], '"synth_mxid_wraparound_tbl"'::jsonb),
+        ARRAY[:'rk_p'], '"r"'::jsonb));
+
+SELECT is(
+    (SELECT severity FROM pgfr_analyze.anomaly_report(:'ref_t_ref'::timestamptz - interval '10 minutes', :'ref_t_ref'::timestamptz) WHERE anomaly_type = 'RELATION_XID_WRAPAROUND_RISK' AND description LIKE '%synth_wraparound_tbl%'),
+    'HIGH',
+    'anomaly_report() should flag a 1.6B-transaction-old relfrozenxid as RELATION_XID_WRAPAROUND_RISK/HIGH'
+);
+SELECT is(
+    (SELECT severity FROM pgfr_analyze.anomaly_report(:'ref_t_ref'::timestamptz - interval '10 minutes', :'ref_t_ref'::timestamptz) WHERE anomaly_type = 'RELATION_MXID_WRAPAROUND_RISK' AND description LIKE '%synth_mxid_wraparound_tbl%'),
+    'HIGH',
+    'anomaly_report() should flag a 1.6B-multixact-old relminmxid as RELATION_MXID_WRAPAROUND_RISK/HIGH'
+);
+
+-- ---------------------------------------------------------------------------
+-- pg_stat_replication / pg_replication_slots (fast tier, current-state
+-- reads): a lagging replica, and an inactive slot. A standalone test
+-- instance has no real replicas, so both rows are built from scratch (one
+-- default value per column by type, the same technique 06_query_
+-- performance.sql uses), rather than mutating a captured template.
+-- ---------------------------------------------------------------------------
+SELECT jsonb_agg(
+    (CASE
+        WHEN t IN ('bigint', 'integer', 'smallint', 'oid') THEN '0'
+        WHEN t = 'boolean' THEN 'false'
+        WHEN t IN ('text', 'name') THEN '"synthetic"'
+        WHEN t = 'inet' THEN '"127.0.0.1"'
+        WHEN t = 'xid' THEN '"3"'
+        WHEN t = 'pg_lsn' THEN '"0/0"'
+        WHEN t = 'interval' THEN '"00:00:00"'
+        WHEN t IN ('timestamp with time zone', 'timestamp without time zone') THEN '"2020-01-01T00:00:00+00:00"'
+        ELSE '0'
+    END)::jsonb ORDER BY ord
+) AS base_payload
+FROM (SELECT columns, type_names FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_replication' ORDER BY schema_id DESC LIMIT 1) ps,
+     unnest(ps.columns, ps.type_names) WITH ORDINALITY AS u(c, t, ord)
+\gset repl_base_
+SELECT schema_id FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_replication' ORDER BY schema_id DESC LIMIT 1 \gset replschema_
+SELECT array_position(columns, 'replay_lag') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_replication' ORDER BY schema_id DESC LIMIT 1 \gset lag_
+SELECT array_position(columns, 'application_name') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_replication' ORDER BY schema_id DESC LIMIT 1 \gset an_
+SELECT array_position(columns, 'pid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_replication' ORDER BY schema_id DESC LIMIT 1 \gset repid_
+
+INSERT INTO pgfr_record.a_pg_stat_replication (captured_at, key, key_hash, row_hash, schema_id, payload) VALUES
+    (:'ref_t_ref'::timestamptz, NULL, NULL, 9301, :replschema_schema_id,
+     jsonb_set(jsonb_set(jsonb_set(:'repl_base_base_payload'::jsonb,
+        ARRAY[:'lag_p'], '"00:10:00"'::jsonb),
+        ARRAY[:'an_p'], '"synth_replica"'::jsonb),
+        ARRAY[:'repid_p'], '999501'::jsonb));
+
+SELECT is(
+    (SELECT severity FROM pgfr_analyze.anomaly_report(:'ref_t_ref'::timestamptz - interval '10 minutes', :'ref_t_ref'::timestamptz) WHERE anomaly_type = 'REPLICATION_LAG' AND description LIKE '%synth_replica%'),
+    'HIGH',
+    'anomaly_report() should flag a 10-minute replay lag as REPLICATION_LAG/HIGH'
+);
+
+SELECT jsonb_agg(
+    (CASE
+        WHEN t IN ('bigint', 'integer', 'smallint', 'oid') THEN '0'
+        WHEN t = 'boolean' THEN 'false'
+        WHEN t IN ('text', 'name') THEN '"synthetic"'
+        WHEN t = 'xid' THEN '"3"'
+        WHEN t = 'pg_lsn' THEN '"0/0"'
+        WHEN t IN ('timestamp with time zone', 'timestamp without time zone') THEN '"2020-01-01T00:00:00+00:00"'
+        ELSE '0'
+    END)::jsonb ORDER BY ord
+) AS base_payload
+FROM (SELECT columns, type_names FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_replication_slots' ORDER BY schema_id DESC LIMIT 1) ps,
+     unnest(ps.columns, ps.type_names) WITH ORDINALITY AS u(c, t, ord)
+\gset slot_base_
+SELECT schema_id FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_replication_slots' ORDER BY schema_id DESC LIMIT 1 \gset slotschema_
+SELECT array_position(columns, 'active') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_replication_slots' ORDER BY schema_id DESC LIMIT 1 \gset act_
+SELECT array_position(columns, 'slot_name') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_replication_slots' ORDER BY schema_id DESC LIMIT 1 \gset sn_
+
+INSERT INTO pgfr_record.a_pg_replication_slots (captured_at, key, key_hash, row_hash, schema_id, payload) VALUES
+    (:'ref_t_ref'::timestamptz, NULL, NULL, 9401, :slotschema_schema_id,
+     jsonb_set(jsonb_set(:'slot_base_base_payload'::jsonb,
+        ARRAY[:'act_p'], 'false'::jsonb),
+        ARRAY[:'sn_p'], '"synth_inactive_slot"'::jsonb));
+
+SELECT is(
+    (SELECT severity FROM pgfr_analyze.anomaly_report(:'ref_t_ref'::timestamptz - interval '10 minutes', :'ref_t_ref'::timestamptz) WHERE anomaly_type = 'REPLICATION_SLOT_INACTIVE' AND description LIKE '%synth_inactive_slot%'),
+    'HIGH',
+    'anomaly_report() should flag an inactive replication slot as REPLICATION_SLOT_INACTIVE/HIGH'
 );
 
 -- ---------------------------------------------------------------------------

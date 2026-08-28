@@ -28,11 +28,17 @@ DECLARE
     v_db_col_defs    text := pgfr_analyze._deltas_col_defs('pg_catalog.pg_stat_database');
     v_activity_col_defs text := pgfr_analyze._state_col_defs('pg_catalog.pg_stat_activity');
     v_tables_col_defs   text := pgfr_analyze._state_col_defs('pg_catalog.pg_stat_all_tables');
+    v_repl_col_defs  text := pgfr_analyze._state_col_defs('pg_catalog.pg_stat_replication');
+    v_slots_col_defs text := pgfr_analyze._state_col_defs('pg_catalog.pg_replication_slots');
+    v_pgdb_col_defs  text := pgfr_analyze._state_col_defs('pg_catalog.pg_database');
+    v_cat_col_defs   text := pgfr_analyze._state_col_defs('pgfr_record.src_catalog_identity');
     v_sql            text;
 BEGIN
     IF v_ckpt_col_defs IS NULL OR v_buf_col_defs IS NULL OR v_db_col_defs IS NULL
-       OR v_activity_col_defs IS NULL OR v_tables_col_defs IS NULL THEN
-        RAISE EXCEPTION 'pgfr_analyze.anomaly_report: no payload schema minted yet for pg_stat_bgwriter/pg_stat_checkpointer, pg_stat_io, pg_stat_database, pg_stat_activity, or pg_stat_all_tables';
+       OR v_activity_col_defs IS NULL OR v_tables_col_defs IS NULL
+       OR v_repl_col_defs IS NULL OR v_slots_col_defs IS NULL
+       OR v_pgdb_col_defs IS NULL OR v_cat_col_defs IS NULL THEN
+        RAISE EXCEPTION 'pgfr_analyze.anomaly_report: no payload schema minted yet for one or more of pg_stat_bgwriter/pg_stat_checkpointer, pg_stat_io, pg_stat_database, pg_stat_activity, pg_stat_all_tables, pg_stat_replication, pg_replication_slots, pg_database, src_catalog_identity';
     END IF;
 
     -- Checkpoint anomalies: forced (non-timed) checkpoints, and long
@@ -204,8 +210,97 @@ BEGIN
         'pg_catalog.pg_stat_all_tables', p_to_t, v_tables_col_defs
     );
     RETURN QUERY EXECUTE v_sql;
+
+    -- Replication lag: a connected replica falling behind on replay.
+    -- Current-state read -- write_lag/flush_lag/replay_lag are gauges,
+    -- already expressed as intervals by the source view itself.
+    v_sql := format(
+        $q$
+        SELECT
+            'REPLICATION_LAG',
+            CASE WHEN replay_lag > interval '5 minutes' THEN 'HIGH' ELSE 'MEDIUM' END,
+            format('Replica %%s is replaying %%s behind', coalesce(application_name, client_addr::text, pid::text), replay_lag::text),
+            extract(epoch FROM replay_lag)::numeric, 30::numeric,
+            'Investigate replica I/O or network throughput; sustained replay lag risks the primary retaining excess WAL'
+        FROM pgfr_record.state_as_of(%1$L, %2$L::timestamptz) AS d(%3$s)
+        WHERE replay_lag > interval '30 seconds'
+        $q$,
+        'pg_catalog.pg_stat_replication', p_to_t, v_repl_col_defs
+    );
+    RETURN QUERY EXECUTE v_sql;
+
+    -- Inactive replication slots: retain WAL and hold back the xmin
+    -- horizon indefinitely until dropped or reactivated.
+    v_sql := format(
+        $q$
+        SELECT
+            'REPLICATION_SLOT_INACTIVE', 'HIGH',
+            format('Replication slot %%s (database %%s) is inactive; it will retain WAL indefinitely until dropped or reactivated', slot_name, database),
+            0::numeric, 0::numeric,
+            'Drop this slot if it is no longer needed, or investigate why its consumer is not connected; an inactive slot blocks WAL recycling and vacuum''s xmin horizon'
+        FROM pgfr_record.state_as_of(%1$L, %2$L::timestamptz) AS d(%3$s)
+        WHERE active = false
+        $q$,
+        'pg_catalog.pg_replication_slots', p_to_t, v_slots_col_defs
+    );
+    RETURN QUERY EXECUTE v_sql;
+
+    -- Database-level XID/MultiXID wraparound distance: age()/mxid_age() on
+    -- the captured frozen horizon, evaluated against the current
+    -- transaction counter at query time (a durable watermark, not a
+    -- capture-time-relative reconstruction).
+    v_sql := format(
+        $q$
+        SELECT
+            'XID_WRAPAROUND_RISK',
+            CASE WHEN age(datfrozenxid) > 1500000000 THEN 'HIGH' ELSE 'MEDIUM' END,
+            format('Database %%s is %%s transactions past its frozen XID horizon', datname, age(datfrozenxid)),
+            age(datfrozenxid)::numeric, 200000000::numeric,
+            'Investigate why autovacuum is not advancing datfrozenxid: check for long-running transactions, disabled autovacuum, or a replication slot holding back xmin; this is approaching autovacuum_freeze_max_age'
+        FROM pgfr_record.state_as_of(%1$L, %2$L::timestamptz) AS d(%3$s)
+        WHERE age(datfrozenxid) > 200000000
+        UNION ALL
+        SELECT
+            'MXID_WRAPAROUND_RISK',
+            CASE WHEN mxid_age(datminmxid) > 1500000000 THEN 'HIGH' ELSE 'MEDIUM' END,
+            format('Database %%s is %%s multixact IDs past its frozen MXID horizon', datname, mxid_age(datminmxid)),
+            mxid_age(datminmxid)::numeric, 200000000::numeric,
+            'Investigate why autovacuum is not advancing datminmxid; this is approaching autovacuum_multixact_freeze_max_age'
+        FROM pgfr_record.state_as_of(%1$L, %2$L::timestamptz) AS d(%3$s)
+        WHERE mxid_age(datminmxid) > 200000000
+        $q$,
+        'pg_catalog.pg_database', p_to_t, v_pgdb_col_defs
+    );
+    RETURN QUERY EXECUTE v_sql;
+
+    -- Relation-level XID/MultiXID wraparound distance, restricted to
+    -- relkinds relfrozenxid/relminmxid are actually meaningful for
+    -- (ordinary tables, materialized views, TOAST tables).
+    v_sql := format(
+        $q$
+        SELECT
+            'RELATION_XID_WRAPAROUND_RISK',
+            CASE WHEN age(relfrozenxid) > 1500000000 THEN 'HIGH' ELSE 'MEDIUM' END,
+            format('Relation %%s.%%s is %%s transactions past its frozen XID horizon', nspname, relname, age(relfrozenxid)),
+            age(relfrozenxid)::numeric, 200000000::numeric,
+            'Run a manual VACUUM FREEZE on this relation, or investigate why autovacuum is not keeping up with it'
+        FROM pgfr_record.state_as_of(%1$L, %2$L::timestamptz) AS d(%3$s)
+        WHERE relkind IN ('r', 'm', 't') AND age(relfrozenxid) > 200000000
+        UNION ALL
+        SELECT
+            'RELATION_MXID_WRAPAROUND_RISK',
+            CASE WHEN mxid_age(relminmxid) > 1500000000 THEN 'HIGH' ELSE 'MEDIUM' END,
+            format('Relation %%s.%%s is %%s multixact IDs past its frozen MXID horizon', nspname, relname, mxid_age(relminmxid)),
+            mxid_age(relminmxid)::numeric, 200000000::numeric,
+            'Run a manual VACUUM FREEZE on this relation, or investigate why autovacuum is not keeping up with it'
+        FROM pgfr_record.state_as_of(%1$L, %2$L::timestamptz) AS d(%3$s)
+        WHERE relkind IN ('r', 'm', 't') AND mxid_age(relminmxid) > 200000000
+        $q$,
+        'pgfr_record.src_catalog_identity', p_to_t, v_cat_col_defs
+    );
+    RETURN QUERY EXECUTE v_sql;
 END;
 $$;
 
 COMMENT ON FUNCTION pgfr_analyze.anomaly_report(timestamptz, timestamptz) IS
-    'Every anomaly flagged between p_from_t and p_to_t, across a growing set of checks (currently: forced checkpoints, checkpoint write time, buffer pressure, backend fsync, temp file spills, idle in transaction, connection leak, dead tuple accumulation, vacuum starvation), each built on pgfr_record.deltas() or a current-state read.';
+    'Every anomaly flagged between p_from_t and p_to_t, across a growing set of checks (currently: forced checkpoints, checkpoint write time, buffer pressure, backend fsync, temp file spills, idle in transaction, connection leak, dead tuple accumulation, vacuum starvation, replication lag, inactive replication slots, database and relation XID/MultiXID wraparound distance), each built on pgfr_record.deltas() or a current-state read.';
