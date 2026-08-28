@@ -15,7 +15,13 @@
 --   01_schema.sql           schema, config table, _get_config()
 --   02_coverage.sql         coverage(), coverage_gaps()
 --   03_config_tracking.sql  config_changes(), config_at(), config_health_check()
+--   04_helpers.sql          _deltas_col_defs()
+--   05_query_dict.sql       query_dict, refresh_query_dict()
+--   06_query_performance.sql  detect_regressions(), detect_query_storms()
 
 \ir sql/01_schema.sql
 \ir sql/02_coverage.sql
 \ir sql/03_config_tracking.sql
+\ir sql/04_helpers.sql
+\ir sql/05_query_dict.sql
+\ir sql/06_query_performance.sql
