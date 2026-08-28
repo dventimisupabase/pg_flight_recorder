@@ -23,7 +23,7 @@ Everything below is a fact about `pgfr_record`, the required core extension. `pg
 - [Capture ledger](#capture-ledger)
 - [Definitional helpers](#definitional-helpers)
   - [`state_as_of(source_view, t)`](#state_as_ofsource_view-t)
-  - [`resolve_relation(oid, t)` / `resolve_index(oid, t)`](#resolve_relationoid-t-resolve_indexoid-t)
+  - [`resolve_relation(oid, t)` / `resolve_index(oid, t)`](#resolve_relationoid-t--resolve_indexoid-t)
   - [`deltas(source_view, from_t, to_t)`](#deltassource_view-from_t-to_t)
   - [Generated `COMMENT ON`](#generated-comment-on)
 - [Profiles](#profiles)
