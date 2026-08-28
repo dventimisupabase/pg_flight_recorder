@@ -154,6 +154,26 @@ BEGIN
     );
     RETURN QUERY EXECUTE v_sql;
 
+    -- Lock contention: a backend blocked waiting on a lock. This flags the
+    -- wait itself (wait_event_type = 'Lock', already unencoded on
+    -- pg_stat_activity); identifying the blocking session is forensics
+    -- work (pg_locks joined to pg_stat_activity by pid at equal
+    -- captured_at), deliberately out of scope for this threshold check.
+    v_sql := format(
+        $q$
+        SELECT
+            'LOCK_CONTENTION',
+            CASE WHEN %2$L::timestamptz - query_start > interval '1 minute' THEN 'HIGH' ELSE 'MEDIUM' END,
+            format('Backend %%s (user %%s) has been waiting on a lock for %%s (query: %%s)', pid, usename, (age(%2$L::timestamptz, query_start))::text, left(query, 120)),
+            extract(epoch FROM (%2$L::timestamptz - query_start))::numeric, 10::numeric,
+            'Identify the blocking session via pg_locks/pg_stat_activity, and consider a shorter lock_timeout or breaking up long-held locking transactions'
+        FROM pgfr_record.state_as_of(%1$L, %2$L::timestamptz) AS d(%3$s)
+        WHERE wait_event_type = 'Lock' AND %2$L::timestamptz - query_start > interval '10 seconds'
+        $q$,
+        'pg_catalog.pg_stat_activity', p_to_t, v_activity_col_defs
+    );
+    RETURN QUERY EXECUTE v_sql;
+
     -- Connection leak: backends sitting idle (not in a transaction) for a
     -- long time, suggesting a connection pool isn't releasing them.
     v_sql := format(
@@ -303,4 +323,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION pgfr_analyze.anomaly_report(timestamptz, timestamptz) IS
-    'Every anomaly flagged between p_from_t and p_to_t, across a growing set of checks (currently: forced checkpoints, checkpoint write time, buffer pressure, backend fsync, temp file spills, idle in transaction, connection leak, dead tuple accumulation, vacuum starvation, replication lag, inactive replication slots, database and relation XID/MultiXID wraparound distance), each built on pgfr_record.deltas() or a current-state read.';
+    'Every anomaly flagged between p_from_t and p_to_t, across a growing set of checks (currently: forced checkpoints, checkpoint write time, buffer pressure, backend fsync, temp file spills, idle in transaction, lock contention, connection leak, dead tuple accumulation, vacuum starvation, replication lag, inactive replication slots, database and relation XID/MultiXID wraparound distance), each built on pgfr_record.deltas() or a current-state read.';

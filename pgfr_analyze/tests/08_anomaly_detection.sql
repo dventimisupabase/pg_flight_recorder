@@ -11,7 +11,7 @@
 -- which needed a "yesterday" partition for their baseline window).
 
 BEGIN;
-SELECT plan(20);
+SELECT plan(21);
 
 SELECT has_function('pgfr_analyze', 'anomaly_report', ARRAY['timestamptz', 'timestamptz'], 'Function pgfr_analyze.anomaly_report should exist');
 
@@ -197,6 +197,24 @@ SELECT is(
     (SELECT severity FROM pgfr_analyze.anomaly_report(:'ref_t_ref'::timestamptz - interval '10 minutes', :'ref_t_ref'::timestamptz) WHERE anomaly_type = 'CONNECTION_LEAK'),
     'MEDIUM',
     'anomaly_report() should flag 25 backends idle for 2+ hours as CONNECTION_LEAK/MEDIUM (below the 50-backend HIGH band)'
+);
+
+SELECT array_position(columns, 'wait_event_type') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' ORDER BY schema_id DESC LIMIT 1 \gset wet_
+SELECT array_position(columns, 'query_start') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' ORDER BY schema_id DESC LIMIT 1 \gset qs_
+
+INSERT INTO pgfr_record.a_pg_stat_activity (captured_at, key, key_hash, row_hash, schema_id, payload)
+VALUES (
+    :'ref_t_ref'::timestamptz, NULL, NULL, 8601, :act_row_schema_id,
+    jsonb_set(jsonb_set(jsonb_set(:'act_row_payload'::jsonb,
+        ARRAY[:'pid_p'], '999601'::jsonb),
+        ARRAY[:'wet_p'], '"Lock"'::jsonb),
+        ARRAY[:'qs_p'], to_jsonb(:'ref_t_ref'::timestamptz - interval '2 minutes'))
+);
+
+SELECT is(
+    (SELECT severity FROM pgfr_analyze.anomaly_report(:'ref_t_ref'::timestamptz - interval '10 minutes', :'ref_t_ref'::timestamptz) WHERE anomaly_type = 'LOCK_CONTENTION' AND description LIKE '%999601%'),
+    'HIGH',
+    'anomaly_report() should flag a 2-minute lock wait as LOCK_CONTENTION/HIGH'
 );
 
 -- ---------------------------------------------------------------------------
