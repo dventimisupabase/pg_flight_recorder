@@ -4,903 +4,326 @@
 [![Test Suite](https://github.com/dventimisupabase/pg_flight_recorder/actions/workflows/test.yml/badge.svg)](https://github.com/dventimisupabase/pg_flight_recorder/actions/workflows/test.yml)
 [![Lint](https://github.com/dventimisupabase/pg_flight_recorder/actions/workflows/lint.yml/badge.svg)](https://github.com/dventimisupabase/pg_flight_recorder/actions/workflows/lint.yml)
 
-Complete reference for [pg_flight_recorder](README.md). For installation and getting started, see the [README](README.md). For per-extension overviews, see [pgfr_record](pgfr_record/README.md) and [pgfr_analyze](pgfr_analyze/README.md). For the statistical semantics of the recorder's measurements (sampling error, coverage, detection limits), see [STATISTICS.md](STATISTICS.md).
-
-## Functions: pgfr_record (core)
-
-### Control
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `pgfr_record.enable()` | `text` | Start collection jobs via pg_cron |
-| `pgfr_record.disable()` | `text` | Stop collection jobs |
-| `pgfr_record.health_check()` | `record` | System health status with diagnostics |
-| `pgfr_record.set_mode(mode text)` | `text` | Set collection mode: `normal`, `light`, or `emergency` |
-| `pgfr_record.get_mode()` | `record` | Get current collection mode |
-| `pgfr_record.validate_config()` | `record` | Validate all configuration settings |
-| `pgfr_record.config_recommendations()` | `record` | Get configuration recommendations based on system state |
-
-### Collection
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `pgfr_record.snapshot()` | `timestamptz` | Durable snapshot: WAL, checkpoints, I/O, tables, indexes, statements, replication, config |
-| `pgfr_record.sample_ring()` | `timestamptz` | Sampled activity: wait events, active sessions, locks into the v2 ring (TRUNCATE-rotated partitions) |
-| `pgfr_record.rotate_ring()` | `void` | Advance the v2 ring buffer by one slot (TRUNCATE the slot two steps ahead) |
-| `pgfr_record.cleanup()` | `record` | Remove expired data based on retention settings |
-
-### Profile management
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `pgfr_record.list_profiles()` | `record` | List available configuration profiles |
-| `pgfr_record.explain_profile(name text)` | `record` | Preview what a profile would change |
-| `pgfr_record.apply_profile(name text)` | `record` | Apply a configuration profile |
-| `pgfr_record.get_current_profile()` | `record` | Identify which profile matches current settings |
-
-### Ring buffer management
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `pgfr_record.validate_ring_configuration()` | `record` | Validate the v2 ring: nominal window from `ring_config`, rotation health, measured sampler cost, measured storage |
-
-The v2 ring uses TRUNCATE-rotation on LIST-partitioned tables; partition
-maintenance is handled by the `pgfr_truncate_partitions`,
-`pgfr_drop_ancient_partitions`, and `pgfr_precreate_partitions` cron jobs.
-The legacy `ring_buffer_health()`, `rebuild_ring_buffers()`, and
-`configure_ring_autovacuum()` functions were retired with the legacy
-120-slot ring (they targeted pre-allocated slot rows that no longer exist).
-
-### Export
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `pgfr_record.export_for_upgrade()` | `record` | Prepare data for export with OID-to-name resolution |
-| `pgfr_record._populate_relation_names()` | `int` | Populate OID-to-name lookup table for offline analysis |
-| `pgfr_record._safe_relname(oid)` | `text` | Resolve OID to schema-qualified name using `relation_names` |
-| `pgfr_record._get_setting_from_snapshots(name text, default_val text)` | `text` | Get a setting value from captured `config_snapshots` |
-
-## Functions: pgfr_analyze
-
-### Comparison and analysis
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `pgfr_analyze.compare(start timestamptz, end timestamptz)` | `record` | Compare two snapshots side-by-side with deltas |
-| `pgfr_analyze.wait_summary(start timestamptz, end timestamptz)` | `record` | Wait event breakdown over a time range; `window_samples` carries the denominator of `pct_of_samples` |
-| `pgfr_analyze.statement_compare(start timestamptz, end timestamptz, min_delta_ms float8, limit int)` | `record` | Query performance changes between two points |
-| `pgfr_analyze.activity_at(ts timestamptz)` | `record` | Activity snapshot closest to a timestamp |
-| `pgfr_analyze.recent_waits_current()` | `record` | Current wait event data from the v2 ring (decoded via wait_event_map) |
-| `pgfr_analyze.recent_activity_current()` | `record` | Current activity data from the v2 ring |
-| `pgfr_analyze.recent_locks_current()` | `record` | Current lock data from the v2 ring (decoded via lock_type_map) |
-
-### Reporting
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `pgfr_analyze.report(interval)` | `text` | Comprehensive diagnostic report for a time window |
-| `pgfr_analyze.report(start timestamptz, end timestamptz)` | `text` | Diagnostic report for a specific time range |
-| `pgfr_analyze.summary_report(start timestamptz, end timestamptz)` | `record` | Summary statistics |
-| `pgfr_analyze.performance_report(start timestamptz, end timestamptz)` | `record` | Performance-focused report |
-| `pgfr_analyze.anomaly_report(start timestamptz, end timestamptz)` | `record` | Anomaly analysis: checkpoints, buffer pressure, temp spills, locks, XID + MultiXID wraparound risk, xmin horizon stalls (data + catalog, four severity tiers; cause precedes wraparound symptom) |
-| `pgfr_analyze.check_alerts()` | `record` | Check active alert conditions |
-| `pgfr_analyze.consumption_trend_report(datname text default current_database())` | `text` | Specific-consumption drift report against the database's own baseline: both the 28-day/daily and 84-day/weekly windows, per basket metric |
-
-### Forensics
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `pgfr_analyze.what_happened_at(ts timestamptz)` | `record` | Point-in-time analysis: snapshots, waits, activity, locks around a timestamp |
-| `pgfr_analyze.incident_timeline(start timestamptz, end timestamptz)` | `record` | Reconstructed event timeline for an incident window |
-| `pgfr_analyze.blast_radius(queryid bigint)` | `record` | Impact analysis for a specific query: I/O, CPU, lock, temp file effects |
-| `pgfr_analyze.blast_radius_report(interval)` | `text` | Text report on high-impact queries |
-| `pgfr_analyze.xmin_horizon_history(start timestamptz, end timestamptz)` | `record` | Timeline of xmin holders within a window. Joins three sidecars + replication via `UNION ALL`; `horizon_type` (`'data'` / `'catalog'` / `'both'`) disambiguates slot rows. Pushes down `sample_ts` predicate for partition pruning. |
-| `pgfr_analyze.current_xmin_horizon_holder()` | `record` | Quick-answer reader. Returns zero rows on a healthy cluster, otherwise one row for the dominant holder per cross-source priority (`slot > prepared > activity > replication`). |
-
-### Performance analysis
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `pgfr_analyze.detect_query_storms(interval, threshold numeric)` | `record` | Find queries with abnormal execution counts. Classifies: RETRY_STORM, CACHE_MISS, SPIKE, NORMAL. Severity: LOW, MEDIUM, HIGH, CRITICAL. The multiplier compares per-tick rates on both sides and travels with `recent_samples`/`baseline_samples` |
-| `pgfr_analyze.detect_regressions(interval, threshold numeric)` | `record` | Find performance regressions via buffer metrics or timing. Severity: LOW (<200%), MEDIUM (<500%), HIGH (<1000%), CRITICAL (>1000%). Returns the `z_score` effect size plus `baseline_samples`/`current_samples` |
-| `pgfr_analyze.table_hotspots(start timestamptz, end timestamptz)` | `record` | Tables with highest activity (scans, modifications, dead tuples) |
-| `pgfr_analyze.table_compare(start timestamptz, end timestamptz, top_n int)` | `record` | Table stats changes over a time range |
-| `pgfr_analyze.index_efficiency(start timestamptz, end timestamptz, top_n int)` | `record` | Index usage analysis: scan counts, tuple fetches, sizes |
-| `pgfr_analyze.unused_indexes(interval)` | `record` | Indexes with zero scans over a time window |
-| `pgfr_analyze.modification_rate(relid oid, window interval)` | `numeric` | Row modification rate (modifications/second) for a table |
-| `pgfr_analyze.hot_update_ratio(relid oid)` | `numeric` | HOT update percentage (0-100) from latest snapshot |
-
-### Capacity planning
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `pgfr_analyze.capacity_summary(interval)` | `record` | Resource utilization summary: connections, disk, WAL, transactions |
-| `pgfr_analyze.capacity_report(interval)` | `text` | Text capacity report |
-| `pgfr_analyze.quarterly_review()` | `record` | Comprehensive capacity review with growth trends |
-| `pgfr_analyze.quarterly_review_with_summary()` | `record` | Quarterly review with text summary |
-
-### Configuration tracking
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `pgfr_analyze.config_changes(start timestamptz, end timestamptz)` | `record` | PostgreSQL configuration changes between two points |
-| `pgfr_analyze.config_at(ts timestamptz, name text)` | `record` | Configuration state at a point in time |
-| `pgfr_analyze.config_health_check()` | `record` | Configuration recommendations based on current settings |
-| `pgfr_analyze.db_role_config_at(ts timestamptz, db text, role text, param text)` | `record` | Database/role config at a point in time |
-| `pgfr_analyze.db_role_config_changes(start timestamptz, end timestamptz)` | `record` | Database/role configuration changes |
-| `pgfr_analyze.db_role_config_summary()` | `record` | Current database/role overrides |
-
-### Pre-flight
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `pgfr_analyze.preflight_check()` | `record` | Pre-installation validation checks |
-| `pgfr_analyze.preflight_check_with_summary()` | `record` | Validation with text summary |
-
-### Coverage and gap accounting
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `pgfr_analyze.coverage(start timestamptz, end timestamptz)` | `record` | Expected vs observed collection ticks per collector (`sample`, `snapshot`, `consumption`) at the fixed one-minute cadence: `(collector, expected_samples, observed_samples, coverage_ratio)` |
-| `pgfr_analyze.coverage(interval)` | `record` | Interval convenience overload |
-| `pgfr_analyze.coverage_gaps(start timestamptz, end timestamptz)` | `record` | Contiguous runs of missing ticks with attributed reasons: `retention_horizon`, `circuit_breaker`, `load_shedding`, `restart`, `cron_inactive`, `unknown`. Breaker/shedding gaps are informative missingness; see [STATISTICS.md](STATISTICS.md) |
-| `pgfr_analyze.coverage_gaps(interval)` | `record` | Interval convenience overload |
-
-### Self-overhead
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `pgfr_analyze.self_overhead()` | `record` | Self-measured observer-effect budget (see [STATISTICS.md](STATISTICS.md)): per-tick collection time, recorder buffer-traffic share, storage footprint, and the recorder's share of `pg_stat_statements` execution time, each with the method stated per row |
-
-### Semantics registry
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `pgfr_analyze.column_semantics()` | `record` | Machine-readable registry of column-level statistical semantics (see [STATISTICS.md](STATISTICS.md)). Parses the structured `[class] [units]` prefix of view column comments in both schemas and the `Output columns:` blocks of pgfr_analyze set-returning function comments, so the comments are the single source of truth. Returns `(relation, column_name, semantic_class, units, interval_basis, notes)` |
-
-## Views
-
-### pgfr_record (core)
-
-| View | Source | Description |
-|------|--------|-------------|
-| `pgfr_record.deltas` | Snapshots | Snapshot-over-snapshot changes for all metrics |
-| `pgfr_record.recent_waits` | Ring buffer only | Wait events; raw samples span roughly the last 2-4h at defaults (3 slots x 2h rotation, current slot partial). Older windows live in the aggregated 7-day rollup archives, which are separate tables, not a fallback of these views |
-| `pgfr_record.recent_activity` | Ring buffer only | Active sessions with wait events and query previews (same 2-4h raw window) |
-| `pgfr_record.recent_locks` | Ring buffer only | Lock contention: blocked/blocking pairs (same 2-4h raw window) |
-| `pgfr_record.recent_idle_in_transaction` | Ring buffer only | Sessions idle in transaction with duration (same 2-4h raw window) |
-| `pgfr_record.recent_replication` | Snapshots | Replication status: lag, LSN positions |
-| `pgfr_record.recent_vacuum_progress` | Snapshots | Vacuum operations in progress with % scanned/vacuumed |
-| `pgfr_record.archiver_status` | Snapshots | WAL archiver status with delta calculations |
-| `pgfr_record.consumption_deltas` | `consumption_snapshots_v2` | Reset-guarded per-tick component deltas backing `consumption_flows` and the daily rollup |
-| `pgfr_record.consumption_flows` | `consumption_deltas` | Live per-tick flow rates and efficiency ratios (reset-guarded) |
-| `pgfr_record.consumption_daily_flows` | `consumption_daily_rollups` | Daily-grain ratios reconstructed from summed components (Σnum/Σden, never averaged from daily ratios) |
-| `pgfr_record.consumption_weekly_flows` | `consumption_daily_rollups` | Weekly-grain ratios, rolling 7-day buckets counting back from `current_date`, one tier up from the daily flows |
-
-### pgfr_analyze
-
-| View | Source | Description |
-|------|--------|-------------|
-| `pgfr_analyze.capacity_dashboard` | Snapshots | Resource utilization overview: connections, disk, WAL, transactions |
-| `pgfr_analyze.consumption_metric_series` | `consumption_daily_flows` | Long-format `(rollup_date, datname, metric_name, value)` unpivot of the 8 basket metrics |
-| `pgfr_analyze.consumption_weekly_metric_series` | `consumption_weekly_flows` | Long-format `(week_end_date, datname, metric_name, value)` unpivot, weekly grain |
-
-## Tables
-
-### Ring buffer (LIST-partitioned by slot, TRUNCATE-rotated)
-
-**`pgfr_record.ring_config`** -- Singleton config row for the v2 ring (num_slots, rotation_period).
-
-**`pgfr_record.wait_samples`** -- Encoded wait event samples (one row per active wait group per tick)
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `sample_ts` | int4 | Seconds since `pgfr_record.epoch()` |
-| `datid` | oid | Database OID |
-| `active_count` | smallint | Total active backends in this sample |
-| `data` | integer[] | Encoded `[-wait_id, count, qid, qid, …, -next_wait_id, count, …]` |
-| `slot` | smallint | Ring slot (LIST partition key) |
-
-Decode `data` via `pgfr_record.wait_event_map` to get `(state, type, event)` per wait_id.
-
-**`pgfr_record.activity_samples`** -- Active session samples (one row per backend per tick)
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `sample_ts` | int4 | Seconds since `pgfr_record.epoch()` |
-| `pid` | int4 | Backend process ID |
-| `usename` | text | User name |
-| `application_name` | text | Application name |
-| `client_addr` | inet | Client IP address |
-| `backend_type` | text | Backend type |
-| `state` | text | Backend state |
-| `wait_event_type` | text | Wait event category |
-| `wait_event` | text | Specific wait event |
-| `backend_start` | timestamptz | When backend started |
-| `xact_start` | timestamptz | When current transaction started |
-| `query_start` | timestamptz | When current query started |
-| `state_change` | timestamptz | When state last changed |
-| `query_preview` | text | Truncated query text |
-| `slot` | smallint | Ring slot (LIST partition key) |
-
-**`pgfr_record.lock_samples`** -- Lock contention samples (one row per blocked/blocking pair per tick)
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `sample_ts` | int4 | Seconds since `pgfr_record.epoch()` |
-| `blocked_pid` | int4 | PID of blocked backend |
-| `blocked_qid` | int4 | Query map id for blocked backend's query |
-| `blocked_duration_s` | int4 | Seconds the backend has been blocked |
-| `blocking_pid` | int4 | PID of blocking backend |
-| `blocking_qid` | int4 | Query map id for blocking backend's query |
-| `lock_type` | smallint | Lock type code (decode via `lock_type_map`) |
-| `locked_relation_oid` | oid | OID of locked relation |
-| `slot` | smallint | Ring slot (LIST partition key) |
-
-The v2 ring drops the legacy per-row `usename`/`app_name`/`query_preview` for
-lock samples — only `pid` and lookup ids are stored. Use `pgfr_analyze.recent_locks_current()`
-for a column-compatible reader (lost columns return NULL).
-
-### Ring rollups (RANGE-partitioned by `sample_ts`, archive-tier retention)
-
-Durable, bounded-size summaries of ring buffer data beyond the ring's 2h window, written by `_flush_ring_slot_to_rollups()` from `rotate_ring()` right before it TRUNCATEs the slot being rotated out -- no separate cron job, no persisted flush watermark. The `_archive_v2` name gives these `retention_archive_days`-tier retention from `_partition_inventory()` (default 7 days) with no new shared infrastructure; despite the name, these are bounded aggregates, not full-resolution archives.
-
-**`pgfr_record.wait_event_rollups_archive_v2`** -- one row per `(backend_type, wait_event_type, wait_event)` per rotation window
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `sample_ts` | int4 | Window end, seconds since `epoch()`; RANGE partition key |
-| `start_time` / `end_time` | timestamptz | Rotation window bounds |
-| `backend_type` | text | Sourced from `wait_event_map.state` |
-| `wait_event_type` / `wait_event` | text | Wait event category and name |
-| `sample_count` | integer | Distinct samples this wait group appeared in |
-| `total_waiters` / `avg_waiters` / `max_waiters` | bigint / numeric / integer | Waiter count stats over the window |
-| `pct_of_samples` | numeric | Share of the window's total samples |
-
-**`pgfr_record.lock_rollups_archive_v2`** -- one row per `(lock_type, locked_relation_oid)` per rotation window
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `sample_ts` | int4 | Window end, seconds since `epoch()`; RANGE partition key |
-| `start_time` / `end_time` | timestamptz | Rotation window bounds |
-| `lock_type` | text | Decoded via `lock_type_map` |
-| `locked_relation_oid` | oid | OID of the locked relation |
-| `occurrence_count` | integer | Samples this pair appeared in |
-| `max_duration` / `avg_duration` | interval | Blocked-duration stats over the window |
-
-No `blocked_user`/`blocking_user`/`sample_query` columns: the v2 ring's `lock_samples` stores pids and lookup ids, not usernames or query text.
-
-**`pgfr_record.activity_rollups_archive_v2`** -- one row per `(backend_type, state, duration_bucket)` per rotation window
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `sample_ts` | int4 | Window end, seconds since `epoch()`; RANGE partition key |
-| `start_time` / `end_time` | timestamptz | Rotation window bounds |
-| `backend_type` / `state` | text | Backend type and state |
-| `duration_bucket` | text | `<1s` / `1s-10s` / `10s-60s` / `1m-10m` / `10m+`, how long the session had been running its current query at sample time |
-| `occurrence_count` | integer | Samples in this bucket |
-| `max_duration` / `avg_duration` | interval | Running-time stats over the window |
-
-Grouped by concurrency/duration profile rather than raw `query_preview` text (unbounded cardinality, and redundant with `statement_snapshots_v2`'s queryid-based stats).
-
-### Snapshots (durable, 30-day default retention)
-
-**`pgfr_record.snapshots`** -- System-level statistics (WAL, checkpoints, I/O, connections, conflicts). Since the Issue #73 cutover this is a compatibility **view** over the daily-partitioned `snapshots_v2` (`snapshot_id` exposed as `id`); INSERT routes through an INSTEAD OF trigger that assigns `id` from the legacy sequence and derives `sample_ts` from `captured_at`, while UPDATE/DELETE auto-route. Retention is partition truncation (`retention_snapshots_days` tier) plus `cleanup()`'s DELETE; the child tables' FK cascades were replaced by explicit orphan reaping in `cleanup()`.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | integer | Snapshot ID (alias of `snapshots_v2.snapshot_id`, cast to the legacy SERIAL type; unique by convention, assigned by the sequence) |
-| `captured_at` | timestamptz | Capture timestamp |
-| `pg_version` | int | PostgreSQL major version |
-| `wal_records` | bigint | Cumulative WAL records |
-| `wal_fpi` | bigint | Cumulative full-page images |
-| `wal_bytes` | bigint | Cumulative WAL bytes |
-| `wal_write_time` | float8 | Cumulative WAL write time (ms) |
-| `wal_sync_time` | float8 | Cumulative WAL sync time (ms) |
-| `checkpoint_lsn` | pg_lsn | Last checkpoint LSN |
-| `checkpoint_time` | timestamptz | Last checkpoint time |
-| `ckpt_timed` | bigint | Timed checkpoints |
-| `ckpt_requested` | bigint | Requested checkpoints |
-| `ckpt_write_time` | float8 | Checkpoint write time (ms) |
-| `ckpt_sync_time` | float8 | Checkpoint sync time (ms) |
-| `ckpt_buffers` | bigint | Checkpoint buffers written |
-| `bgw_buffers_clean` | bigint | Background writer buffers cleaned |
-| `bgw_maxwritten_clean` | bigint | Background writer max-written stops |
-| `bgw_buffers_alloc` | bigint | Buffers allocated |
-| `bgw_buffers_backend` | bigint | Buffers written by backends |
-| `bgw_buffers_backend_fsync` | bigint | Backend fsync calls |
-| `autovacuum_workers` | int | Active autovacuum workers |
-| `slots_count` | int | Replication slot count |
-| `slots_max_retained_wal` | bigint | Max WAL retained by slots (bytes) |
-| `io_*` | various | I/O stats by backend type: checkpointer, autovacuum, client, bgwriter (reads, writes, times, fsyncs) |
-| `temp_files` | bigint | Temp files created |
-| `temp_bytes` | bigint | Temp bytes written |
-| `xact_commit` | bigint | Committed transactions |
-| `xact_rollback` | bigint | Rolled back transactions |
-| `blks_read` | bigint | Blocks read from disk |
-| `blks_hit` | bigint | Blocks hit in buffer cache |
-| `connections_active` | int | Active connections |
-| `connections_total` | int | Total connections |
-| `connections_max` | int | `max_connections` setting |
-| `db_size_bytes` | bigint | Database size |
-| `datfrozenxid_age` | int | Database frozen XID age (`age(datfrozenxid)`) |
-| `datminmxid_age` | int | Database MultiXact ID age (`mxid_age(datminmxid)`) |
-| `archived_count` | bigint | WAL files archived |
-| `last_archived_wal` | text | Last archived WAL file |
-| `last_archived_time` | timestamptz | Last archive time |
-| `failed_count` | bigint | Failed archive attempts |
-| `last_failed_wal` | text | Last failed WAL file |
-| `last_failed_time` | timestamptz | Last failure time |
-| `archiver_stats_reset` | timestamptz | Archiver stats reset time |
-| `confl_tablespace` | bigint | Tablespace conflicts (replicas) |
-| `confl_lock` | bigint | Lock conflicts (replicas) |
-| `confl_snapshot` | bigint | Snapshot conflicts (replicas) |
-| `confl_bufferpin` | bigint | Buffer pin conflicts (replicas) |
-| `confl_deadlock` | bigint | Deadlock conflicts (replicas) |
-| `confl_active_logicalslot` | bigint | Logical slot conflicts (replicas) |
-| `max_catalog_oid` | bigint | Highest catalog OID |
-| `large_object_count` | bigint | Number of large objects |
-| `activity_xmin` / `activity_xmin_age` | xid / bigint | Oldest `pg_stat_activity.backend_xmin` (self- and parallel-worker-excluded) |
-| `slot_xmin` / `slot_xmin_age` | xid / bigint | Oldest `pg_replication_slots.xmin` |
-| `slot_catalog_xmin` / `slot_catalog_xmin_age` | xid / bigint | Oldest `pg_replication_slots.catalog_xmin` (logical-decoding catalog cleanup horizon) |
-| `replication_xmin` / `replication_xmin_age` | xid / bigint | Oldest `pg_stat_replication.backend_xmin` (physical walsenders only) |
-| `prepared_xmin` / `prepared_xmin_age` | xid / bigint | Oldest `pg_prepared_xacts.transaction` |
-| `xmin_data_horizon_age` | bigint | `GREATEST` of the four data-source ages |
-| `xmin_any_horizon_age` | bigint | `GREATEST(xmin_data_horizon_age, slot_catalog_xmin_age)` |
-| `xmin_horizon_detail` | jsonb | `{source, age, holder: {...}}` describing the dominant holder. `source` ∈ `activity` / `slot` / `slot_catalog` / `prepared` / `replication`. NULL when no holder. |
-
-**`pgfr_record.statement_snapshots`** -- Per-query statistics from pg_stat_statements
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `snapshot_id` | int | FK to snapshots |
-| `queryid` | bigint | Query identifier |
-| `userid` | oid | User OID |
-| `dbid` | oid | Database OID |
-| `query_preview` | text | Truncated query text |
-| `calls` | bigint | Cumulative call count |
-| `total_exec_time` | float8 | Cumulative execution time (ms) |
-| `min_exec_time` | float8 | Minimum execution time (ms) |
-| `max_exec_time` | float8 | Maximum execution time (ms) |
-| `mean_exec_time` | float8 | Mean execution time (ms) |
-| `rows` | bigint | Cumulative rows returned |
-| `shared_blks_hit` | bigint | Shared buffer hits |
-| `shared_blks_read` | bigint | Shared blocks read |
-| `shared_blks_dirtied` | bigint | Shared blocks dirtied |
-| `shared_blks_written` | bigint | Shared blocks written |
-| `temp_blks_read` | bigint | Temp blocks read |
-| `temp_blks_written` | bigint | Temp blocks written |
-| `blk_read_time` | float8 | Block read time (ms) |
-| `blk_write_time` | float8 | Block write time (ms) |
-| `wal_records` | bigint | WAL records generated |
-| `wal_bytes` | numeric | WAL bytes generated |
-
-**`pgfr_record.table_snapshots`** -- Per-table statistics
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `snapshot_id` | int | FK to snapshots |
-| `schemaname` | text | **Deprecated** -- use `relid::regclass` |
-| `relname` | text | **Deprecated** -- use `relid::regclass` |
-| `relid` | oid | Table OID |
-| `seq_scan` | bigint | Sequential scans |
-| `seq_tup_read` | bigint | Tuples read by seq scans |
-| `idx_scan` | bigint | Index scans |
-| `idx_tup_fetch` | bigint | Tuples fetched by index scans |
-| `n_tup_ins` | bigint | Tuples inserted |
-| `n_tup_upd` | bigint | Tuples updated |
-| `n_tup_del` | bigint | Tuples deleted |
-| `n_tup_hot_upd` | bigint | HOT updates |
-| `n_live_tup` | bigint | Live tuples |
-| `n_dead_tup` | bigint | Dead tuples |
-| `n_mod_since_analyze` | bigint | Modifications since last analyze |
-| `vacuum_count` | bigint | Manual vacuum count |
-| `autovacuum_count` | bigint | Autovacuum count |
-| `analyze_count` | bigint | Manual analyze count |
-| `autoanalyze_count` | bigint | Autoanalyze count |
-| `last_vacuum` | timestamptz | Last manual vacuum |
-| `last_autovacuum` | timestamptz | Last autovacuum |
-| `last_analyze` | timestamptz | Last manual analyze |
-| `last_autoanalyze` | timestamptz | Last autoanalyze |
-| `relfrozenxid_age` | int | Table frozen XID age (`age(c.relfrozenxid)`) |
-| `relminmxid_age` | int | Table MultiXact ID age (`mxid_age(c.relminmxid)`) |
-| `reltuples` | bigint | Estimated live rows (from `pg_class`) |
-| `vacuum_running` | bool | Whether vacuum is currently running |
-| `last_vacuum_duration_ms` | bigint | Duration of last vacuum (ms) |
-| `table_size_bytes` | bigint | Table size excluding indexes |
-| `total_size_bytes` | bigint | Table + index size |
-| `indexes_size_bytes` | bigint | Index size |
-
-**`pgfr_record.index_snapshots`** -- Per-index statistics
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `snapshot_id` | int | FK to snapshots |
-| `schemaname` | text | **Deprecated** -- use `relid::regclass` |
-| `relname` | text | **Deprecated** -- use `relid::regclass` |
-| `indexrelname` | text | **Deprecated** -- use `indexrelid::regclass` |
-| `relid` | oid | Table OID |
-| `indexrelid` | oid | Index OID |
-| `idx_scan` | bigint | Index scans |
-| `idx_tup_read` | bigint | Index tuples read |
-| `idx_tup_fetch` | bigint | Index tuples fetched |
-| `index_size_bytes` | bigint | Index size (bytes) |
-
-**`pgfr_record.config_snapshots`** -- PostgreSQL configuration
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `snapshot_id` | int | FK to snapshots |
-| `name` | text | Setting name |
-| `setting` | text | Setting value |
-| `unit` | text | Setting unit |
-| `source` | text | Setting source (e.g., `configuration file`) |
-| `sourcefile` | text | Config file path |
-
-**`pgfr_record.db_role_config_snapshots`** -- Database/role configuration overrides
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `snapshot_id` | int | FK to snapshots |
-| `database_name` | text | Database name (empty for global) |
-| `role_name` | text | Role name (empty for database-level) |
-| `parameter_name` | text | Parameter name |
-| `parameter_value` | text | Parameter value |
-
-**`pgfr_record.replication_snapshots`** -- Replication state
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `snapshot_id` | int | FK to snapshots |
-| `pid` | int | WAL sender PID |
-| `client_addr` | inet | Replica address |
-| `application_name` | text | Application name |
-| `state` | text | Replication state |
-| `sync_state` | text | Sync mode |
-| `sent_lsn` | pg_lsn | Last LSN sent |
-| `write_lsn` | pg_lsn | Last LSN written by replica |
-| `flush_lsn` | pg_lsn | Last LSN flushed by replica |
-| `replay_lsn` | pg_lsn | Last LSN replayed by replica |
-| `write_lag` | interval | Write lag |
-| `flush_lag` | interval | Flush lag |
-| `replay_lag` | interval | Replay lag |
-| `backend_xmin` / `backend_xmin_age` | xid / bigint | Walsender's `backend_xmin` and `age()` |
-| `slot_name` | text | Slot driving this walsender (joined from `pg_replication_slots.active_pid`) |
-| `is_logical_walsender` | boolean | `true` for logical-decoding walsenders (excluded from the `replication_xmin` aggregate; the slot's own xmin is captured via `slot_xmin` / `slot_catalog_xmin` on the same snapshot row) |
-
-**`pgfr_record.vacuum_progress_snapshots`** -- Vacuum progress
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `snapshot_id` | int | FK to snapshots |
-| `pid` | int | Vacuum worker PID |
-| `datid` | oid | Database OID |
-| `datname` | text | Database name |
-| `relid` | oid | Table OID |
-| `relname` | text | Table name |
-| `phase` | text | Vacuum phase |
-| `heap_blks_total` | bigint | Total heap blocks |
-| `heap_blks_scanned` | bigint | Heap blocks scanned |
-| `heap_blks_vacuumed` | bigint | Heap blocks vacuumed |
-| `index_vacuum_count` | bigint | Index vacuum passes |
-| `max_dead_tuples` | bigint | Max dead tuples per pass |
-| `num_dead_tuples` | bigint | Current dead tuples found |
-
-### Consumption ledger
-
-**`pgfr_record.consumption_snapshots_v2`** -- global block/WAL/tuple flow ledger, daily RANGE-partitioned by `sample_ts`, one row per `snapshot()` tick. No FK (`snapshot_id` is a logical reference to `snapshots_v2`). Primary-only -- no rows are written while `pg_is_in_recovery()`.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `snapshot_id` | bigint | Logical reference to `snapshots_v2.snapshot_id` (no FK) |
-| `sample_ts` | int4 | Seconds since `epoch()`; RANGE partition key |
-| `captured_at` | timestamptz | Capture timestamp |
-| `pg_version` | int | PostgreSQL major version |
-| `datname` | text | Scope label for the per-database lanes below |
-| `wal_lsn` | pg_lsn | `pg_current_wal_lsn()` -- ledger of record, valid across stats resets |
-| `tup_returned` / `tup_fetched` / `tup_inserted` / `tup_updated` / `tup_deleted` | bigint | Cumulative tuple flow (`pg_stat_database`, per-database) |
-| `xact_commit` / `xact_rollback` | bigint | Cumulative transactions (per-database) |
-| `blks_hit` / `blks_read` | bigint | Cumulative block demand (per-database) |
-| `blk_read_time_ms` / `blk_write_time_ms` | float8 | Cumulative block I/O time; 0 (not NULL) when `track_io_timing` is off |
-| `temp_files` / `temp_bytes` | bigint | Cumulative temp file spill (per-database) |
-| `wal_records` / `wal_fpi` / `wal_buffers_full` | bigint | WAL decomposition (`pg_stat_wal`, cluster-wide, advisory vs. `wal_lsn`) |
-| `wal_bytes` | numeric | Advisory WAL byte decomposition (cluster-wide) |
-| `wal_stats_reset` | timestamptz | Reset sentinel for the `wal_*` lane |
-| `io_reads_client` / `io_writes_client` / `io_extends_client` / `io_fsyncs_client` | bigint | Client-backend I/O (`pg_stat_io`, object=relation, PG16+) |
-| `io_reads_autovacuum` / `io_writes_autovacuum` | bigint | Autovacuum-worker I/O |
-| `io_writes_checkpointer` / `io_fsyncs_checkpointer` | bigint | Checkpointer I/O |
-| `io_writes_bgwriter` | bigint | Background writer I/O |
-| `io_reads_total` / `io_writes_total` / `io_extends_total` | bigint | Cluster-wide totals across backend types; `io_reads_total` NULL on PG15 (no `pg_stat_io`) |
-| `ckpt_num_timed` / `ckpt_num_requested` / `ckpt_buffers_written` | bigint | Checkpoint counters (`pg_stat_checkpointer` PG17+, `pg_stat_bgwriter` PG15-16) |
-| `bgw_buffers_clean` / `bgw_maxwritten_clean` / `bgw_buffers_alloc` | bigint | Background writer counters |
-| `ckpt_stats_reset` | timestamptz | Reset sentinel for the checkpointer/bgwriter lane |
-| `db_stats_reset` | timestamptz | Reset sentinel for the per-database lane |
-| `db_size_bytes` | bigint | `pg_database_size()` at capture time |
-| `recorder_blks_hit` / `recorder_blks_read` | bigint | pgfr_record's own block footprint (self-accounting) |
-
-`io_reads_total` is a request issued to the OS, not confirmed disk I/O -- the OS page cache may satisfy it. See `consumption_flows.os_read_blocks_per_s` / `os_write_blocks_per_s`.
-
-**`pgfr_record.consumption_daily_rollups`** -- durable daily-grain rollup, one row per calendar day per `datname`, populated by `_rollup_consumption_daily()` from the daily `pgfr_cleanup` cron job (no separate job). Not partitioned, no retention -- tiny by construction (a decade is ~3,650 rows), meant to be kept indefinitely. Stores summed components, not ratios (see `consumption_daily_flows`).
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `rollup_date` | date | Calendar day (PK, with `datname`) |
-| `datname` | text | Database name (PK) |
-| `total_seconds` | int | Sum of valid tick intervals; use as the daily "_per_s" denominator instead of assuming 86400 |
-| `valid_tick_count` | int | Count of ticks that contributed to this row |
-| `blks_hit_sum` / `blks_read_sum` | bigint | Summed block demand |
-| `tup_returned_sum` / `tup_mutated_sum` | bigint | Summed tuple flow (`tup_mutated` = inserted + updated + deleted) |
-| `xact_commit_sum` / `xact_rollback_sum` | bigint | Summed transactions |
-| `temp_bytes_sum` | bigint | Summed temp spill |
-| `recorder_blks_hit_sum` / `recorder_blks_read_sum` | bigint | Summed self-accounting block footprint |
-| `wal_bytes_sum` | numeric | Summed WAL bytes (LSN-diff based, ledger of record) |
-| `wal_fpi_sum` | bigint | Summed WAL full-page images |
-| `wal_bytes_advisory_sum` | numeric | Summed advisory WAL byte decomposition |
-| `ckpt_num_timed_sum` / `ckpt_num_requested_sum` | bigint | Summed checkpoint counts |
-| `io_writes_autovacuum_sum` / `io_writes_total_sum` | bigint | Summed write I/O (PG16+; NULL on PG15) |
-| `db_size_bytes` | bigint | Day's last-observed database size (gauge, not a sum) |
-
-### Consumption trends (pgfr_analyze)
-
-**`pgfr_analyze.consumption_trends`** -- persisted trend assessments for the consumption ledger's 8-metric basket, one row per `(as_of_date, datname, metric_name, window_days)`, upserted on every refresh so history accumulates across days rather than being overwritten. Not partitioned, no retention -- tiny by construction, meant to be kept indefinitely.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `as_of_date` | date | Date this assessment was computed (PK) |
-| `datname` | text | Database name (PK) |
-| `metric_name` | text | One of the 8 basket metrics (PK): `blocks_per_row_returned`, `wal_bytes_per_row_mutated`, `temp_bytes_per_xact`, `fpi_fraction`, `ckpt_requested_fraction`, `rollback_fraction`, `autovacuum_write_share`, `cache_hit_fraction` |
-| `window_days` | integer | `28` (daily engine) or `84` (weekly engine) (PK) |
-| `basket_version` | integer | Metric-basket schema version |
-| `sample_count` | integer | Count of non-NULL periods (days or weeks) in the window |
-| `baseline_start` / `baseline_end` | date | The window's fixed date range |
-| `slope_pct_per_30d` | numeric | Theil-Sen slope (median of pairwise slopes), normalized to %/30d relative to the window's median value; NULL when `insufficient_data` |
-| `classification` | text | `insufficient_data` / `stable` / `drift` / `step` / `composition` / `discontinuity` -- see below |
-| `changepoint_date` | date | Set only when `classification` is `step` or `discontinuity` |
-| `composition_change` | boolean | Whether workload-shape indicators (`read_write_tuple_ratio`, `xact_per_s`, `rows_returned_per_xact`, `rows_mutated_per_xact`, `db_size_bytes`) shifted beyond `consumption_trend_shape_guard_pct` between the window's two fixed halves |
-| `computed_at` | timestamptz | Timestamp of this row's (re)computation |
-
-`classification` values: `stable` (no line or step fits meaningfully better than noise), `drift` (a gradual change -- a line fits at least as well as any step), `step` (a genuine level shift -- a two-level step fits meaningfully better than a line, by `consumption_trend_step_r2_margin`), `composition` (a step or drift was detected, but the workload shape also moved -- no fitness inference is safe), `insufficient_data` (fewer than `consumption_trend_min_days` / `consumption_trend_min_weeks` periods collected), `discontinuity` (a level shift was detected but its split coincides with a recorded restart or stats reset in `pgfr_record.discontinuities` -- a known instrument boundary supplied as input, not a discovered changepoint). Distinguishing `step` from `drift` compares model fit (R²), not shift magnitude -- a clean step and a linear ramp can produce the same shift-magnitude-to-variability ratio.
-
-### Internal
-
-**`pgfr_record.config`** -- Flight Recorder configuration (key-value store)
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `key` | text | Setting name (PK) |
-| `value` | text | Setting value |
-| `updated_at` | timestamptz | Last modified |
-
-**`pgfr_record.collection_stats`** -- Collection job metrics
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | serial | Row ID |
-| `collection_type` | text | `snapshot` or `sample` |
-| `started_at` | timestamptz | Job start time |
-| `completed_at` | timestamptz | Job end time |
-| `duration_ms` | int | Duration in milliseconds |
-| `success` | bool | Whether collection succeeded |
-| `error_message` | text | Error message if failed |
-| `skipped` | bool | Whether collection was skipped |
-| `skipped_reason` | text | Reason for skip (load shedding, circuit breaker, etc.) |
-| `skip_kind` | text | Enumerated skip class (`circuit_breaker`, `load_shedding`); NULL for non-skips and pre-upgrade rows, which classify via `pgfr_record._skip_kind(skipped_reason)` |
-| `sections_total` | int | Total sections attempted |
-| `sections_succeeded` | int | Sections that succeeded |
-
-**`pgfr_record.discontinuities`** -- censoring-event ledger (see [STATISTICS.md](STATISTICS.md)); LOGGED, unpartitioned, no retention
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | bigint | Row ID |
-| `detected_at` | timestamptz | When the recorder noticed the event (the true event time lies between the previous tick and this one) |
-| `event_kind` | text | `stats_reset`, `pgss_reset`, `pgss_eviction_pressure`, `restart`, or `rollup_flush_failed` |
-| `scope` | text | Which counter family or subsystem the event censors (`pg_stat_database`, `pg_stat_wal`, `checkpointer_bgwriter`, `pg_stat_statements`, `postmaster`, or an archive rollup table name) |
-| `evidence` | jsonb | Machine-readable detail: previous/current sentinel values, error text, slot and window bounds, dealloc counts |
-
-**`pgfr_record.relation_names`** -- OID to relation name mappings (populated at export time)
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `oid` | oid | Relation OID (PK) |
-| `nspname` | text | Schema name |
-| `relname` | text | Relation name |
-
-### Deprecated columns
-
-The following columns are **deprecated** and will be NULL in new data:
-
-| Table | Deprecated Columns | Use Instead |
-|-------|--------------------|--------------------------------------------|
-| `table_snapshots` | `schemaname`, `relname` | `relid::regclass` or `relation_names` lookup |
-| `index_snapshots` | `schemaname`, `relname`, `indexrelname` | `relid::regclass`, `indexrelid::regclass` |
-
-This eliminates `pg_catalog` joins during collection, avoiding even `AccessShareLock`. Existing data with names is preserved.
-
-## Configuration settings
-
-Settings are stored in `pgfr_record.config`. Profiles set groups of related settings. Update individual settings with:
-
-```sql
-UPDATE pgfr_record.config SET value = '14' WHERE key = 'retention_snapshots_days';
+Complete reference for [pg_flight_recorder](README.md) v2. For installation and getting started, see the [README](README.md) and [pgfr_record/README.md](pgfr_record/README.md). For the statistics collected and why, see [STATISTICS.md](STATISTICS.md).
+
+Everything below is a fact about `pgfr_record`, the required core extension. `pgfr_analyze` is covered in one section at the end: it is not yet rebuilt for v2.
+
+## The big picture
+
+`pgfr_record` appends debounced, dictionary-encoded jsonb samples of PostgreSQL's own stats views and system views into time-partitioned tables, and drops old partitions. Everything in this reference is machinery driven by one table, `pgfr_record.manifest`: which views, how often, with what identity, kept how long. Every archive table, presentation view, capture-plan entry, and column classification is generated from the manifest plus the live catalog. Re-running `install.sql` regenerates all of it; that is the entire upgrade procedure, including after a PostgreSQL major version upgrade.
+
+## The manifest
+
+`pgfr_record.manifest` is the single design artifact: one row per capture target (a stats view, system view, or catalog projection). Every generator and collector behaves as a pure function of this table.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `source_view` | `text` (PK) | Schema-qualified source, e.g. `pg_catalog.pg_stat_database`, or a pgfr-defined projection view |
+| `min_major` / `max_major` | `int` | PostgreSQL major-version range this target exists on; `max_major IS NULL` means still present |
+| `cadence_tier` | `text` | `fast`, `medium`, `slow`, or `on_change`: maps to a pg_cron interval via the active profile |
+| `natural_key` | `text[]` | Columns forming this target's identity; `{}` means singleton (no key) |
+| `keyless` | `boolean` | True when the source has no stable row identity (e.g. `pg_locks`); forces `debounce = false` |
+| `debounce` | `boolean` | Skip appending a row unchanged since its most recent capture, within the current anchor window |
+| `compare_ignore` | `text[]` | Columns nulled out of the *compare* payload before hashing (estimator churn, etc.), though the stored payload keeps every value |
+| `anchor_every` | `interval` | Cadence of an unconditional full capture for a debounced target; required when `debounce = true` |
+| `retention` | `interval` | How long rows are kept, implemented as partition drop, never `DELETE` |
+| `logged` | `boolean` | `false` makes the archive table's partitions `UNLOGGED` (default `true`) |
+| `size_class` | `text` | Coarse cardinality label (`singleton`, `per_db`, `per_relation`, `per_backend`, or `per_slot`), used only by the cost model and docs |
+| `requires` | `text` | Precondition for full visibility: an extension, a GUC, or a role/privilege note |
+| `enabled` | `boolean` | `false` rows are still listed, with notes, so "why doesn't pgfr capture X" is queryable. They get no archive table or capture-plan entry |
+| `notes` | `text` | Free-text design rationale |
+
+Both `debounce = false OR anchor_every IS NOT NULL` and `keyless = false OR debounce = false` are enforced by `CHECK` constraints, not convention.
+
+### The PG15 seed census
+
+`03_seed_pg15.sql` seeds 41 manifest rows. Counts below are the live table on PostgreSQL 15, queried directly rather than assumed:
+
+| | rows |
+|---|---|
+| Total manifest rows | 41 |
+| Enabled | 35 |
+| Disabled (Group E) | 6 |
+| Version-gated beyond PG15 (`min_major` 16 or 17) | 2 |
+| Active on PG15 (enabled and `min_major <= 15`) | 33 |
+
+**Group A: cumulative counters, singleton / per-db.** Fast tier, 30 days retention, `debounce = false` (cheap, always changing, every sample wanted).
+
+| source_view | key | notes |
+|---|---|---|
+| `pg_stat_archiver` | `{}` | reset: `stats_reset` |
+| `pg_stat_bgwriter` | `{}` | reset: `stats_reset`. PG17 removes checkpoint columns (moved to `pg_stat_checkpointer`); agnostic capture absorbs |
+| `pg_stat_wal` | `{}` | reset: `stats_reset` |
+| `pg_stat_slru` | `{name}` | per-cache row set, small/bounded cardinality; reset: `stats_reset` |
+| `pg_stat_database` | `{datid}` | includes the `datid = 0` shared-objects row; reset: `stats_reset` |
+| `pg_stat_database_conflicts` | `{datid}` | nonzero only on standbys |
+| `pg_stat_io` (min_major 16) | `{backend_type, object, context}` | the single most valuable addition in the series |
+| `pg_stat_checkpointer` (min_major 17) | `{}` | receives the columns split out of `pg_stat_bgwriter` |
+
+**Group B: cumulative counters, per-relation, the cardinality frontier.** Medium tier (statio: slow), `debounce = true`, `anchor_every = 1 day`, 30 days retention.
+
+| source_view | key | compare_ignore | requires | notes |
+|---|---|---|---|---|
+| `pg_stat_all_tables` | `{relid}` | `{n_live_tup, n_dead_tup, n_mod_since_analyze, n_ins_since_vacuum}` | n/a | the ignore-list keeps estimator churn from defeating debounce; ignored columns are still stored |
+| `pg_stat_all_indexes` | `{indexrelid}` | `{}` | n/a | |
+| `pg_statio_all_tables` | `{relid}` | `{}` | n/a | slow tier |
+| `pg_statio_all_indexes` | `{indexrelid}` | `{}` | n/a | slow tier |
+| `pg_statio_all_sequences` | `{relid}` | `{}` | n/a | slow tier |
+| `pg_stat_user_functions` | `{funcid}` | `{}` | `track_functions <> none` | |
+| `pg_stat_statements` | `{userid, dbid, queryid, toplevel}` | `{}` | `pg_stat_statements` extension | unqualified on purpose, see below |
+| `pg_stat_statements_info` | `{}` | `{}` | `pg_stat_statements` extension | fast tier; singleton companion carrying the reset signal that distinguishes a real reset from per-query eviction |
+
+`pg_stat_statements` and `pg_stat_statements_info` are extension-provided views, not `pg_catalog` builtins: `CREATE EXTENSION` installs them wherever the current schema was at the time (`public` on stock PostgreSQL, typically `extensions` on Supabase). The manifest references them unqualified and lets `::regclass` resolve them via `search_path`, exactly as any other client of an extension-provided object would.
+
+**Group C: gauges.** Fast tier, 2 hours retention (this is what the v1 ring buffer becomes when expressed as a retention number), `debounce = false`. 13 rows: `pg_stat_activity` (key `{pid, backend_start}`, where `backend_start` disambiguates pid reuse), `pg_locks` (keyless; join to activity via `pid` at equal `captured_at`), `pg_stat_replication`, `pg_stat_wal_receiver`, `pg_stat_subscription`, `pg_replication_slots` (odometers `restart_lsn`/`confirmed_flush_lsn`; failure to advance is an analyze-side alarm), `pg_prepared_xacts` (usually empty; an aging row is itself an anomaly), and the six default-on progress views (`pg_stat_progress_vacuum`, `_cluster`, `_create_index`, `_basebackup`, `_analyze`, `_copy`).
+
+**Group D: state history.** `on_change` tier, `debounce = true`, `anchor_every = 1 month` (Group D uses monthly partitions per the retention-to-width rule below), 365 days retention.
+
+| source_view | key | notes |
+|---|---|---|
+| `pg_settings` | `{name}` | flagship: GUC change detection falls out of debounce for free |
+| `pg_roles` | `{oid}` | `rolpassword` is stripped from the payload defensively (masked anyway) |
+| `pg_hba_file_rules` | `{line_number}` | requires privileged read; degrades via the ledger when unreadable |
+| `pg_file_settings` | `{sourcefile, sourceline}` | detects applied-vs-file divergence |
+| `pg_extension` | `{oid}` | a catalog table, not a view; captures extension installs/upgrades |
+| `pgfr_record.src_catalog_identity` | `{oid}` | the dimension table: resolves any `relid`/`indexrelid` in Group B as of any `captured_at`, surviving OID reuse across DROP/CREATE |
+
+**Group E: disabled, with reasons.** `pg_cursors`, `pg_prepared_statements`, `pg_backend_memory_contexts` (all session-local: they observe pg_cron's own session, not the workload), `pg_timezone_names` (static and enormous), `pg_stats` (per-column planner statistics, a different product, ANALYZE-cadenced), `pg_shmem_allocations` (low routine value; a troubleshooting-profile candidate).
+
+## Payload dictionary
+
+Payloads are stored as **jsonb arrays of values in a fixed positional order**, not objects. An all-numeric stats row spends most of its bytes on repeated key names in an object encoding, and most rows sit below jsonb's TOAST/compression threshold, so that tax is paid in full, twice (heap and WAL). Arrays keep jsonb's heterogeneous container (compact `numeric`, native null, text only where text exists) and drop the repeated-key structure.
+
+The positional order lives once, in `pgfr_record.payload_schemas`:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `schema_id` | `smallint` (PK, identity) | Referenced by every archive row and by `capture_plan` |
+| `source_view` | `text` | Which target this layout belongs to |
+| `columns` | `text[]` | Column names in payload array position order: position `i` of a payload is `columns[i+1]` |
+| `type_names` | `text[]` | Column type names in the same order; drives presentation-view cast generation |
+| `fingerprint` | `text` | Hash of `(source_view, columns, type_names)`; a changed live view shape mints a new row rather than editing this one |
+| `first_seen` | `timestamptz` | When this schema_id was minted |
+
+Append-only, like everything else: a changed view shape (a mid-major column addition, most notably `pg_stat_statements`) is a new `payload_schemas` row, never an edit. The **mint-together invariant** closes the one corruption hazard positional encoding introduces: the generated capture statement (`capture_plan.capture_select_sql`) and its `schema_id` are two outputs of one generator run, minted atomically from the same live-column introspection, so the array's column order and the dictionary row describing that order can never drift apart. Because arrays can't distinguish NULL from absent, every position is always present (NULL-filled where needed); this is safe precisely because `schema_id` says exactly which columns exist for that row.
+
+The stored payload is the view's row, *normalized*: keys dictionaried out, exactly as query text already is in `pg_stat_statements`. The "the data model is exactly the PostgreSQL views" promise is made and kept at the presentation layer (below), which is the layer users actually read.
+
+## Archive tables
+
+One table per enabled, version-applicable manifest row, named `pgfr_record.a_<short_name>` (the source view's name without its schema, e.g. `a_pg_stat_database`). Uniform shape everywhere: this is what "schema-agnostic" means.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `captured_at` | `timestamptz` | When this sample was taken, the tier's single stamp for this run |
+| `key` | `jsonb` | Natural-key columns as a jsonb object, e.g. `{"relid": 16384}`; `NULL` when keyless or singleton |
+| `key_hash` | `bigint` | `hashtextextended(key::text, 0)`; `NULL` when `key IS NULL`. Drives the debounce anti-join and LOCF reads |
+| `row_hash` | `bigint` | `hashtextextended(compare_payload::text, 0)`, with `compare_ignore` columns nulled and `schema_id` folded into the compared text |
+| `schema_id` | `smallint` | Which `payload_schemas` row this payload's positions follow (FK) |
+| `payload` | `jsonb` | Positional jsonb array of every captured column value |
+
+`PARTITION BY RANGE (captured_at)`, plus one index: `(key_hash, captured_at DESC)`, for the debounce anti-join and LOCF. Nothing indexes `payload`. There is no visibility column here: visibility (`full`, `masked`, or `degraded`) lives in the capture ledger, per run per target, not per archive row.
+
+Plural, uniform-shape tables (rather than one giant generic table) mean retention is per-target partition dropping, a 100k-relation Group B table can't bloat `pg_settings` history, autovacuum sees homogeneous tables, and per-target indexes stay small. The generator makes every one of them from the manifest, so plurality costs no hand-written DDL.
+
+### Partitioning and retention
+
+Partition width is derived from retention by a fixed rule (`_partition_unit()`), not stored in the manifest:
+
+| Retention | Partition width |
+|---|---|
+| Up to 6 hours | hourly |
+| Up to 60 days | daily |
+| Longer than 60 days | monthly |
+
+Retention is `ALTER TABLE ... DETACH PARTITION ... CONCURRENTLY` followed by `DROP TABLE` on the detached table, never `DELETE`, anywhere. `maintain_partitions()`, run hourly by its own pg_cron job, is a four-step reconciliation loop rather than a linear script, because `DETACH PARTITION ... CONCURRENTLY` cannot execute from inside a function or procedure body on any supported PostgreSQL version:
+
+1. **Create-ahead.** Pre-create partitions covering at least two widths beyond `now()`, for every target. Ordinary DDL, runs directly.
+2. **Schedule detaches.** For each expired, still-attached partition, `cron.schedule()` a one-off pg_cron job (an exact one-time cron spec, not a recurring wildcard) whose command text is *only* the bare `DETACH ... CONCURRENTLY` statement, since pg_cron dispatches it as a single top-level statement and anything else sharing that command string would be wrapped in an implicit transaction, breaking `CONCURRENTLY` again.
+3. **Drop retired tables.** Any standalone table (no longer attached to anything) matching a target's naming convention, left over once a prior cycle's detach fired. Ordinary DDL.
+4. **Reap.** Unschedule the one-off jobs from step 2 once their target has been fully dropped by step 3.
+
+A partition's full retirement therefore spans up to two maintenance cycles, immaterial given retention windows measured in hours to months and create-ahead already buffering two widths. If a collector's insert would land outside existing partitions (the maintenance job died), the per-target `EXCEPTION` block records the miss in the ledger as `error` rather than raising uncaught; `health_check()` surfaces the underlying staleness.
+
+## Presentation views
+
+`pgfr_record.v_<short_name>` projects an archive table's jsonb-array payloads back into the source view's typed columns, plus `captured_at`. Generated by `generate_presentation_views()`, always `DROP` + `CREATE`, never `CREATE OR REPLACE`: PostgreSQL refuses to replace a view in a way that removes or reorders existing output columns, and a real source view can legitimately do that between majors (PG17 splits checkpoint columns out of `pg_stat_bgwriter`). This is safe because presentation views are freely regenerable; the archive data underneath them is not.
+
+A source view can carry more than one `payload_schemas` row over time (mid-major column accretion, `pg_stat_statements` being the known offender). The view's column set always matches the *current* (highest `schema_id`) shape; rows captured under an earlier, narrower schema get `NULL` for whichever column didn't exist yet, via one `UNION ALL` branch per `schema_id` the source view has ever had. Column positions are resolved per-variant, never assumed to line up across schemas. Presentation views reflect the **current major only**; reading pre-upgrade payloads through post-upgrade views is a best-effort, `pgfr_analyze`-side concern, not guaranteed here.
+
+Array-typed columns (e.g. `pg_settings.enumvals`, a `text[]`) need special handling: the `->>` operator returns a nested array's JSON-bracket text form, not a Postgres array literal, so `_jsonb_element_cast()` reassembles them via `jsonb_array_elements_text()` instead of a plain cast, with an explicit guard for a captured NULL.
+
+Example, from a live PG15 install (`\d+ pgfr_record.v_pg_stat_database`):
+
+```
+                                                View "pgfr_record.v_pg_stat_database"
+          Column          |           Type           |            Description
+--------------------------+--------------------------+------------------------------------
+ captured_at              | timestamp with time zone |
+ datid                    | oid                      | class: key
+ datname                  | name                     | class: label
+ numbackends              | integer                  | class: gauge
+ xact_commit              | bigint                   | class: counter; reset: stats_reset
+ ...
 ```
 
-The collection cadence itself is not a setting: both collectors run at a fixed one-minute cadence (the retired `sample_interval_seconds` key never changed it; see [STATISTICS.md](STATISTICS.md) for the detection limits this constant fixes).
+## Column classes
 
-### Core settings
+`pgfr_record.column_classes(source_view, column_name, class, reset_column)` is the counter/odometer/gauge/label/key legend: definitional, not judgmental, so it lives in `pgfr_record` rather than `pgfr_analyze` (the record layer stores and describes the taxonomy; it never uses it to form an opinion).
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `schema_version` | `2.28` | Schema version (do not modify) |
-| `mode` | `normal` | Collection mode: `normal`, `light`, `emergency` |
-| `enabled` | `true` | Whether collection is enabled |
+- **counter**: monotone and resettable; the derivative is the value proposition. Links to `reset_column` (usually `stats_reset`) when one exists in the same view.
+- **odometer**: monotone and non-resettable (LSNs, XIDs); no reset detection needed.
+- **gauge**: point-in-time.
+- **label**: identity/dimension, not a measurement.
+- **key**: a natural-key column.
 
-### Collection intervals and retention
+`generate_column_classes()` derives this **mechanically**, rather than from a hand-typed per-column list. Hand-classifying every column of roughly 40 census views from memory risks exactly the kind of confidently-wrong answer the record/analyze boundary is designed to avoid. The rule order, checked top to bottom:
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `retention_snapshots_days` | `30` | Snapshot retention (days) |
-| `retention_archive_days` | `7` | Archive-tier partition retention (days) for the three ring rollup tables (`wait_event_rollups_archive_v2`, `lock_rollups_archive_v2`, `activity_rollups_archive_v2`), selected by their `_archive_v2` suffix in `_partition_inventory()` |
-| `retention_statements_days` | `30` | Statement snapshot retention (days) |
-| `retention_collection_stats_days` | `30` | Collection stats retention (days) |
+1. Natural-key membership maps to `key` (identity always wins, even over the override list below: `pid` is a natural-key column on some targets and an override-list gauge on others).
+2. A small named override list for numeric-but-not-cumulative columns: `numbackends`, `pid`, `sender_port`, `client_port`, `sync_priority`.
+3. A column literally named `stats_reset` maps to `label` (and becomes the `reset_column` for this view's own counters).
+4. Type `pg_lsn`, `xid`, or `xid8` maps to `odometer`.
+5. A column in this row's `compare_ignore` maps to `gauge` (the same rationale that put it in `compare_ignore`: it's estimate churn, not real change).
+6. Column name matching `min_`, `max_`, `mean_`, or `stddev_` maps to `gauge`.
+7. Type `timestamptz` or `interval` maps to `gauge`.
+8. Remaining numeric types map to `counter`, with `reset_column` linked to `stats_reset` when present.
+9. Everything else maps to `label`.
 
-### Safety thresholds
+This is a best-effort mechanical classification, not a hand-verified audit against PostgreSQL's own documentation for every column. The override list is a documented starting point, expected to grow as misclassifications surface in practice, the same maintenance posture as `compare_ignore`.
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `circuit_breaker_threshold_ms` | `1000` | Max collection duration before circuit breaker trips |
-| `circuit_breaker_window_minutes` | `15` | Window for circuit breaker evaluation |
-| `load_shedding_active_pct` | `70` | Connection % threshold for load shedding |
-| `lock_timeout_ms` | `100` | Lock timeout for collection queries |
-| `lock_timeout_strategy` | `fail_fast` | Lock timeout strategy |
-| `section_timeout_ms` | `250` | Per-section timeout within collection |
-| `statement_timeout_ms` | `1000` | Statement timeout for collection queries |
-| `work_mem_kb` | `2048` | `work_mem` for collection queries (KB) |
+## Capture plan and the collector
 
-### Pre-flight checks
+`pgfr_record.capture_plan` materializes, per tier, the ordered list of targets the collector iterates: `cadence_tier`, `plan_order`, `source_view`, `archive_table`, `schema_id`, the manifest's identity/debounce facts, and a cached `capture_select_sql` (the SELECT of `key, key_hash, row_hash, payload` from the live source, minted atomically alongside `schema_id` by `generate_capture_plan()`, the other half of the mint-together invariant). It's regenerated wholesale (`TRUNCATE` + repopulate) whenever the manifest changes; unlike the archive tables, this is derived configuration cache, not observed history, so it doesn't fall under the append-only rule.
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `check_pss_conflicts` | `true` | Check for pg_stat_statements conflicts |
+`pgfr_record.run_tier(p_tier text, p_lock_timeout interval DEFAULT '100ms', p_job_timeout interval DEFAULT NULL)` is the collector core, run once per tier by its own pg_cron job:
 
-### Schema size limits
+- **Single stamp.** One `captured_at` (`t0`) is shared by every target in the tier, so cross-view joins at equal `captured_at` (`pg_locks` joined to `pg_stat_activity`) are exact, not approximate.
+- **Debounce / anchor.** A debounced target appends only rows whose `(key_hash, row_hash)` doesn't match its most recent capture within the current anchor window (a `LEFT JOIN LATERAL`, not a bare `NOT IN`, so a value that fluctuates back to an earlier state is correctly re-appended). "Anchor due" is answered statelessly: since anchor cadence equals partition width by manifest construction, it reduces to "does the current partition have any rows yet", with no separate last-anchor tracking table, and self-healing if a prior anchor attempt failed partway.
+- **Per-target failure isolation.** Each target's capture is one `INSERT ... SELECT` inside its own `EXCEPTION` block (a subtransaction). A lock-queue hang, permission failure, or error on one target cannot fail the tier or the rest of the run; the ledger row is the handling.
+- **Timeouts.** `lock_timeout` is a real, dynamically-enforced per-target bound (`SET LOCAL lock_timeout`, re-affirmed every loop iteration). `job_timeout` is enforced two ways: a cooperative deadline check that stops the tier from *starting* further targets once the budget is spent (works unconditionally, including manual invocation; a target skipped this way simply has no `ledger_captures` row for the run), and, when `run_tier()` is dispatched as the second statement of `SET statement_timeout = ...; SELECT run_tier(...)` (which is how `apply_profile()` schedules every tier job), a genuine caller-side preemptive cancellation of a target that is truly hung, not merely slow. There is no per-target `section_timeout`: it would require dispatching each target as its own top-level statement (via `dblink`/`pg_background`), a dependency this design deliberately does not take on. See "The statement_timeout arming gotcha" below for why.
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `schema_size_check_enabled` | `true` | Enable schema size monitoring |
-| `schema_size_use_percentage` | `true` | Use percentage-based limits |
-| `schema_size_percentage` | `5.0` | Max schema size as % of database |
-| `schema_size_min_mb` | `1000` | Minimum size threshold (MB) |
-| `schema_size_max_mb` | `10000` | Maximum size threshold (MB) |
-| `schema_size_warning_mb` | `5000` | Warning threshold (MB) |
-| `schema_size_critical_mb` | `10000` | Critical threshold (MB) |
+### The statement_timeout arming gotcha
 
-### Statement collection
+Confirmed against a live server: `statement_timeout`'s enforcement timer is armed once, at the start of the current top-level statement, using whatever value was in effect at that moment. A `SET`/`SET LOCAL statement_timeout` executed from inside that same top-level statement's own execution, including from inside a called function, does not retroactively re-arm the already-running timer. Since `run_tier()` is invoked as a single top-level call, an internal `SET LOCAL statement_timeout` inside its own body can never preemptively cancel anything about its own execution. `lock_timeout` does not share this defect: a lock wait is checked dynamically against whatever `lock_timeout` is in effect at the moment the wait begins, confirmed separately against a live server, so it remains a real, working, per-target bound with no caveats.
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `statements_enabled` | `auto` | Enable pg_stat_statements collection: `auto`, `true`, `false` |
-| `statements_top_n` | `20` | Number of top queries to collect per snapshot |
-| `statements_ranking_metric` | `buffers` | Metric for ranking queries: `buffers` or `time` |
-| `statements_interval_minutes` | `1` | Minutes between statement collections |
-| `statements_min_calls` | `1` | Minimum call count to include a query |
+This is why `apply_profile()` schedules each tier's pg_cron job as **two** top-level statements, `SET statement_timeout = '<job_timeout>ms'; SELECT pgfr_record.run_tier(<tier>, <lock_timeout>, <job_timeout>)`, rather than one call to `run_tier()` alone: only a `SET` issued as its own preceding top-level statement genuinely arms preemptive cancellation for the whole call.
 
-### Table and index collection
+`pg_cron` serializes overrunning jobs rather than launching concurrent instances of the same job. This was confirmed against a live instance by scheduling a job on a short interval whose body deliberately overran it, and observing successive invocations start only after the previous one finished, never overlapping. This is the empirical basis for why static, bounded timeouts (`job_timeout(tier) < tier_interval(tier)`, enforced by a `CHECK` constraint on `profile_tiers`) are sufficient on their own, without an adaptive circuit breaker: even under a pathological, sustained overrun, pgfr never accumulates piled-up concurrent collector backends for the same tier.
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `table_stats_mode` | `top_n` | Table collection mode |
-| `table_stats_activity_threshold` | `0` | Minimum activity to include a table |
-| `table_stats_top_n` | `50` | Number of top tables to collect |
-| `index_stats_enabled` | `true` | Enable index stats collection |
-| `config_snapshots_enabled` | `true` | Enable config snapshots |
-| `db_role_config_snapshots_enabled` | `true` | Enable db/role config snapshots |
-| `collect_database_size` | `true` | Collect database size |
-| `collect_connection_metrics` | `true` | Collect connection counts |
+## Capture ledger
 
-### Load shedding thresholds
+Misses are telemetry, not silence: every target's per-run outcome is recorded, never inferred from absence.
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `skip_locks_threshold` | `50` | Skip lock collection if > N blocked backends |
-| `skip_activity_conn_threshold` | `100` | Skip activity collection if > N active connections |
+`pgfr_record.ledger_runs (run_id, tier, captured_at, finished_at)` gets exactly one `INSERT` per tier run, appended once after the run's capture-plan loop finishes, never opened and later closed with an `UPDATE`. `run_id` is reserved up front via `nextval` so it's available to `ledger_captures` rows written during the loop, before the `ledger_runs` row itself exists. A crash mid-run leaves no `ledger_runs` row at all, rather than one wedged half-open; `cron.job_run_details` (pg_cron's own log) is the source of truth for whether the top-level call itself errored or overran.
 
-### Anomaly detection
+`pgfr_record.ledger_captures (run_id, source_view, outcome, rows_appended, was_anchor, visibility, detail, elapsed, captured_at)` gets one row per `(run, target)`. `outcome` is one of `ok`, `timeout`, `lock_timeout`, `denied`, `error`, or `skipped_disabled`; `visibility` (`full`, `masked`, or `degraded`) reflects the caller's actual privilege at capture time, per run per target, not per row; `detail` carries `SQLERRM` for `outcome = 'error'`.
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `storm_threshold_multiplier` | `3.0` | Baseline multiplier for query storm detection |
-| `storm_lookback_interval` | `1 hour` | Recent window for storm comparison |
-| `storm_baseline_days` | `7` | Historical baseline for storm detection |
-| `storm_severity_low_max` | `5.0` | Max multiplier for LOW severity |
-| `storm_severity_medium_max` | `10.0` | Max multiplier for MEDIUM severity |
-| `storm_severity_high_max` | `50.0` | Max multiplier for HIGH severity |
-| `regression_threshold_pct` | `50.0` | Min % change for regression detection |
-| `regression_lookback_interval` | `1 hour` | Recent window for regression comparison |
-| `regression_baseline_days` | `7` | Historical baseline for regression detection |
-| `regression_severity_low_max` | `200.0` | Max % for LOW severity |
-| `regression_severity_medium_max` | `500.0` | Max % for MEDIUM severity |
-| `regression_severity_high_max` | `1000.0` | Max % for HIGH severity |
-| `regression_detection_metric` | `buffers` | Metric for regression detection: `buffers` or `time` |
-
-### XID / MultiXID wraparound thresholds
-
-Warning/critical severity bands for `pgfr_analyze.anomaly_report()`, expressed as
-fractions of the corresponding `autovacuum_*_freeze_max_age` GUC. Defaults match
-the guidance in [postgres-howto #0044](https://postgres.ai/docs/postgres-howtos/performance-optimization/monitoring/how-to-monitor-transaction-id-wraparound-risks);
-tune `*_warning_ratio` down on busy clusters where 50% is too late to warn.
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `xid_warning_ratio`   | `0.5` | Warn when `datfrozenxid_age` / `relfrozenxid_age` exceeds this fraction of `autovacuum_freeze_max_age` |
-| `xid_critical_ratio`  | `0.8` | Escalate to critical above this fraction |
-| `mxid_warning_ratio`  | `0.5` | Warn when `datminmxid_age` / `relminmxid_age` exceeds this fraction of `autovacuum_multixact_freeze_max_age` |
-| `mxid_critical_ratio` | `0.8` | Escalate to critical above this fraction |
-
-Tune via:
+To find when the recorder was blind:
 
 ```sql
-insert into pgfr_record.config (key, value) values ('mxid_warning_ratio', '0.25')
-    on conflict (key) do update set value = excluded.value;
+SELECT lr.captured_at, lc.source_view, lc.outcome, lc.detail
+FROM pgfr_record.ledger_captures lc
+JOIN pgfr_record.ledger_runs lr ON lr.run_id = lc.run_id
+WHERE lc.outcome <> 'ok'
+ORDER BY lr.captured_at DESC;
 ```
 
-Applies to both database-level (`XID_WRAPAROUND_RISK` / `MXID_WRAPAROUND_RISK`)
-and per-table (`TABLE_XID_WRAPAROUND_RISK` / `TABLE_MXID_WRAPAROUND_RISK`) anomalies.
-Per-table checks honor each relation's `autovacuum_freeze_max_age` /
-`autovacuum_multixact_freeze_max_age` reloption override.
+## Definitional helpers
 
-### xmin horizon monitoring
+Mechanical, deterministic, threshold-free functions over recorded facts: everything here has exactly one correct answer. This is the record/analyze boundary, tested by the **agent test**: could an AI agent with a dump of `pgfr_record` alone, restored into a separate database, using only psql, make progress on troubleshooting? Everything below is designed to answer yes.
 
-Captures *who* is pinning the xmin horizon (long-running transactions, stale
-replication slots, hot-standby-feedback, prepared xacts) so post-hoc forensics
-isn't reduced to live-querying four catalogs after the offender has
-disconnected. See [postgres-howto on monitoring xmin horizon](https://postgres.ai/docs/postgres-howtos/performance-optimization/monitoring/how-to-monitor-xmin-horizon).
+### `state_as_of(source_view, t)`
 
-Per-source ages live in typed columns on `pgfr_record.snapshots`
-(`activity_xmin_age`, `slot_xmin_age`, `slot_catalog_xmin_age`,
-`replication_xmin_age`, `prepared_xmin_age`); the dominant holder's
-source-specific details live in `xmin_horizon_detail JSONB`.
+LOCF (last-observation-carried-forward) reconstruction: for each key, the most recent sample at or before `t`, never searching further back than the start of `t`'s own partition (anchor cadence equals partition width by manifest construction, so that bound is free). Returns `SETOF record`; the caller supplies a column-definition list matching `\d pgfr_record.v_<short_name>`.
 
-Anomalies emitted by `pgfr_analyze.anomaly_report()` (in addition to the
-existing `XID_WRAPAROUND_RISK` / `MXID_WRAPAROUND_RISK`):
-
-| Anomaly | Severity | Trigger |
-|---------|----------|---------|
-| `XMIN_HORIZON_STALL` | `high` / `critical` | `xmin_data_horizon_age > xid_warning_ratio` / `xid_critical_ratio` of `autovacuum_freeze_max_age` (defaults 50% / 80%) |
-| `CATALOG_XMIN_HORIZON_STALL` | `high` / `critical` | Same thresholds applied to `slot_catalog_xmin_age` |
-
-Data and catalog fire independently — both can trigger when a logical slot
-pins `xmin` and `catalog_xmin` together. Recommendation text is sourced from
-`xmin_horizon_detail` and is source-specific: `pg_cancel_backend` first for
-active backends, `pg_terminate_backend` for idle-in-txn, `pg_stat_progress_vacuum`
-for autovacuum workers, `DROP REPLICATION SLOT` for slots, `ROLLBACK PREPARED`
-for prepared xacts. Tie-breaking when multiple sources share the oldest age:
-`slot > prepared > activity > replication`.
-
-The `xid_warning_ratio` / `xid_critical_ratio` config keys (already used by
-`XID_WRAPAROUND_RISK`) also govern these anomalies — there are no separate
-xmin-specific thresholds.
-
-One xmin-specific config key:
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `xmin_capture_query_preview` | `true` | If `false`, the `query_preview` field in `xmin_horizon_detail.holder` is NULL — query text is not stored or transformed. Privacy switch for sensitive deployments. |
-
-Sample queries:
+Verified example, from a live install:
 
 ```sql
--- Who's holding the horizon right now?
-select * from pgfr_analyze.current_xmin_horizon_holder();
-
--- Timeline of holders over the last 6 hours:
-select * from pgfr_analyze.xmin_horizon_history(now() - interval '6 hours', now());
-
--- 24-hour horizon-age trend (data + catalog):
-select captured_at, xmin_data_horizon_age, slot_catalog_xmin_age, xmin_any_horizon_age
-from pgfr_record.snapshots
-where captured_at > now() - interval '24 hours'
-order by captured_at;
+SELECT * FROM pgfr_record.state_as_of('pg_catalog.pg_stat_database', now())
+    AS t(captured_at timestamptz, datid oid, datname name, numbackends integer,
+         xact_commit bigint, xact_rollback bigint, blks_read bigint, blks_hit bigint,
+         tup_returned bigint, tup_fetched bigint, tup_inserted bigint, tup_updated bigint,
+         tup_deleted bigint, conflicts bigint, temp_files bigint, temp_bytes bigint,
+         deadlocks bigint, checksum_failures bigint, checksum_last_failure timestamptz,
+         blk_read_time double precision, blk_write_time double precision,
+         session_time double precision, active_time double precision,
+         idle_in_transaction_time double precision, sessions bigint,
+         sessions_abandoned bigint, sessions_fatal bigint, sessions_killed bigint,
+         stats_reset timestamptz)
+WHERE datname = 'postgres';
 ```
 
-### Vacuum control
+A point in time before any capture existed returns zero rows, not the earliest available row.
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `vacuum_control_enabled` | `true` | Enable vacuum control state tracking |
-| `vacuum_control_dead_tuple_budget_pct` | `5` | Dead tuple budget as % of live tuples |
-| `vacuum_control_min_scale_factor` | `0.001` | Minimum recommended scale factor |
-| `vacuum_control_max_scale_factor` | `0.2` | Maximum recommended scale factor |
-| `vacuum_control_hysteresis_pct` | `25` | Hysteresis band for scale factor changes (%) |
-| `vacuum_control_rate_limit_minutes` | `60` | Minimum minutes between recommendation changes |
-| `vacuum_control_catchup_budget_hours` | `4` | Target hours to clear dead tuple backlog in catch_up mode |
+### `resolve_relation(oid, t)` / `resolve_index(oid, t)`
 
-### Alerts and capacity
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `alert_enabled` | `false` | Enable alert checking |
-| `alert_circuit_breaker_count` | `5` | Circuit breaker trips before alert |
-| `alert_schema_size_mb` | `8000` | Schema size alert threshold (MB) |
-| `capacity_planning_enabled` | `true` | Enable capacity planning |
-| `capacity_thresholds_warning_pct` | `60` | Capacity warning threshold (%) |
-| `capacity_thresholds_critical_pct` | `80` | Capacity critical threshold (%) |
-
-### Consumption trend engine
-
-Thresholds for `pgfr_analyze.consumption_trend_report()` / `_refresh_consumption_trends()` / `_refresh_consumption_trends_weekly()` -- classifying each basket metric's trend against the database's own baseline. `consumption_trend_min_r2`, `consumption_trend_step_r2_margin`, and `consumption_trend_shape_guard_pct` are generic statistical properties shared by both the 28-day/daily and 84-day/weekly engines; `consumption_trend_min_days` and `consumption_trend_min_weeks` are each engine's own minimum-data gate.
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `consumption_trend_min_days` | `14` | Minimum days of data before the 28-day/daily engine classifies past `insufficient_data` |
-| `consumption_trend_min_weeks` | `8` | Minimum weeks of data before the 84-day/weekly engine classifies past `insufficient_data` |
-| `consumption_trend_min_r2` | `0.3` | Minimum R² for a line or step model to count as a real fit rather than noise (below this: `stable`) |
-| `consumption_trend_step_r2_margin` | `0.15` | Margin by which a step model's R² must beat a line's R² to classify `step` instead of `drift` |
-| `consumption_trend_shape_guard_pct` | `25` | Percent shift in a workload-shape indicator, between a window's two fixed halves, that triggers `composition` |
-
-## Configuration profiles
-
-Profiles configure groups of related settings for different environments. Key differences between profiles:
-
-| Setting | default | production_safe | development | troubleshooting | minimal_overhead |
-|---------|---------|-----------------|-------------|-----------------|------------------|
-| `load_shedding_active_pct` | 70 | 60 | 70 | disabled | 50 |
-| `circuit_breaker_threshold_ms` | 1000 | 800 | 1000 | 2000 | 500 |
-| `enable_locks` | true | false | true | true | false |
-| `enable_progress` | true | false | true | true | false |
-| `retention_snapshots_days` | 30 | 30 | 7 | 7 | 7 |
-| `retention_archive_days` | 7 | 7 | 3 | 3 | 3 |
-| `section_timeout_ms` | 250 | 200 | 250 | 500 | 100 |
-| `statement_timeout_ms` | 1000 | 800 | 1000 | 2000 | 500 |
-| `work_mem_kb` | 2048 | 1024 | 2048 | 4096 | 1024 |
-| `statements_interval_minutes` | 1 | 15 | 1 | 2 | 15 |
-| `statements_min_calls` | 1 | 5 | 1 | 1 | 10 |
-| `table_stats_top_n` | 50 | 30 | 50 | 100 | 20 |
-| `table_stats_enabled` | true | true | true | true | false |
-| `index_stats_enabled` | true | true | true | true | false |
+Join through the catalog identity dimension (`pgfr_record.src_catalog_identity`, captured as a Group D target) as of `t`, surviving OID reuse across DROP/CREATE. Mechanically identical to each other, since `pg_class` covers every relkind including indexes; named separately only so a caller resolving an `indexrelid` doesn't have to know that. `t` defaults to `clock_timestamp()`, matching a live lookup when no historical point is given.
 
 ```sql
--- List all profiles and their settings
-SELECT * FROM pgfr_record.list_profiles();
-
--- Preview what a profile would change
-SELECT * FROM pgfr_record.explain_profile('production_safe');
-
--- Apply a profile
-SELECT * FROM pgfr_record.apply_profile('production_safe');
-
--- Check which profile matches current settings
-SELECT * FROM pgfr_record.get_current_profile();
+SELECT * FROM pgfr_record.resolve_relation('pgfr_record.manifest'::regclass::oid);
+--         captured_at         |  oid  | relname  | relnamespace |   nspname   | relkind | relispartition
+-- 2026-08-28 20:08:50.640036+00 | 16468 | manifest |        16467 | pgfr_record | r       | f
 ```
 
-## Safety features
+A nonexistent OID returns zero rows, not an error.
 
-### Collection modes
+### `deltas(source_view, from_t, to_t)`
 
-Modes control which optional collectors run; the one-minute collection cadence and the ring sampler itself run in every mode. To stop collection entirely, use `pgfr_record.disable()` (there is no `kill` mode; `set_mode()` rejects anything but the three modes below).
+Consecutive-sample differences per key over counter/odometer columns, driven by `column_classes`, built directly on `state_as_of()`: join the `to_t` snapshot to the `from_t` snapshot by key, then difference. **Reset-aware**: a decreased counter value, or its linked `reset_column` advancing, yields `NULL` for that interval, never a negative rate. Odometers skip reset detection entirely (that's their definition). A key present at `to_t` but absent at `from_t` is excluded, not fabricated (an inner join on both snapshots). Raises on a keyless source view (there's no identity to correlate two points in time) and on an unknown source view.
 
-| Mode | Behavior |
-|------|----------|
-| `normal` | Full collection: snapshots, samples, locks, progress, statements |
-| `light` | Skips vacuum-progress collection; lock sampling stays on |
-| `emergency` | Skips lock and vacuum-progress collection; snapshots and ring sampling continue |
+Returns `SETOF record`; counter/odometer columns come back as `<column>_delta` (note: `pg_lsn - pg_lsn` yields `numeric`, so an LSN odometer's delta column is `numeric`, not `pg_lsn`); everything else passes through as the `to_t` value under its own name, plus `from_captured_at` and `to_captured_at`.
+
+Verified example, from a live install (two real `pg_stat_wal` captures, about 9 seconds apart):
 
 ```sql
-SELECT pgfr_record.set_mode('emergency'); -- Shed optional collectors
-SELECT pgfr_record.set_mode('normal');    -- Resume full collection
-SELECT * FROM pgfr_record.get_mode();     -- Check current mode
-SELECT pgfr_record.disable();             -- Emergency stop (unschedules all jobs)
+SELECT wal_records_delta, wal_bytes_delta, from_captured_at, to_captured_at
+FROM pgfr_record.deltas('pg_catalog.pg_stat_wal', :from_t, :to_t)
+    AS d(wal_records_delta bigint, wal_fpi_delta bigint, wal_bytes_delta numeric,
+         wal_buffers_full_delta bigint, wal_write_delta bigint, wal_sync_delta bigint,
+         wal_write_time_delta double precision, wal_sync_time_delta double precision,
+         stats_reset timestamptz, from_captured_at timestamptz, to_captured_at timestamptz);
+--  wal_records_delta | wal_bytes_delta
+--               6366 |         1669927
 ```
 
-### Automatic protections
+### Generated `COMMENT ON`
 
-| Protection | Trigger | Behavior |
-|------------|---------|----------|
-| **Circuit Breaker** | Collection exceeds `circuit_breaker_threshold_ms` (default 1s) | Skips next collection cycle |
-| **Load Shedding** | Active connections exceed `load_shedding_active_pct` of `max_connections` | Skips entire collection cycle |
-| **Section Timeouts** | Per-query timeout (default 250ms) | Prevents catalog lock hangs within collection |
-| **Job Timeouts** | Outer `statement_timeout` on all pg_cron jobs (5-60s) | Kills hung collection as last-resort safety net |
+`generate_comments()` derives a `COMMENT ON` for every archive table, presentation view, and column from the manifest and `column_classes`: the discovery channel an agent actually uses. `\d+` on any archive table or presentation view explains itself (what it is, its cadence/retention/debounce facts, and per-column class/reset-linkage) without this reference open alongside it. Regenerate whenever the manifest or `column_classes` changes; safe to re-run.
 
-### Manual mode control
+## Profiles
 
-Use `pgfr_record.set_mode()` to manually switch collection modes: `normal`, `light`, `emergency`. Use `pgfr_record.disable()` / `pgfr_record.enable()` to stop and restart collection entirely.
+`pgfr_record.profiles(profile_name, lock_timeout, notes)` and `pgfr_record.profile_tiers(profile_name, cadence_tier, tier_interval, job_timeout)` reduce a profile to cadence plus bounds. `job_timeout < tier_interval` is a `CHECK` constraint on `profile_tiers`, not just a convention: a bad profile row cannot be inserted at all.
+
+Shipped profiles:
+
+| Profile | Tier | Interval | job_timeout | lock_timeout |
+|---|---|---|---|---|
+| `default` | fast | 1 min | 45 s | 100 ms |
+| `default` | medium | 5 min | 4 min | 100 ms |
+| `default` | slow | 15 min | 12 min | 100 ms |
+| `default` | on_change | 5 min | 4 min | 100 ms |
+| `troubleshooting` | fast | 20 s | 15 s | 100 ms |
+| `troubleshooting` | medium | 1 min | 45 s | 100 ms |
+| `troubleshooting` | slow | 15 min | 12 min | 100 ms |
+| `troubleshooting` | on_change | 5 min | 4 min | 100 ms |
+
+`pgfr_record.apply_profile(profile_name)` reschedules the four tier jobs to the named profile's cadence and bounds, dispatching each as the two-statement `SET statement_timeout; SELECT run_tier(...)` command described above. It never touches the manifest, and there is no separate "currently active profile" marker: `cron.job`'s live schedule/command is the source of truth for what's applied. `pg_cron` accepts a literal `"N seconds"` schedule syntax for sub-minute jobs (used by `troubleshooting`'s tighter fast cadence), confirmed working against a live instance.
+
+`pgfr_record.enable()` applies the `default` profile and schedules the hourly `maintain_partitions()` job: the single "turn pgfr_record on" operation. `pgfr_record.disable()` unschedules the four tier jobs and the maintenance job; archive data, the manifest, and the capture plan are untouched. Both are idempotent. Note: `cron.schedule()` on an already-scheduled job updates its schedule/command but does **not** reactivate a previously deactivated job on its own (confirmed against a live instance); `apply_profile()` and `enable()` both explicitly set `active = true` after scheduling, for exactly this reason.
+
+## `health_check()`
+
+`pgfr_record.health_check()` returns `(check_name, status, detail)` rows covering:
+
+- **`cron_job: <tier>` / `cron_job: maintenance`**: is the job scheduled and active.
+- **`last_capture: <tier>`**: when the tier last finished, judged against that tier's own live schedule (read back from `cron.job`, not a hardcoded assumption) rather than a fixed threshold.
+- **`ledger_miss_rate_1h`**: the fraction of captures in the last hour that didn't come back `ok`.
+- **`partitions: <table>`**: does every pgfr-owned partitioned table have at least two widths of partitions ahead of now, and zero expired-but-still-attached partitions.
+
+Every check is read-only and threshold-free in the judgmental sense: each is a fixed structural fact (is a job scheduled, is a partition still attached past retention), never an opinion about what's normal. Opinions are `pgfr_analyze`'s job.
+
+**`health_check()` is verified genuinely read-only, two ways.** This matters because of a real v1 incident: v1's `health_check()` internally called `cleanup()`, which could itself fail or time out, defeating the entire point of a status check. v2's `health_check()` is confirmed, empirically, to complete successfully inside a hard `READ ONLY` transaction, and that empirical check is load-bearing, because declaring a function `STABLE` does **not**, on its own, prevent it from calling a mutating function: PostgreSQL only checks a function's own literal body against its declared volatility, not what it calls transitively. A `READ ONLY` transaction, by contrast, is enforced through any depth of function calls (confirmed separately: forcing `maintain_partitions()` to do real work inside a `READ ONLY` transaction fails with "cannot execute CREATE TABLE in a read-only transaction", the exact failure mode this guard would catch were it ever reintroduced).
+
+## `pgfr_analyze`
+
+`pgfr_analyze` is not yet rebuilt for v2. The schema exists as a placeholder (`CREATE SCHEMA pgfr_analyze` with a `COMMENT ON SCHEMA` explaining the deferral) so the two-extension install pipeline keeps working while it's built out; it currently has no tables, views, or functions. See `pgfr-v2-context-pack.md`'s Appendix (milestone 7) for what it's designed to eventually own: anomaly/regression/storm detection, trends, capacity views, and `report()`, all consuming `pgfr_record`'s definitional helpers and column classes, owning none of them. A `pgfr_record`-only install (or a `pg_dump` of one) is fully self-contained and self-describing in the meantime; `pgfr_analyze`, once it exists, will make conclusions faster, not make them possible.
