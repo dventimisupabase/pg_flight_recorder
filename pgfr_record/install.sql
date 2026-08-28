@@ -24,6 +24,8 @@
 --   07_capture_plan.sql      capture_plan table + generate_capture_plan()
 --   08_collector.sql         run_tier(): the collector core (tier jobs are
 --                            scheduled by milestone 5's enable(), not here)
+--   09_column_classes.sql    generate_column_classes(): the counter/odometer/
+--                            gauge/label/key legend (§3.1, §4.5)
 
 \ir sql/01_schema.sql
 \ir sql/02_manifest.sql
@@ -33,11 +35,13 @@
 \ir sql/06_generators.sql
 \ir sql/07_capture_plan.sql
 \ir sql/08_collector.sql
+\ir sql/09_column_classes.sql
 
 -- Create every enabled target's archive table + initial partitions,
--- regenerate the typed presentation views, and rebuild the capture plan --
--- all against this server's live catalog. Safe to re-run (§7): this is
--- also the post-major-upgrade procedure.
+-- regenerate the typed presentation views, rebuild the capture plan, and
+-- reclassify every column -- all against this server's live catalog.
+-- Safe to re-run (§7): this is also the post-major-upgrade procedure.
 SELECT pgfr_record.generate_archives();
 SELECT pgfr_record.generate_presentation_views();
 SELECT pgfr_record.generate_capture_plan();
+SELECT pgfr_record.generate_column_classes();

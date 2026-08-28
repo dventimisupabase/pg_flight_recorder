@@ -1,0 +1,118 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Copyright 2026 David A. Ventimiglia
+
+-- Column-class legend (§3.1, §4.5): counter/odometer/gauge/label/key,
+-- consumed by deltas() and by pgfr_analyze, owned only here.
+--
+-- generate_column_classes() derives this mechanically rather than from a
+-- hand-typed per-column list. Hand-classifying every column of all ~40
+-- census views from memory would risk exactly the kind of confidently-
+-- wrong answer invariant 2 warns against ("everything with a single
+-- correct answer belongs in pgfr_record" -- a wrong answer is worse than
+-- an honestly-derived mechanical one). Instead this is a rule-based
+-- generator, consistent with every other artifact in this design being a
+-- pure function of the manifest + the live catalog:
+--
+--   1. natural_key membership -> key. Checked first: identity always
+--      wins, even over the override list below (pid, for instance, is a
+--      natural_key column on several targets but also on that list, for
+--      the targets where it is *not* part of the key).
+--   2. An explicit override list for well-known exceptions that do not
+--      follow the type-based default below (point-in-time counts and
+--      identity attributes that happen to be numeric-typed).
+--   3. The column literally named stats_reset -> label (and becomes the
+--      reset_column for this view's own counters).
+--   4. Type pg_lsn / xid / xid8 -> odometer (monotone, non-resettable --
+--      this is §2's actual *definition* of odometer, not a guess).
+--   5. A column in this manifest row's compare_ignore -> gauge (§3.2's
+--      own rationale for compare_ignore is exactly "estimate churns
+--      independent of real change", i.e. gauge behavior, not counter).
+--   6. Column name matching min_/max_/mean_/stddev_ -> gauge (running
+--      aggregates are not monotone counters, regardless of type).
+--   7. Type timestamp with time zone / interval -> gauge (point-in-time
+--      markers and lag/duration measurements).
+--   8. Remaining numeric types -> counter (the documented common case:
+--      "counters are monotone + resettable", §2), with reset_column set
+--      to stats_reset when that column exists in the same view.
+--   9. Everything else -> label.
+--
+-- This is a best-effort mechanical classification, not a hand-verified
+-- audit of every column's Postgres documentation. The override list is a
+-- starting point, expected to grow as misclassifications are found in
+-- practice -- exactly the same maintenance posture as compare_ignore.
+CREATE OR REPLACE FUNCTION pgfr_record.generate_column_classes()
+RETURNS void
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_target    record;
+    v_has_reset boolean;
+    v_i         int;
+    v_col       text;
+    v_type      text;
+    v_class     text;
+    v_reset_col text;
+BEGIN
+    TRUNCATE pgfr_record.column_classes;
+
+    FOR v_target IN
+        SELECT m.source_view, m.natural_key, m.compare_ignore, m.keyless, ps.columns, ps.type_names
+        FROM pgfr_record.manifest m
+        JOIN LATERAL (
+            SELECT columns, type_names
+            FROM pgfr_record.payload_schemas p
+            WHERE p.source_view = m.source_view
+            ORDER BY p.schema_id DESC
+            LIMIT 1
+        ) ps ON true
+        WHERE m.enabled
+          AND m.min_major <= pgfr_record._current_major()
+          AND pgfr_record._current_major() <= coalesce(m.max_major, 999)
+    LOOP
+        v_has_reset := 'stats_reset' = ANY(v_target.columns);
+
+        FOR v_i IN 1..array_length(v_target.columns, 1) LOOP
+            v_col := v_target.columns[v_i];
+            v_type := v_target.type_names[v_i];
+            v_reset_col := NULL;
+
+            IF NOT v_target.keyless AND v_col = ANY(v_target.natural_key) THEN
+                -- Identity always wins: pid, for instance, is a natural_key
+                -- column on several targets (pg_stat_activity, pg_stat_
+                -- replication, the progress views) and must classify as
+                -- key there, even though it is also on the override list
+                -- below for targets where it is *not* part of the key
+                -- (pg_stat_wal_receiver).
+                v_class := 'key';
+            ELSIF v_col = ANY(ARRAY['numbackends','pid','sender_port','client_port','sync_priority']) THEN
+                -- Known exceptions: numeric-typed but not cumulative --
+                -- current counts, process/network identity, or config.
+                v_class := 'gauge';
+            ELSIF v_col = 'stats_reset' THEN
+                v_class := 'label';
+            ELSIF v_type IN ('pg_lsn', 'xid', 'xid8') THEN
+                v_class := 'odometer';
+            ELSIF v_col = ANY(v_target.compare_ignore) THEN
+                v_class := 'gauge';
+            ELSIF v_col ~ '^(min|max|mean|stddev)_' THEN
+                v_class := 'gauge';
+            ELSIF v_type IN ('timestamp with time zone', 'interval') THEN
+                v_class := 'gauge';
+            ELSIF v_type IN ('bigint', 'numeric', 'integer', 'smallint', 'double precision') THEN
+                v_class := 'counter';
+                IF v_has_reset THEN
+                    v_reset_col := 'stats_reset';
+                END IF;
+            ELSE
+                v_class := 'label';
+            END IF;
+
+            INSERT INTO pgfr_record.column_classes (source_view, column_name, class, reset_column)
+            VALUES (v_target.source_view, v_col, v_class, v_reset_col)
+            ON CONFLICT (source_view, column_name) DO NOTHING;
+        END LOOP;
+    END LOOP;
+END;
+$$;
+
+COMMENT ON FUNCTION pgfr_record.generate_column_classes() IS
+    'Rebuilds pgfr_record.column_classes wholesale via a type/name-driven ruleset over each target''s current live columns (see the comment above this function for the exact rule order and its known override list). Regenerate whenever the manifest or a target''s live shape changes; safe to re-run.';
