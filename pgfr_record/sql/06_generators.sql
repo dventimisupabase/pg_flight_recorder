@@ -112,3 +112,99 @@ $$;
 
 COMMENT ON FUNCTION pgfr_record.generate_archives() IS
     'For each enabled, version-applicable manifest row: create its uniform-shape archive table if absent, mint the payload_schemas row for its live column layout, and pre-create initial partitions. Pure function of the manifest + the live catalog; safe to re-run (§7).';
+
+-- Presentation views (§4.3.2, §4.4): project a target's jsonb-array
+-- payloads back into the source view's typed columns, plus captured_at.
+-- The fidelity promise ("the data model is exactly the PostgreSQL views")
+-- is made and kept here, not at the payload layer (§4.4's "honest
+-- concession").
+--
+-- A source_view can have more than one payload_schemas row over time --
+-- mid-major column accretion (pg_stat_statements is the known offender,
+-- §4.4) mints a new schema_id rather than editing the old one. The
+-- presentation view's column set always matches the *current* (highest
+-- schema_id) shape; older rows captured under a narrower prior schema get
+-- NULL for whatever column didn't exist yet, via one UNION ALL branch per
+-- schema_id the source_view has ever had. Positions are resolved
+-- per-variant (a column's array index can differ across schema_id
+-- variants), never assumed to line up across schemas.
+CREATE OR REPLACE FUNCTION pgfr_record.generate_presentation_views()
+RETURNS void
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_source_view record;
+    v_current     record;
+    v_variant     record;
+    v_short       text;
+    v_col         text;
+    v_pos         int;
+    v_variant_pos int;
+    v_exprs       text[];
+    v_branches    text[];
+BEGIN
+    FOR v_source_view IN
+        SELECT DISTINCT m.source_view
+        FROM pgfr_record.manifest m
+        WHERE m.enabled
+          AND m.min_major <= pgfr_record._current_major()
+          AND pgfr_record._current_major() <= coalesce(m.max_major, 999)
+    LOOP
+        v_short := pgfr_record._short_name(v_source_view.source_view);
+
+        -- The current (most recently minted) shape defines the view's
+        -- column set. No row yet means generate_archives() has not run,
+        -- or the target's precondition remains unmet -- nothing to do.
+        SELECT * INTO v_current
+        FROM pgfr_record.payload_schemas
+        WHERE source_view = v_source_view.source_view
+        ORDER BY schema_id DESC
+        LIMIT 1;
+
+        IF NOT FOUND THEN
+            CONTINUE;
+        END IF;
+
+        v_branches := '{}';
+        FOR v_variant IN
+            SELECT * FROM pgfr_record.payload_schemas
+            WHERE source_view = v_source_view.source_view
+        LOOP
+            v_exprs := '{}';
+            FOR v_pos IN 1..array_length(v_current.columns, 1) LOOP
+                v_col := v_current.columns[v_pos];
+
+                SELECT ord INTO v_variant_pos
+                FROM unnest(v_variant.columns) WITH ORDINALITY AS u(name, ord)
+                WHERE u.name = v_col;
+
+                IF v_variant_pos IS NULL THEN
+                    v_exprs := v_exprs || format('NULL::%s AS %I', v_current.type_names[v_pos], v_col);
+                ELSE
+                    v_exprs := v_exprs || format('(payload->>%s)::%s AS %I', v_variant_pos - 1, v_variant.type_names[v_variant_pos], v_col);
+                END IF;
+            END LOOP;
+
+            v_branches := v_branches || format(
+                'SELECT captured_at, %s FROM pgfr_record.%I WHERE schema_id = %s',
+                array_to_string(v_exprs, ', '), 'a_' || v_short, v_variant.schema_id
+            );
+        END LOOP;
+
+        -- DROP + CREATE, not CREATE OR REPLACE: Postgres refuses to
+        -- replace a view in a way that removes or reorders existing
+        -- output columns, and a real (not just test-manufactured)
+        -- source_view can legitimately shrink its column set between
+        -- majors -- e.g. PG17 moving checkpoint columns out of
+        -- pg_stat_bgwriter (§7). Safe because presentation views are
+        -- freely regenerable, unlike the archive data underneath them.
+        EXECUTE format('DROP VIEW IF EXISTS pgfr_record.%I', 'v_' || v_short);
+        EXECUTE format(
+            'CREATE VIEW pgfr_record.%I AS %s',
+            'v_' || v_short, array_to_string(v_branches, ' UNION ALL ')
+        );
+    END LOOP;
+END;
+$$;
+
+COMMENT ON FUNCTION pgfr_record.generate_presentation_views() IS
+    'For each enabled, version-applicable manifest row with a minted schema: (re)create v_<short_name>, projecting the archive''s jsonb-array payloads back into the source view''s typed columns via one UNION ALL branch per schema_id that source_view has ever had. Regenerated per major at install/upgrade (§7); safe to re-run.';
