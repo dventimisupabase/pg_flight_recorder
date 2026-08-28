@@ -4,7 +4,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(25);
+SELECT plan(26);
 
 SELECT has_table('pgfr_record', 'profiles', 'Table pgfr_record.profiles should exist');
 SELECT has_table('pgfr_record', 'profile_tiers', 'Table pgfr_record.profile_tiers should exist');
@@ -61,6 +61,38 @@ SELECT ok(
     (SELECT bool_and(status = 'missing') FROM pgfr_record.health_check() WHERE check_name LIKE 'cron_job:%'),
     'health_check() should report every cron_job check as missing after disable()'
 );
+
+-- ---------------------------------------------------------------------------
+-- health_check() must be genuinely read-only -- a regression guard for a
+-- real v1 bug: health_check() there internally ran cleanup(), which
+-- could itself then fail or time out, defeating the entire point of a
+-- status check. Verified two ways here: by reading the function body
+-- (15_health_check.sql contains only RETURN QUERY SELECT statements and
+-- calls to read-only helpers -- no maintain_partitions(), run_tier(),
+-- enable(), or any other mutating call), and empirically, inside a hard
+-- READ ONLY transaction.
+--
+-- The READ ONLY transaction check matters specifically because merely
+-- declaring health_check() STABLE does NOT catch this class of bug on
+-- its own: confirmed against a live server that Postgres only checks a
+-- function's own literal body against its declared volatility, not
+-- functions it calls -- a STABLE function calling a VOLATILE one (e.g.
+-- health_check() calling maintain_partitions()) executes without
+-- complaint. A hard READ ONLY transaction, by contrast, is enforced
+-- transitively through any depth of function calls: confirmed
+-- separately that calling maintain_partitions() (a real mutating
+-- function, forced to actually create a partition) inside a READ ONLY
+-- transaction fails with "cannot execute CREATE TABLE in a read-only
+-- transaction". That is the exact failure mode this test would catch
+-- were it ever reintroduced.
+-- ---------------------------------------------------------------------------
+SAVEPOINT health_check_readonly;
+SET TRANSACTION READ ONLY;
+SELECT ok(
+    (SELECT count(*) FROM pgfr_record.health_check()) > 0,
+    'health_check() should execute successfully inside a hard READ ONLY transaction -- proof it performs no writes, even transitively (the exact v1 regression this guards against)'
+);
+ROLLBACK TO SAVEPOINT health_check_readonly;
 
 -- ---------------------------------------------------------------------------
 -- The overrun invariant is a real CHECK constraint, not a convention
