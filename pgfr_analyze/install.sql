@@ -20,6 +20,7 @@
 --   06_query_performance.sql  detect_regressions(), detect_query_storms()
 --   07_xmin_horizon.sql       xmin_horizon_history(), current_xmin_horizon_holder()
 --   08_anomaly_detection.sql  anomaly_report()
+--   09_capacity.sql           capacity_summary()
 
 \ir sql/01_schema.sql
 \ir sql/02_coverage.sql
@@ -29,3 +30,4 @@
 \ir sql/06_query_performance.sql
 \ir sql/07_xmin_horizon.sql
 \ir sql/08_anomaly_detection.sql
+\ir sql/09_capacity.sql
