@@ -28,6 +28,7 @@
 --                            gauge/label/key legend (§3.1, §4.5)
 --   10_definitional.sql      state_as_of(), resolve_relation(), resolve_index()
 --   11_deltas.sql            deltas(): reset-aware consecutive-sample differences
+--   12_comments.sql          generate_comments(): self-documenting \d+ (§4.5)
 
 \ir sql/01_schema.sql
 \ir sql/02_manifest.sql
@@ -40,12 +41,15 @@
 \ir sql/09_column_classes.sql
 \ir sql/10_definitional.sql
 \ir sql/11_deltas.sql
+\ir sql/12_comments.sql
 
 -- Create every enabled target's archive table + initial partitions,
--- regenerate the typed presentation views, rebuild the capture plan, and
--- reclassify every column -- all against this server's live catalog.
--- Safe to re-run (§7): this is also the post-major-upgrade procedure.
+-- regenerate the typed presentation views, rebuild the capture plan,
+-- reclassify every column, and regenerate every comment -- all against
+-- this server's live catalog. Safe to re-run (§7): this is also the
+-- post-major-upgrade procedure.
 SELECT pgfr_record.generate_archives();
 SELECT pgfr_record.generate_presentation_views();
 SELECT pgfr_record.generate_capture_plan();
 SELECT pgfr_record.generate_column_classes();
+SELECT pgfr_record.generate_comments();
