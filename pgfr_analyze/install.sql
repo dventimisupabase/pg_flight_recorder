@@ -21,6 +21,8 @@
 --   07_xmin_horizon.sql       xmin_horizon_history(), current_xmin_horizon_holder()
 --   08_anomaly_detection.sql  anomaly_report()
 --   09_capacity.sql           capacity_summary()
+--   10_self_overhead.sql      self_overhead()
+--   11_preflight.sql          preflight_check(), preflight_check_with_summary()
 
 \ir sql/01_schema.sql
 \ir sql/02_coverage.sql
@@ -31,3 +33,5 @@
 \ir sql/07_xmin_horizon.sql
 \ir sql/08_anomaly_detection.sql
 \ir sql/09_capacity.sql
+\ir sql/10_self_overhead.sql
+\ir sql/11_preflight.sql
