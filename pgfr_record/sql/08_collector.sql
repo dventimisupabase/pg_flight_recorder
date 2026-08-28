@@ -2,11 +2,35 @@
 -- Copyright 2026 David A. Ventimiglia
 
 -- Collector core (§5): one function per tier invocation, run by its own
--- pg_cron job (scheduling itself is milestone 5's enable()). Pseudocode
--- in §5, corrected during implementation planning: the ledger is a single
--- append per run (see 04_ledger.sql), and SET LOCAL statement_timeout is
--- set explicitly on every loop iteration rather than assumed to auto-
--- revert on success.
+-- pg_cron job (scheduling itself is milestone 5's enable()).
+--
+-- Corrected during implementation, beyond the pseudocode's original
+-- draft, in two ways:
+--   1. The ledger is a single append per run (see 04_ledger.sql), not
+--      open-then-close.
+--   2. The "arming gotcha": confirmed against a live server that
+--      statement_timeout's enforcement timer is armed once, at the start
+--      of the current top-level statement, and is NOT re-armed by a
+--      SET/SET LOCAL statement_timeout executed from inside that same
+--      top-level statement's own execution -- including via a nested
+--      EXECUTE inside a called function. Since run_tier() is itself
+--      invoked as one top-level call, no SET LOCAL statement_timeout
+--      inside this function body can ever preemptively cancel anything
+--      about its own execution. lock_timeout does not share this
+--      defect -- a lock wait is checked dynamically against whatever
+--      lock_timeout is currently in effect, confirmed against a live
+--      server -- so it remains a real, per-target bound. See §5's
+--      "arming gotcha" for the full writeup and the resulting design:
+--      lock_timeout (real, per target), a cooperative job_timeout
+--      deadline check (real, stops the tier from starting further
+--      targets once its budget is spent), and a genuine caller-side
+--      SET statement_timeout as the backstop against a truly hung
+--      target (apply_profile() dispatches "SET statement_timeout = ...;
+--      SELECT run_tier(...)" as two top-level statements for exactly
+--      this reason). A standalone per-target section_timeout was
+--      dropped entirely: it cannot be implemented without dispatching
+--      each target as its own top-level statement, which would need a
+--      dependency this design deliberately does not take on.
 
 CREATE OR REPLACE FUNCTION pgfr_record._interval_ms_literal(p_interval interval)
 RETURNS text
@@ -16,10 +40,11 @@ $$;
 COMMENT ON FUNCTION pgfr_record._interval_ms_literal(interval) IS
     'Renders an interval as a GUC-parseable millisecond literal (e.g. ''250ms''), for SET LOCAL statement_timeout/lock_timeout, whose unit-suffixed value syntax does not accept a general interval literal.';
 
--- Placeholder defaults, safely under each tier's interval (fast=1m,
--- medium/on_change=5m, slow=15m per §9's default profile), pending
--- milestone 5's profiles mechanism making these operator-configurable
--- rather than hardcoded.
+-- Placeholder default, safely under each tier's interval (fast=1m,
+-- medium/on_change=5m, slow=15m per §9's default profile), used only
+-- when run_tier() is called without an explicit p_job_timeout (e.g.
+-- direct/manual invocation). Real operation goes through profiles
+-- (13_profiles.sql), which always supplies one explicitly.
 CREATE OR REPLACE FUNCTION pgfr_record._default_job_timeout(p_tier text)
 RETURNS interval
 LANGUAGE sql IMMUTABLE AS $$
@@ -41,34 +66,43 @@ $$;
 CREATE OR REPLACE FUNCTION pgfr_record.run_tier(
     p_tier          text,
     p_lock_timeout  interval DEFAULT interval '100 ms',
-    p_job_timeout   interval DEFAULT NULL,
-    p_section_timeout interval DEFAULT interval '250 ms'
+    p_job_timeout   interval DEFAULT NULL
 )
 RETURNS void
 LANGUAGE plpgsql AS $$
 DECLARE
-    v_job_timeout interval := coalesce(p_job_timeout, pgfr_record._default_job_timeout(p_tier));
-    v_t0          timestamptz := clock_timestamp();
-    v_run_id      bigint;
-    v_target      record;
-    v_started_at  timestamptz;
-    v_unit        text;
-    v_bucket      timestamptz;
-    v_anchor_due  boolean;
-    v_sql         text;
-    v_rows        int;
+    v_job_timeout       interval := coalesce(p_job_timeout, pgfr_record._default_job_timeout(p_tier));
+    v_t0                timestamptz := clock_timestamp();
+    v_run_id            bigint;
+    v_target            record;
+    v_started_at        timestamptz;
+    v_unit              text;
+    v_bucket            timestamptz;
+    v_anchor_due        boolean;
+    v_sql               text;
+    v_rows              int;
+    v_orig_lock_timeout text := current_setting('lock_timeout');
 BEGIN
-    EXECUTE format('SET LOCAL lock_timeout = %L', pgfr_record._interval_ms_literal(p_lock_timeout));
-    EXECUTE format('SET LOCAL statement_timeout = %L', pgfr_record._interval_ms_literal(v_job_timeout));
-
     v_run_id := nextval(pg_get_serial_sequence('pgfr_record.ledger_runs', 'run_id'));
 
     FOR v_target IN
         SELECT * FROM pgfr_record.capture_plan WHERE cadence_tier = p_tier ORDER BY plan_order
     LOOP
+        -- Cooperative deadline check: cannot interrupt an
+        -- already-running target (that needs the caller's own
+        -- statement_timeout, see the comment atop this file), but it
+        -- does stop the tier from *starting* any further target once
+        -- job_timeout's budget is spent. A target skipped this way
+        -- simply has no ledger_captures row for this run -- detectable
+        -- by comparing against capture_plan, not a distinct outcome.
+        EXIT WHEN clock_timestamp() - v_t0 >= v_job_timeout;
+
         v_started_at := clock_timestamp();
         BEGIN
-            EXECUTE format('SET LOCAL statement_timeout = %L', pgfr_record._interval_ms_literal(p_section_timeout));
+            -- lock_timeout is checked dynamically at the moment a lock
+            -- wait begins, not armed once like statement_timeout, so
+            -- this genuinely bounds *this* target's lock wait.
+            EXECUTE format('SET LOCAL lock_timeout = %L', pgfr_record._interval_ms_literal(p_lock_timeout));
 
             v_anchor_due := false;
             IF v_target.debounce THEN
@@ -134,6 +168,17 @@ BEGIN
         END;
     END LOOP;
 
+    -- SET LOCAL only auto-reverts on a subtransaction's own rollback (the
+    -- per-target EXCEPTION blocks above), never on normal completion --
+    -- so without this, the last target's lock_timeout would leak forward
+    -- to whatever runs next in this session/transaction after run_tier()
+    -- returns. In production that's harmless (each pg_cron invocation is
+    -- its own transaction), but a caller running run_tier() interactively,
+    -- or a test harness running several in one transaction, would
+    -- otherwise inherit a tight lock_timeout unrelated to anything else
+    -- they run afterward.
+    EXECUTE format('SET LOCAL lock_timeout = %L', v_orig_lock_timeout);
+
     -- Single append, not open-then-close (§8.2): both timestamps are
     -- already known, so there is nothing to update later.
     INSERT INTO pgfr_record.ledger_runs (run_id, tier, captured_at, finished_at)
@@ -141,5 +186,5 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION pgfr_record.run_tier(text, interval, interval, interval) IS
-    'Runs one tier''s capture_plan targets under one shared captured_at (§5). Each target executes in its own EXCEPTION block (ok/timeout/lock_timeout/denied/error), recorded in ledger_captures; one target''s failure cannot fail the tier. Timeout arguments default to placeholder values pending milestone 5''s profiles.';
+COMMENT ON FUNCTION pgfr_record.run_tier(text, interval, interval) IS
+    'Runs one tier''s capture_plan targets under one shared captured_at (§5). Each target executes in its own EXCEPTION block (ok/timeout/lock_timeout/denied/error), recorded in ledger_captures; one target''s failure cannot fail the tier. lock_timeout is a real per-target bound; job_timeout is enforced cooperatively here (stops further targets from starting) and, when dispatched via apply_profile()''s two-statement cron command, preemptively by the caller''s own statement_timeout -- see the comment atop this file for why a per-target statement_timeout could not be implemented directly.';

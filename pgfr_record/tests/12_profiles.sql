@@ -66,8 +66,8 @@ SELECT ok(
 -- The overrun invariant is a real CHECK constraint, not a convention
 -- (§5, §10.1 acceptance criterion 6).
 -- ---------------------------------------------------------------------------
-INSERT INTO pgfr_record.profiles (profile_name, lock_timeout, section_timeout)
-VALUES ('test_check_profile', interval '100 ms', interval '250 ms');
+INSERT INTO pgfr_record.profiles (profile_name, lock_timeout)
+VALUES ('test_check_profile', interval '100 ms');
 
 SELECT throws_ok(
     $$INSERT INTO pgfr_record.profile_tiers (profile_name, cadence_tier, tier_interval, job_timeout)

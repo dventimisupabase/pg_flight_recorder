@@ -20,7 +20,7 @@
 -- generate_presentation_views(), just against a table instead of a view.
 --
 -- Per-target timeout resolution is deliberately not stored here: profiles
--- (cadence + lock_timeout + section_timeout bounds) are milestone 5.
+-- (cadence + lock_timeout + job_timeout bounds) are milestone 5.
 -- capture_plan carries everything the manifest layer owns today; a
 -- profile is joined against it at collector-run time once one exists.
 CREATE TABLE IF NOT EXISTS pgfr_record.capture_plan (

@@ -4,6 +4,18 @@
 -- Profiles (§9): reduced to cadence + bounds. apply_profile(name) remaps
 -- tiers and bounds; it never touches the manifest.
 --
+-- No section_timeout here: §5's "arming gotcha", confirmed against a
+-- live server during milestone 6 acceptance testing, is that
+-- statement_timeout's enforcement timer is armed once per top-level
+-- statement and cannot be re-armed by a SET LOCAL executed from inside
+-- that same statement's own execution (e.g. inside run_tier()'s loop).
+-- A per-target statement-level timeout is therefore not implementable
+-- without dispatching each target as its own top-level statement, which
+-- would need a dependency (dblink/pg_background) this design
+-- deliberately does not take on. lock_timeout does not share this
+-- defect (a lock wait is checked dynamically, confirmed against a live
+-- server) and remains real and per-target.
+--
 -- profile_tiers.job_timeout < tier_interval is a real CHECK constraint,
 -- not just a convention: this is §5's overrun-protection invariant
 -- ("job_timeout(tier) < tier_interval(tier)"), enforced at the data
@@ -12,7 +24,6 @@
 CREATE TABLE IF NOT EXISTS pgfr_record.profiles (
   profile_name    text PRIMARY KEY,
   lock_timeout    interval NOT NULL,
-  section_timeout interval NOT NULL,
   notes           text
 );
 
@@ -26,13 +37,13 @@ CREATE TABLE IF NOT EXISTS pgfr_record.profile_tiers (
 );
 
 COMMENT ON TABLE pgfr_record.profiles IS
-    'Profile-level bounds (lock_timeout, section_timeout). §9: reduced to cadence + bounds; apply_profile() never touches the manifest.';
+    'Profile-level bounds (lock_timeout). §9: reduced to cadence + bounds; apply_profile() never touches the manifest.';
 COMMENT ON TABLE pgfr_record.profile_tiers IS
     'Per-tier cadence + job_timeout for each profile. job_timeout < tier_interval is enforced by CHECK constraint, not convention (§5, §10.1 acceptance criterion 6).';
 
-INSERT INTO pgfr_record.profiles (profile_name, lock_timeout, section_timeout, notes) VALUES
-    ('default', interval '100 ms', interval '250 ms', 'the shipped default (§9)'),
-    ('troubleshooting', interval '100 ms', interval '500 ms', 'tighter fast/medium cadence for active incident work; looser section timeouts (§9)')
+INSERT INTO pgfr_record.profiles (profile_name, lock_timeout, notes) VALUES
+    ('default', interval '100 ms', 'the shipped default (§9)'),
+    ('troubleshooting', interval '100 ms', 'tighter fast/medium cadence for active incident work (§9)')
 ON CONFLICT (profile_name) DO NOTHING;
 
 INSERT INTO pgfr_record.profile_tiers (profile_name, cadence_tier, tier_interval, job_timeout) VALUES
@@ -106,12 +117,19 @@ END;
 $$;
 
 -- apply_profile(): (re)schedules the four tier jobs to match the named
--- profile's cadence and bounds. cron.schedule() replaces a same-named
--- job, so this is idempotent and safe to call repeatedly (including to
--- switch profiles -- there is no separate "currently active profile"
--- state to keep in sync: cron.job's live schedule/command *is* the
--- source of truth for what is currently applied). Never touches the
--- manifest or capture_plan.
+-- profile's cadence and bounds. Each job's dispatched command is TWO
+-- top-level statements -- "SET statement_timeout = ...; SELECT
+-- pgfr_record.run_tier(...)" -- not one: per §5's arming gotcha, only a
+-- SET issued as its own preceding top-level statement can genuinely
+-- pre-empt a target that is not merely slow but truly hung (run_tier()'s
+-- own cooperative job_timeout check, real regardless of how it is
+-- invoked, only stops the tier from starting *further* targets -- it
+-- cannot interrupt one already in flight). cron.schedule() replaces a
+-- same-named job, so this is idempotent and safe to call repeatedly
+-- (including to switch profiles -- there is no separate "currently
+-- active profile" state to keep in sync: cron.job's live schedule/
+-- command *is* the source of truth for what is currently applied).
+-- Never touches the manifest or capture_plan.
 CREATE OR REPLACE FUNCTION pgfr_record.apply_profile(p_profile_name text)
 RETURNS void
 LANGUAGE plpgsql AS $$
@@ -129,8 +147,9 @@ BEGIN
             'pgfr_tier_' || v_tier.cadence_tier,
             pgfr_record._interval_to_cron(v_tier.tier_interval),
             format(
-                'SELECT pgfr_record.run_tier(%L, %L::interval, %L::interval, %L::interval)',
-                v_tier.cadence_tier, v_profile.lock_timeout, v_tier.job_timeout, v_profile.section_timeout
+                'SET statement_timeout = %L; SELECT pgfr_record.run_tier(%L, %L::interval, %L::interval)',
+                pgfr_record._interval_ms_literal(v_tier.job_timeout),
+                v_tier.cadence_tier, v_profile.lock_timeout, v_tier.job_timeout
             )
         );
         -- cron.schedule() on an already-existing job updates its
@@ -145,4 +164,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION pgfr_record.apply_profile(text) IS
-    'Reschedules the four tier pg_cron jobs to the named profile''s cadence and bounds. Idempotent (cron.schedule() replaces a same-named job); never touches the manifest. There is no separate "active profile" marker -- cron.job''s live schedule/command is the source of truth for what is currently applied.';
+    'Reschedules the four tier pg_cron jobs to the named profile''s cadence and bounds, dispatching each as "SET statement_timeout; SELECT run_tier(...)" (two top-level statements) so job_timeout gets genuine preemptive enforcement from the caller side, not just run_tier()''s own cooperative check -- see §5''s arming gotcha. Idempotent; never touches the manifest. There is no separate "active profile" marker -- cron.job''s live schedule/command is the source of truth for what is currently applied.';
