@@ -23,12 +23,15 @@
 --   06_generators.sql        generate_archives(), generate_presentation_views()
 --   07_capture_plan.sql      capture_plan table + generate_capture_plan()
 --   08_collector.sql         run_tier(): the collector core (tier jobs are
---                            scheduled by milestone 5's enable(), not here)
+--                            scheduled by enable(), 14_enable.sql, not here)
 --   09_column_classes.sql    generate_column_classes(): the counter/odometer/
 --                            gauge/label/key legend (§3.1, §4.5)
 --   10_definitional.sql      state_as_of(), resolve_relation(), resolve_index()
 --   11_deltas.sql            deltas(): reset-aware consecutive-sample differences
 --   12_comments.sql          generate_comments(): self-documenting \d+ (§4.5)
+--   13_profiles.sql          profiles, profile_tiers, apply_profile()
+--   14_enable.sql            enable() / disable()
+--   15_health_check.sql      health_check()
 
 \ir sql/01_schema.sql
 \ir sql/02_manifest.sql
@@ -42,6 +45,9 @@
 \ir sql/10_definitional.sql
 \ir sql/11_deltas.sql
 \ir sql/12_comments.sql
+\ir sql/13_profiles.sql
+\ir sql/14_enable.sql
+\ir sql/15_health_check.sql
 
 -- Create every enabled target's archive table + initial partitions,
 -- regenerate the typed presentation views, rebuild the capture plan,
@@ -53,3 +59,8 @@ SELECT pgfr_record.generate_presentation_views();
 SELECT pgfr_record.generate_capture_plan();
 SELECT pgfr_record.generate_column_classes();
 SELECT pgfr_record.generate_comments();
+
+-- Schedule all pg_cron jobs via the single source of truth (enable()).
+-- pg_cron's cron.schedule() replaces same-named jobs, so this is
+-- idempotent across re-runs (§7's upgrade procedure).
+SELECT pgfr_record.enable();
