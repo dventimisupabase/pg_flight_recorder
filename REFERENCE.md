@@ -19,7 +19,6 @@ Everything below is a fact about `pgfr_record`, the required core extension. `pg
 - [Presentation views](#presentation-views)
 - [Column classes](#column-classes)
 - [Capture plan and the collector](#capture-plan-and-the-collector)
-  - [The statement_timeout arming gotcha](#the-statement_timeout-arming-gotcha)
 - [Capture ledger](#capture-ledger)
 - [Definitional helpers](#definitional-helpers)
   - [`state_as_of(source_view, t)`](#state_as_ofsource_view-t)
@@ -97,7 +96,7 @@ Both `debounce = false OR anchor_every IS NOT NULL` and `keyless = false OR debo
 
 `pg_stat_statements` and `pg_stat_statements_info` are extension-provided views, not `pg_catalog` builtins: `CREATE EXTENSION` installs them wherever the current schema was at the time (`public` on stock PostgreSQL, typically `extensions` on Supabase). The manifest references them unqualified and lets `::regclass` resolve them via `search_path`, exactly as any other client of an extension-provided object would.
 
-**Group C: gauges.** Fast tier, 2 hours retention (this is what the v1 ring buffer becomes when expressed as a retention number), `debounce = false`. 13 rows: `pg_stat_activity` (key `{pid, backend_start}`, where `backend_start` disambiguates pid reuse), `pg_locks` (keyless; join to activity via `pid` at equal `captured_at`), `pg_stat_replication`, `pg_stat_wal_receiver`, `pg_stat_subscription`, `pg_replication_slots` (odometers `restart_lsn`/`confirmed_flush_lsn`; failure to advance is an analyze-side alarm), `pg_prepared_xacts` (usually empty; an aging row is itself an anomaly), and the six default-on progress views (`pg_stat_progress_vacuum`, `_cluster`, `_create_index`, `_basebackup`, `_analyze`, `_copy`).
+**Group C: gauges.** Fast tier, 2 hours retention, `debounce = false`. 13 rows: `pg_stat_activity` (key `{pid, backend_start}`, where `backend_start` disambiguates pid reuse), `pg_locks` (keyless; join to activity via `pid` at equal `captured_at`), `pg_stat_replication`, `pg_stat_wal_receiver`, `pg_stat_subscription`, `pg_replication_slots` (odometers `restart_lsn`/`confirmed_flush_lsn`; failure to advance is an analyze-side alarm), `pg_prepared_xacts` (usually empty; an aging row is itself an anomaly), and the six default-on progress views (`pg_stat_progress_vacuum`, `_cluster`, `_create_index`, `_basebackup`, `_analyze`, `_copy`).
 
 **Group D: state history.** `on_change` tier, `debounce = true`, `anchor_every = 1 month` (Group D uses monthly partitions per the retention-to-width rule below), 365 days retention.
 
@@ -144,7 +143,7 @@ One table per enabled, version-applicable manifest row, named `pgfr_record.a_<sh
 | `schema_id` | `smallint` | Which `payload_schemas` row this payload's positions follow (FK) |
 | `payload` | `jsonb` | Positional jsonb array of every captured column value |
 
-`PARTITION BY RANGE (captured_at)`, plus one index: `(key_hash, captured_at DESC)`, for the debounce anti-join and LOCF. Nothing indexes `payload`. There is no visibility column here: visibility (`full`, `masked`, or `degraded`) lives in the capture ledger, per run per target, not per archive row.
+`PARTITION BY RANGE (captured_at)`, plus one index: `(key_hash, captured_at DESC)`, for the debounce anti-join and LOCF. Nothing indexes `payload`. Visibility (`full`, `masked`, or `degraded`) lives in the capture ledger, per run per target, rather than on the archive row itself.
 
 Plural, uniform-shape tables (rather than one giant generic table) mean retention is per-target partition dropping, a 100k-relation Group B table can't bloat `pg_settings` history, autovacuum sees homogeneous tables, and per-target indexes stay small. The generator makes every one of them from the manifest, so plurality costs no hand-written DDL.
 
@@ -175,7 +174,7 @@ A source view can carry more than one `payload_schemas` row over time (mid-major
 
 Array-typed columns (e.g. `pg_settings.enumvals`, a `text[]`) need special handling: the `->>` operator returns a nested array's JSON-bracket text form, not a Postgres array literal, so `_jsonb_element_cast()` reassembles them via `jsonb_array_elements_text()` instead of a plain cast, with an explicit guard for a captured NULL.
 
-Example, from a live PG15 install (`\d+ pgfr_record.v_pg_stat_database`):
+Example (`\d+ pgfr_record.v_pg_stat_database`):
 
 ```
                                                 View "pgfr_record.v_pg_stat_database"
@@ -222,15 +221,9 @@ This is a best-effort mechanical classification, not a hand-verified audit again
 - **Single stamp.** One `captured_at` (`t0`) is shared by every target in the tier, so cross-view joins at equal `captured_at` (`pg_locks` joined to `pg_stat_activity`) are exact, not approximate.
 - **Debounce / anchor.** A debounced target appends only rows whose `(key_hash, row_hash)` doesn't match its most recent capture within the current anchor window (a `LEFT JOIN LATERAL`, not a bare `NOT IN`, so a value that fluctuates back to an earlier state is correctly re-appended). "Anchor due" is answered statelessly: since anchor cadence equals partition width by manifest construction, it reduces to "does the current partition have any rows yet", with no separate last-anchor tracking table, and self-healing if a prior anchor attempt failed partway.
 - **Per-target failure isolation.** Each target's capture is one `INSERT ... SELECT` inside its own `EXCEPTION` block (a subtransaction). A lock-queue hang, permission failure, or error on one target cannot fail the tier or the rest of the run; the ledger row is the handling.
-- **Timeouts.** `lock_timeout` is a real, dynamically-enforced per-target bound (`SET LOCAL lock_timeout`, re-affirmed every loop iteration). `job_timeout` is enforced two ways: a cooperative deadline check that stops the tier from *starting* further targets once the budget is spent (works unconditionally, including manual invocation; a target skipped this way simply has no `ledger_captures` row for the run), and, when `run_tier()` is dispatched as the second statement of `SET statement_timeout = ...; SELECT run_tier(...)` (which is how `apply_profile()` schedules every tier job), a genuine caller-side preemptive cancellation of a target that is truly hung, not merely slow. There is no per-target `section_timeout`: it would require dispatching each target as its own top-level statement (via `dblink`/`pg_background`), a dependency this design deliberately does not take on. See "The statement_timeout arming gotcha" below for why.
+- **Timeouts.** `lock_timeout` bounds each target's lock wait: it's checked dynamically at the moment a wait begins (`SET LOCAL lock_timeout`, re-affirmed every loop iteration), so it applies in full to every target in turn. `job_timeout` bounds the tier as a whole, two ways: a cooperative deadline check before starting each target, which stops the loop from starting anything further once the tier's elapsed time exceeds the budget (a target skipped this way simply has no `ledger_captures` row for the run), and a caller-side `SET statement_timeout`, issued by `apply_profile()` as its own statement immediately before calling `run_tier()` (`SET statement_timeout = ...; SELECT run_tier(...)`), which can cancel a target that is genuinely hung partway through its own capture.
 
-### The statement_timeout arming gotcha
-
-Confirmed against a live server: `statement_timeout`'s enforcement timer is armed once, at the start of the current top-level statement, using whatever value was in effect at that moment. A `SET`/`SET LOCAL statement_timeout` executed from inside that same top-level statement's own execution, including from inside a called function, does not retroactively re-arm the already-running timer. Since `run_tier()` is invoked as a single top-level call, an internal `SET LOCAL statement_timeout` inside its own body can never preemptively cancel anything about its own execution. `lock_timeout` does not share this defect: a lock wait is checked dynamically against whatever `lock_timeout` is in effect at the moment the wait begins, confirmed separately against a live server, so it remains a real, working, per-target bound with no caveats.
-
-This is why `apply_profile()` schedules each tier's pg_cron job as **two** top-level statements, `SET statement_timeout = '<job_timeout>ms'; SELECT pgfr_record.run_tier(<tier>, <lock_timeout>, <job_timeout>)`, rather than one call to `run_tier()` alone: only a `SET` issued as its own preceding top-level statement genuinely arms preemptive cancellation for the whole call.
-
-`pg_cron` serializes overrunning jobs rather than launching concurrent instances of the same job. This was confirmed against a live instance by scheduling a job on a short interval whose body deliberately overran it, and observing successive invocations start only after the previous one finished, never overlapping. This is the empirical basis for why static, bounded timeouts (`job_timeout(tier) < tier_interval(tier)`, enforced by a `CHECK` constraint on `profile_tiers`) are sufficient on their own, without an adaptive circuit breaker: even under a pathological, sustained overrun, pgfr never accumulates piled-up concurrent collector backends for the same tier.
+`pg_cron` never runs two instances of the same tier job concurrently: an overrunning job simply delays that tier's next tick rather than stacking a second instance on top of it. Together with `job_timeout(tier) < tier_interval(tier)` (enforced by a `CHECK` constraint on `profile_tiers`), a tier never accumulates more than one running collector backend at a time.
 
 ## Capture ledger
 
@@ -258,7 +251,7 @@ Mechanical, deterministic, threshold-free functions over recorded facts: everyth
 
 LOCF (last-observation-carried-forward) reconstruction: for each key, the most recent sample at or before `t`, never searching further back than the start of `t`'s own partition (anchor cadence equals partition width by manifest construction, so that bound is free). Returns `SETOF record`; the caller supplies a column-definition list matching `\d pgfr_record.v_<short_name>`.
 
-Verified example, from a live install:
+Example:
 
 ```sql
 SELECT * FROM pgfr_record.state_as_of('pg_catalog.pg_stat_database', now())
@@ -295,7 +288,7 @@ Consecutive-sample differences per key over counter/odometer columns, driven by 
 
 Returns `SETOF record`; counter/odometer columns come back as `<column>_delta` (note: `pg_lsn - pg_lsn` yields `numeric`, so an LSN odometer's delta column is `numeric`, not `pg_lsn`); everything else passes through as the `to_t` value under its own name, plus `from_captured_at` and `to_captured_at`.
 
-Verified example, from a live install (two real `pg_stat_wal` captures, about 9 seconds apart):
+Example, two `pg_stat_wal` captures about 9 seconds apart:
 
 ```sql
 SELECT wal_records_delta, wal_bytes_delta, from_captured_at, to_captured_at
@@ -329,9 +322,9 @@ Shipped profiles:
 | `troubleshooting` | slow | 15 min | 12 min | 100 ms |
 | `troubleshooting` | on_change | 5 min | 4 min | 100 ms |
 
-`pgfr_record.apply_profile(profile_name)` reschedules the four tier jobs to the named profile's cadence and bounds, dispatching each as the two-statement `SET statement_timeout; SELECT run_tier(...)` command described above. It never touches the manifest, and there is no separate "currently active profile" marker: `cron.job`'s live schedule/command is the source of truth for what's applied. `pg_cron` accepts a literal `"N seconds"` schedule syntax for sub-minute jobs (used by `troubleshooting`'s tighter fast cadence), confirmed working against a live instance.
+`pgfr_record.apply_profile(profile_name)` reschedules the four tier jobs to the named profile's cadence and bounds, dispatching each as the two-statement `SET statement_timeout; SELECT run_tier(...)` command described above. It never touches the manifest. `cron.job`'s live schedule and command are the single source of truth for which profile is currently applied. `pg_cron` accepts a literal `"N seconds"` schedule syntax for sub-minute jobs, used by `troubleshooting`'s tighter fast cadence.
 
-`pgfr_record.enable()` applies the `default` profile and schedules the hourly `maintain_partitions()` job: the single "turn pgfr_record on" operation. `pgfr_record.disable()` unschedules the four tier jobs and the maintenance job; archive data, the manifest, and the capture plan are untouched. Both are idempotent. Note: `cron.schedule()` on an already-scheduled job updates its schedule/command but does **not** reactivate a previously deactivated job on its own (confirmed against a live instance); `apply_profile()` and `enable()` both explicitly set `active = true` after scheduling, for exactly this reason.
+`pgfr_record.enable()` applies the `default` profile and schedules the hourly `maintain_partitions()` job: the single "turn pgfr_record on" operation. `pgfr_record.disable()` unschedules the four tier jobs and the maintenance job; archive data, the manifest, and the capture plan are untouched. Both are idempotent, and both explicitly set `active = true` on every job they schedule, since `cron.schedule()` on an already-scheduled job updates its schedule and command but leaves `active` at whatever it already was.
 
 ## `health_check()`
 
@@ -344,7 +337,7 @@ Shipped profiles:
 
 Every check is read-only and threshold-free in the judgmental sense: each is a fixed structural fact (is a job scheduled, is a partition still attached past retention), never an opinion about what's normal. Opinions are `pgfr_analyze`'s job.
 
-**`health_check()` is verified genuinely read-only, two ways.** This matters because of a real v1 incident: v1's `health_check()` internally called `cleanup()`, which could itself fail or time out, defeating the entire point of a status check. v2's `health_check()` is confirmed, empirically, to complete successfully inside a hard `READ ONLY` transaction, and that empirical check is load-bearing, because declaring a function `STABLE` does **not**, on its own, prevent it from calling a mutating function: PostgreSQL only checks a function's own literal body against its declared volatility, not what it calls transitively. A `READ ONLY` transaction, by contrast, is enforced through any depth of function calls (confirmed separately: forcing `maintain_partitions()` to do real work inside a `READ ONLY` transaction fails with "cannot execute CREATE TABLE in a read-only transaction", the exact failure mode this guard would catch were it ever reintroduced).
+`health_check()` is read-only: every check reads a structural fact (`cron.job`, the ledger, `pg_inherits`) and writes nothing. It runs successfully inside a hard `READ ONLY` transaction, which is a stronger guarantee than declaring the function `STABLE`, since PostgreSQL checks a function's declared volatility against its own literal body only, not against what it calls transitively.
 
 ## `pgfr_analyze`
 

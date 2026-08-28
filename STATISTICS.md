@@ -55,7 +55,7 @@ Manifest rows whose columns are classified `counter` or `odometer` in `column_cl
 
 ### Mode C: debounced state-change capture
 
-Manifest rows with `debounce = true` (Group B and Group D) append a row for a key only when its compared payload changes since that key's most recent capture, within the current anchor window, plus an unconditional full capture at every anchor. This mode exists only in v2; v1 had no debounce mechanism.
+Manifest rows with `debounce = true` (Group B and Group D) append a row for a key only when its compared payload changes since that key's most recent capture, within the current anchor window, plus an unconditional full capture at every anchor.
 
 This is not sampling in the Mode A sense: every tick performs a full comparison against the live source, so the *absence* of an appended row between two present ones means "unchanged for that whole span," not "not observed." `pgfr_record.state_as_of(source_view, t)` reconstructs a key's value at any `t` via LOCF (last-observation-carried-forward), bounded by the containing anchor. The one blind spot this mode shares with Mode A: a value that changes and changes back again between two ticks, with no anchor in between, is invisible, exactly as a Bernoulli sample would miss it. For monotonically-behaved counters and slowly-changing state (what Group B and Group D actually hold), this is a narrow, well-understood gap, not a general limitation on the reconstruction.
 
@@ -75,8 +75,8 @@ Applying the `troubleshooting` profile tightens the fast tier to `T = 20s`, whic
 ## Error and censoring rules
 
 1. **No proportion without its denominator.** A Mode A proportion is meaningless without the sample count behind it. `pgfr_record.health_check()`'s `ledger_miss_rate_1h` check reports both the miss count and the total in its `detail` text for exactly this reason.
-2. **Coverage is queryable, not asserted.** `pgfr_record.ledger_runs` and `ledger_captures` are the raw record of every tier run and every per-target outcome; there is no separate coverage-summary function in `pgfr_record` today; aggregating gap runs and attributing them to a cause is `pgfr_analyze` territory, once it's rebuilt. In the meantime, `outcome <> 'ok'` rows in `ledger_captures`, joined to `ledger_runs` for the timestamp, are exactly the gap list.
-3. **Censoring is flagged, not smoothed.** A counter reset, mid-flight, is not a noisy measurement; it's not a measurement. `deltas()` returns `NULL` rather than a negative or interpolated value across one, per Mode B above. There is no separate discontinuity ledger in `pgfr_record`; the reset itself is visible in the affected source view's own `stats_reset` column, captured like any other value.
+2. **Coverage is queryable, not asserted.** `pgfr_record.ledger_runs` and `ledger_captures` are the raw record of every tier run and every per-target outcome: `outcome <> 'ok'` rows in `ledger_captures`, joined to `ledger_runs` for the timestamp, are exactly the gap list.
+3. **Censoring is flagged, not smoothed.** A counter reset, mid-flight, is not a noisy measurement; it's not a measurement. `deltas()` returns `NULL` rather than a negative or interpolated value across one, per Mode B above. The reset itself is visible directly in the affected source view's own `stats_reset` column, captured like any other value.
 4. **Retention is a resolution limit, stated as one.** A window whose start predates a target's retention horizon does not "come back empty"; it comes back with whatever survived partition drop, which is exactly what the manifest's own `retention` column documents per target.
 
 ## Scope
