@@ -25,6 +25,9 @@
 --   11_preflight.sql          preflight_check(), preflight_check_with_summary()
 --   12_check_alerts.sql       check_alerts()
 --   13_quarterly_review.sql   quarterly_review(), quarterly_review_with_summary()
+--   14_table_hotspots.sql     table_hotspots()
+--   15_index_analysis.sql     unused_indexes(), index_efficiency()
+--   16_activity_readers.sql   vacuum_progress(), wal_archiver_status(), long_running_transactions()
 
 \ir sql/01_schema.sql
 \ir sql/02_coverage.sql
@@ -39,3 +42,6 @@
 \ir sql/11_preflight.sql
 \ir sql/12_check_alerts.sql
 \ir sql/13_quarterly_review.sql
+\ir sql/14_table_hotspots.sql
+\ir sql/15_index_analysis.sql
+\ir sql/16_activity_readers.sql
