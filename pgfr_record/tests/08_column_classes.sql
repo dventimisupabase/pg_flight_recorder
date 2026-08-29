@@ -3,7 +3,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(18);
+SELECT plan(22);
 
 SELECT has_function('pgfr_record', 'generate_column_classes', 'Function pgfr_record.generate_column_classes should exist');
 
@@ -108,6 +108,25 @@ SELECT ok(
     (SELECT class = 'gauge' FROM pgfr_record.column_classes WHERE source_view = 'pg_catalog.pg_ident_file_mappings' AND column_name = 'map_number')
     OR NOT EXISTS (SELECT 1 FROM pgfr_record.column_classes WHERE source_view = 'pg_catalog.pg_ident_file_mappings' AND column_name = 'map_number'),
     'pg_ident_file_mappings.map_number, when present (a PG16+ column), should classify as gauge (an ordinal position, not a counter)'
+);
+SELECT ok(
+    (SELECT bool_and(class = 'gauge') FROM pgfr_record.column_classes
+     WHERE source_view = 'pg_catalog.pg_stat_activity' AND column_name IN ('leader_pid', 'query_id')),
+    'pg_stat_activity''s leader_pid/query_id should classify as gauge, not counter (identity-shaped values, not cumulative)'
+);
+SELECT ok(
+    (SELECT class = 'gauge' FROM pgfr_record.column_classes WHERE source_view = 'pg_catalog.pg_stat_subscription' AND column_name = 'leader_pid'),
+    'pg_stat_subscription.leader_pid should classify as gauge, not counter'
+);
+SELECT ok(
+    (SELECT bool_and(class = 'gauge') FROM pgfr_record.column_classes
+     WHERE source_view = 'pg_catalog.pg_stat_activity' AND column_name IN ('wait_event', 'wait_event_type', 'state')),
+    'pg_stat_activity''s wait_event/wait_event_type/state should classify as gauge (the point-in-time condition Mode A sampling is built on), not label'
+);
+SELECT is(
+    (SELECT class FROM pgfr_record.column_classes WHERE source_view = 'pg_catalog.pg_stat_replication' AND column_name = 'state'),
+    'gauge',
+    'pg_stat_replication.state should classify as gauge, not label'
 );
 
 -- ---------------------------------------------------------------------------
