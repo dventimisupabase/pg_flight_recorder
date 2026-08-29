@@ -6,7 +6,7 @@
 
 Complete reference for [pg_flight_recorder](README.md) v2. For installation and getting started, see the [README](README.md) and [pgfr_record/README.md](pgfr_record/README.md). For the statistics collected and why, see [STATISTICS.md](STATISTICS.md).
 
-Everything below is a fact about `pgfr_record`, the required core extension. `pgfr_analyze` is covered in one section at the end: it is not yet rebuilt for v2.
+Everything through [Profiles](#profiles) and [`health_check()`](#health_check) is a fact about `pgfr_record`, the required core extension. The [`pgfr_analyze`](#pgfr_analyze) section at the end covers the optional analysis extension: reporting, anomaly detection, and capacity views built on top of `pgfr_record`'s captured data.
 
 ## Contents
 
@@ -28,6 +28,21 @@ Everything below is a fact about `pgfr_record`, the required core extension. `pg
 - [Profiles](#profiles)
 - [`health_check()`](#health_check)
 - [`pgfr_analyze`](#pgfr_analyze)
+  - [Configuration](#configuration)
+  - [Coverage and gaps](#coverage-and-gaps)
+  - [Configuration tracking](#configuration-tracking)
+  - [Query dictionary and query-level analysis](#query-dictionary-and-query-level-analysis)
+  - [xmin horizon](#xmin-horizon)
+  - [Anomaly detection](#anomaly-detection)
+  - [Capacity summary](#capacity-summary)
+  - [Self overhead](#self-overhead)
+  - [Preflight check](#preflight-check)
+  - [Check alerts](#check-alerts)
+  - [Quarterly review](#quarterly-review)
+  - [Table hotspots](#table-hotspots)
+  - [Index analysis](#index-analysis)
+  - [Activity readers](#activity-readers)
+  - [Composing reports](#composing-reports)
 
 ## The big picture
 
@@ -342,4 +357,203 @@ Every check is read-only and threshold-free in the judgmental sense: each is a f
 
 ## `pgfr_analyze`
 
-`pgfr_analyze` is not yet rebuilt for v2. The schema exists as a placeholder (`CREATE SCHEMA pgfr_analyze` with a `COMMENT ON SCHEMA` explaining the deferral) so the two-extension install pipeline keeps working while it's built out; it currently has no tables, views, or functions. See `pgfr-v2-context-pack.md`'s Appendix (milestone 7) for what it's designed to eventually own: anomaly/regression/storm detection, trends, capacity views, and `report()`, all consuming `pgfr_record`'s definitional helpers and column classes, owning none of them. A `pgfr_record`-only install (or a `pg_dump` of one) is fully self-contained and self-describing in the meantime; `pgfr_analyze`, once it exists, will make conclusions faster, not make them possible.
+`pgfr_analyze` reads `pgfr_record`'s captured data, column classes, and definitional helpers to answer questions requiring a threshold, baseline, or opinion; it never writes to `pgfr_record`'s schema. Everything in `pgfr_record` has exactly one correct answer; everything below encodes a judgment call instead, tunable in most cases via `pgfr_analyze.config`. Most functions build their query dynamically against `pgfr_record.deltas()` or `pgfr_record.state_as_of()`, using an internal helper (`_deltas_col_defs()` / `_state_col_defs()`) to generate the caller-supplied column-definition list those functions require; a function built this way raises if the source view has no `pgfr_record.payload_schemas` row yet (that is, `pgfr_record` hasn't captured it even once) rather than silently returning nothing.
+
+### Configuration
+
+`pgfr_analyze.config(key, value, updated_at)` holds tunable thresholds (severity bands, lookback windows, ratios) for the functions below that expose one; `pgfr_analyze._get_config(key, default)` reads a key, falling back to the caller's own default when the key is unset. `pgfr_record` has no equivalent table: opinions belong here.
+
+### Coverage and gaps
+
+`pgfr_analyze.coverage(from_t, to_t)` (or `coverage(window)`, ending now) reports expected vs. observed tier runs per cadence tier, built directly on `pgfr_record.ledger_runs`. The expected count comes from each tier's live pg_cron schedule (via `pgfr_record._cron_schedule_to_interval()`), not a hardcoded assumption, and is `NULL` when a tier has no scheduled job:
+
+```
+ cadence_tier | expected_runs | observed_runs | coverage_ratio
+--------------+---------------+---------------+----------------
+ fast         |          60.0 |             6 |          0.100
+ medium       |          12.0 |             5 |          0.417
+ on_change    |          12.0 |             5 |          0.417
+ slow         |           4.0 |             5 |          1.250
+```
+
+A `coverage_ratio` above 1.0 (as with `slow` above) means more runs landed in the window than the current schedule alone would predict, e.g. right after a profile change; it isn't an error condition.
+
+`pgfr_analyze.coverage_gaps(from_t, to_t)` (or `coverage_gaps(window)`) finds contiguous runs of missed tier ticks, grouped via the standard `row_number()`-offset islands-and-gaps technique, each tagged with an `attributed_reason` (`cron_inactive` when the tier's job is missing or inactive, `unknown` otherwise). A tier with no resolvable schedule at all reports the entire queried window as one gap rather than being silently omitted. Per-target capture failures within a run that did happen are not gaps: query `pgfr_record.ledger_captures` directly for those (`outcome <> 'ok'`).
+
+### Configuration tracking
+
+Three functions, all built on `pgfr_record.state_as_of()` against `pg_settings`'s already-debounced Group D history, so GUC change detection needs no dedicated snapshot table:
+
+- **`config_changes(from_t, to_t)`**: GUCs whose setting or source differ between the state as of `from_t` and as of `to_t`. `changed_at` is the actual capture timestamp of the `to_t` value, not a precisely detected change moment. Because `state_as_of()` returns zero rows before any capture existed, a window whose `from_t` predates the recorder's first `on_change`-tier capture reports every currently-set GUC as "changed" (`old_setting` `NULL`) rather than a small, real diff; anchor `from_t` after the recorder has had at least one debounce anchor cycle to run for a meaningful result.
+- **`config_at(t, name_prefix)`**: GUC values as of `t` (LOCF), optionally filtered to names starting with `name_prefix`.
+- **`config_health_check()`**: opinionated checks against the *live* (not historical) `pg_settings`: low `shared_buffers` (under 128MB), low `work_mem` (under 16MB), high `max_connections` (over 200), no `statement_timeout` set. Zero rows when nothing is flagged.
+
+### Query dictionary and query-level analysis
+
+`pgfr_analyze.query_dict(queryid, dbid, userid, toplevel, query_text, first_seen, last_seen)` is a deduplicated queryid-to-query-text table, refreshed from `pgfr_record.v_pg_stat_statements` by `refresh_query_dict()`. Because `pg_stat_statements` is a debounced Group B target, `pgfr_record` already recaptures the full row (query text included) whenever any of its counters change; the dictionary exists so analyze-side readers can get query text without re-scanning the archive. `first_seen` is never advanced on conflict, so it can't drift forward just because retention dropped the archive rows that would let it be recomputed from scratch.
+
+`detect_regressions(lookback, threshold_pct)` and `detect_query_storms(lookback, threshold_multiplier)` both compare a recent window against a baseline window offset by `regression_baseline_days` / `storm_baseline_days` (default 7 days earlier), built on `pgfr_record.deltas('pg_stat_statements', ...)`:
+
+- **`detect_regressions()`**: queries whose average execution time or buffer usage per call (`regression_detection_metric`: `time` or `buffers`, default `buffers`) worsened by more than `threshold_pct` (default 50%), requiring at least 5 calls in both windows. Severity bands (`regression_severity_low/medium/high_max`) are tunable via config.
+- **`detect_query_storms()`**: queries whose call rate in the recent window exceeds baseline by more than `threshold_multiplier` (default 3x), classified `RETRY_STORM` (query text matches `retry`/`for update`, always CRITICAL), `CACHE_MISS` (no baseline calls, or over 10x baseline, a fixed constant rather than config-driven), `SPIKE` (over the threshold multiplier), else omitted.
+
+### xmin horizon
+
+Every raw xid these functions need is already captured on the fast tier (Group C): `pg_stat_activity.backend_xmin`, `pg_stat_replication.backend_xmin`, `pg_replication_slots.xmin`/`catalog_xmin`, `pg_prepared_xacts.transaction`. Deciding *which* of several xids is the dominant holder is a judgment call, so that resolution happens entirely here rather than inside the collector.
+
+- **`xmin_horizon_history(from_t, to_t)`**: the single oldest (worst) xmin observation per source (`activity`, `replication`, `slot`, `slot_catalog`, `prepared`) captured in the window. `xmin_age` is `age(xid)` evaluated *now*, against the current transaction counter (the only counter PostgreSQL exposes), so it reflects each captured value's distance from the current horizon, not its age as of its own capture time; for that reason this is one row per source, not a per-tick timeline.
+- **`current_xmin_horizon_holder()`**: the single dominant holder as of the most recent fast-tier capture, ties broken slot > prepared > activity > replication. Zero rows when the most recent capture has no candidate in any source. Always returns the current holder regardless of how old it is; applying a threshold to call that concerning is `anomaly_report()`'s job.
+
+### Anomaly detection
+
+`anomaly_report(from_t, to_t)` returns every flagged anomaly across a fixed but growing set of checks, each built on `pgfr_record.deltas()` (rate/count checks) or a current-state read via `state_as_of(to_t)` (gauge checks), never on a new capture:
+
+| anomaly_type | basis | trigger (severity escalates past the second figure where one is given) |
+|---|---|---|
+| `FORCED_CHECKPOINTS` | delta | any forced (non-timed) checkpoint in the window |
+| `CHECKPOINT_WRITE_TIME_HIGH` | delta | cumulative checkpoint write time over 10s (HIGH past 30s) |
+| `BUFFER_PRESSURE` | delta | backends wrote over 100 of their own dirty buffers (HIGH past 1000) |
+| `BACKEND_FSYNC` | delta | any backend-forced fsync |
+| `TEMP_FILE_SPILLS` | delta | over 100MiB spilled to temp files across all databases (HIGH past 1GiB) |
+| `IDLE_IN_TRANSACTION` | state @ `to_t` | idle in transaction over 5 minutes (HIGH past 30 minutes) |
+| `LOCK_CONTENTION` | state @ `to_t` | waiting on a lock over 10 seconds (HIGH past 1 minute) |
+| `CONNECTION_LEAK` | state @ `to_t` | over 20 backends idle (not in a transaction) for over an hour (HIGH past 50 backends) |
+| `DEAD_TUPLE_ACCUMULATION` | state @ `to_t` | a relation is over 20% dead tuples and has over 1000 dead tuples (HIGH past 50%) |
+| `VACUUM_STARVATION` | state @ `to_t` | over 10,000 dead tuples and never vacuumed, or not vacuumed in 7+ days (HIGH if never vacuumed or over 100,000 dead tuples) |
+| `REPLICATION_LAG` | state @ `to_t` | a replica's `replay_lag` over 30 seconds (HIGH past 5 minutes) |
+| `REPLICATION_SLOT_INACTIVE` | state @ `to_t` | any inactive replication slot (always HIGH) |
+| `XID_WRAPAROUND_RISK` / `MXID_WRAPAROUND_RISK` | state @ `to_t` | a database over 200M transactions/multixacts past its frozen horizon (HIGH past 1.5B) |
+| `RELATION_XID_WRAPAROUND_RISK` / `RELATION_MXID_WRAPAROUND_RISK` | state @ `to_t` | same, per ordinary table, materialized view, or TOAST relation |
+
+Two of these checks read whichever view, column names, and shape actually apply on the running major, via `pgfr_record._current_major()`, rather than assuming one:
+
+- **Checkpoint activity**: PG15/16 read `checkpoints_req`/`checkpoint_write_time` off `pg_stat_bgwriter`; PG17+ reads `num_requested`/`write_time` off `pg_stat_checkpointer`, where checkpoint columns moved.
+- **Backend buffer pressure**: PG15/16 read `buffers_backend`/`buffers_backend_fsync` straight off `pg_stat_bgwriter`; PG17+ removes both columns, so the same signal comes from summing `writes`/`fsyncs` across every `client backend` row in `pg_stat_io` instead.
+
+Most thresholds above are fixed constants, not currently config-driven. `LOCK_CONTENTION` deliberately stops at flagging the wait itself (`wait_event_type = 'Lock'`); identifying the blocking session is forensics work via `pg_locks` joined to `pg_stat_activity` by `pid` at equal `captured_at`, out of scope for a threshold check.
+
+### Capacity summary
+
+`capacity_summary(from_t, to_t)` reports utilization against a provisioned or reference capacity for each resource dimension `pgfr_record` actually captures, one row per dimension with data in the window (a dimension with no evidence in the window is simply absent, not zero):
+
+| metric | current_usage | provisioned_capacity | status thresholds |
+|---|---|---|---|
+| `connections` | peak concurrent backends, summed across databases at each capture tick | `max_connections` | critical at 90%+, warning at 60%+ |
+| `memory_shared_buffers` | backend-written buffers in the window (version-split the same way as `BUFFER_PRESSURE` above) | `shared_buffers` | same 1000-buffer HIGH reference as `anomaly_report()` |
+| `memory_work_mem` | bytes spilled to temp files | `work_mem` | same 1GiB HIGH reference as `anomaly_report()`'s `TEMP_FILE_SPILLS` |
+| `io_buffer_cache` | cache hit ratio across all databases | target 95%+ | critical under 80%, warning under 95% |
+| `transaction_rate` | total commits + rollbacks / window seconds | workload dependent, informational only | warning at 5000+ tps |
+
+Buffer-pressure and temp-spill reference points intentionally match `anomaly_report()`'s own thresholds, so the two functions stay consistent with each other.
+
+### Self overhead
+
+`self_overhead(from_t, to_t)` is the recorder measuring its own perturbation with the same discipline it applies everywhere else. Every figure is self-measured, not assumed:
+
+| metric | source | window-relative? |
+|---|---|---|
+| `<tier>_ms_per_tick` | `avg(finished_at - captured_at)` over `pgfr_record.ledger_runs` rows for that tier | yes |
+| `recorder_block_share` | the recorder's own schemas' share of total block hit/read traffic, from `pg_statio_all_tables` deltas | yes |
+| `storage_bytes` | `sum(pg_total_relation_size)` over ordinary and materialized relations in `pgfr_record`/`pgfr_analyze` (includes indexes and TOAST) | no; live at call time, bounded by each target's manifest retention, so it converges rather than growing without limit |
+| `pgss_time_share` | pgfr-attributed `total_exec_time` (statements whose text references a `pgfr_` schema) over all `total_exec_time`, in `pg_stat_statements` | no; live since its last reset, and only present when the extension is installed |
+
+A metric is absent from the result, rather than zero or NULL, when the window or the live state holds no evidence for it (a fresh install, or `pg_stat_statements` not installed). Example, from a lightly loaded test instance:
+
+```
+        metric         |  value   |    units
+-----------------------+----------+--------------
+ fast_ms_per_tick      |      7.6 | milliseconds
+ medium_ms_per_tick    |     19.7 | milliseconds
+ on_change_ms_per_tick |      6.9 | milliseconds
+ slow_ms_per_tick      |      6.6 | milliseconds
+ storage_bytes         |  5218304 | bytes
+ pgss_time_share       | 0.746070 | fraction
+```
+
+### Preflight check
+
+`preflight_check()` covers live-catalog readiness for installing and enabling `pgfr_record`, independent of any captured history (there may be none yet); it complements `pgfr_record.health_check()`, which verifies ongoing operational health once running. Six checks, each with a `GO`/`CAUTION`/`NO-GO` verdict:
+
+- **System Resources**: `max_worker_processes` (`CAUTION` below 4).
+- **Connection Headroom**: current connections as a percent of `max_connections` (`CAUTION` at 70%+).
+- **pg_stat_statements Budget**: `pg_stat_statements.max` (`CAUTION` below 5000, or if the extension isn't configured at all; once running, that one target's captures fail in isolation via the capture ledger without affecting any other tier).
+- **Storage Overhead**: always `GO`; retention is partition-based, not a fixed footprint. Measure the real number after enabling with `self_overhead()`'s `storage_bytes`.
+- **Scheduling (pg_cron)**: `NO-GO` if the extension is missing, a hard install-time dependency that `pgfr_record/install.sql` itself refuses to proceed without.
+- **Safety Mechanisms**: always `GO`; describes the per-target capture-ledger isolation and the real, preemptive `statement_timeout` `apply_profile()` dispatches per tier run.
+
+`preflight_check_with_summary()` appends a `=== SUMMARY ===` row: `NO-GO` if any check is `NO-GO`, else `PROCEED WITH CAUTION` if any is `CAUTION`, else `READY`.
+
+### Check alerts
+
+`check_alerts()` is an opinionated escalation layer over `pgfr_record.health_check()`'s own facts: `health_check()` reports structural facts against fixed thresholds, judgment-free by design, and `check_alerts()` turns every non-`ok` row into an alert with a severity and a recommendation:
+
+| alert_type | source `health_check()` row | severity |
+|---|---|---|
+| `CRON_JOB_MISSING` | `cron_job: <tier or maintenance>` | CRITICAL |
+| `STALE_DATA` | `last_capture: <tier>` | CRITICAL if never captured, else WARNING |
+| `CAPTURE_FAILURES` | `ledger_miss_rate_1h` | WARNING |
+| `PARTITION_MAINTENANCE_NEEDED` | `partitions: <table>` | WARNING |
+
+Plus one alert with no `health_check()` counterpart: `STORAGE_SIZE_HIGH` (WARNING; live `pg_total_relation_size` over `pgfr_record`/`pgfr_analyze` at 8000 MiB or more). Takes no parameters: `health_check()`'s own ledger-miss window is already fixed at 1 hour, and the storage read is live. Empty when everything is healthy.
+
+### Quarterly review
+
+`quarterly_review()` is a 90-day-lookback health grade across six components, meant to be run periodically rather than continuously:
+
+1. **Collection Performance**: worst (highest) average tier tick duration, from `ledger_runs` directly (not `self_overhead()`, which needs a minted `pg_statio_all_tables` payload schema this review doesn't otherwise require). EXCELLENT below 200ms, GOOD below 500ms, else REVIEW NEEDED; ERROR if no tier ran at all in 90 days.
+2. **Storage Consumption**: live schema size. EXCELLENT below 3000MiB, GOOD below 6000MiB, else REVIEW NEEDED.
+3. **Collection Reliability**: non-`ok`, non-`skipped_disabled` outcomes over 90 days (a deliberately disabled target isn't a failure). EXCELLENT at zero, GOOD below 10, else REVIEW NEEDED.
+4. **Data Freshness**, 5. **pg_cron Job Health**, 6. **Partition Maintenance**: graded directly from `pgfr_record.health_check()`, grouped by `check_name` prefix (`last_capture:`, `cron_job:`, `partitions:` respectively).
+
+`quarterly_review_with_summary()` appends a `=== QUARTERLY REVIEW SUMMARY ===` row: `ACTION REQUIRED` if any component graded `ERROR`, `REVIEW NEEDED`, or `CRITICAL`, else `HEALTHY`.
+
+### Table hotspots
+
+`table_hotspots(from_t, to_t)` runs four fixed threshold checks over `pg_stat_all_tables` deltas in the window; a table can appear more than once if it trips more than one check:
+
+| issue_type | trigger |
+|---|---|
+| `SEQUENTIAL_SCAN_STORM` | over 100 sequential scans reading over 100,000 tuples |
+| `TABLE_BLOAT` | over 20% dead tuples |
+| `LOW_HOT_UPDATE_RATIO` | over 1000 updates, under 50% via HOT |
+| `HIGH_AUTOVACUUM_FREQUENCY` | over 5 autovacuum runs in the window |
+
+### Index analysis
+
+Both functions are built on `pg_stat_all_indexes` deltas. Index size is never a `pg_stat_*` counter or gauge, so both read it live via `pg_relation_size(indexrelid)` at call time rather than from a capture.
+
+- **`unused_indexes(lookback)`** (default 7 days): indexes with fewer than 100 scans over the lookback, excluding primary keys, ordered by current size descending. Recommends `DROP INDEX` at zero scans, "consider dropping" under 10, otherwise "keep".
+- **`index_efficiency(from_t, to_t, limit)`** (default limit 25): the busiest indexes by scan delta, with `selectivity` (`idx_tup_fetch_delta` as a percent of `idx_tup_read_delta`; low means many index entries read per row actually fetched) and `scans_per_gb`.
+
+### Activity readers
+
+Three thin presentation functions, each over a single source:
+
+- **`vacuum_progress(t)`** (default now): in-flight `VACUUM` operations as of `t`, via `state_as_of()`. `relname` is resolved through `resolve_relation()` since only `relid` is captured directly on `pg_stat_progress_vacuum`. `pct_dead_tuple_buffer` collapses PG15/16's tuple-count tracking (`num_dead_tuples`/`max_dead_tuples`) and PG17+'s byte-based tracking (`dead_tuple_bytes`/`max_dead_tuple_bytes`) into one version-stable fill percentage. Verified live against an in-flight `VACUUM` on PG17 (`scanning heap`, 56.0% scanned, 1.9% dead-tuple buffer); PG15's branch is the same computation over the pre-PG17 column names. All three percentages are `NULL` before their denominator is known.
+- **`wal_archiver_status(from_t, to_t)`**: archiving throughput and failures over the window, from `pg_stat_archiver` deltas. `last_archived_wal`/`last_archived_time`/`last_failed_wal`/`last_failed_time` are the archiver-reported end-of-window values, not window-relative.
+- **`long_running_transactions(t, threshold)`** (default now, 5 minutes): any backend whose transaction has been open longer than `threshold` as of `t`, regardless of state; broader than `anomaly_report()`'s `IDLE_IN_TRANSACTION` check, which only flags idle ones.
+
+### Composing reports
+
+Three functions compose everything above for a window `[from_t, to_t]`:
+
+- **`performance_report(lookback)`** (default 24 hours): the recorder's own performance, with two things `self_overhead()` doesn't provide: per-tier *max* duration (not just avg), and a before/after trend split (the window's first half vs. second half, on the fast tier, since it's the most data-rich for a split), graded DEGRADING/STABLE/IMPROVING.
+- **`summary_report(from_t, to_t)`**: a structured `(section, metric, value, interpretation)` table composing `coverage()`, `anomaly_report()`, `capacity_summary()`, `table_hotspots()`, `unused_indexes()`, `long_running_transactions()`, `vacuum_progress()`, `wal_archiver_status()`, and `config_changes()`, under sections OVERVIEW / CAPACITY / TABLES & INDEXES / ACTIVITY / CONFIGURATION. The machine-readable counterpart to `report()`.
+- **`report(from_t, to_t)`** (or `report(lookback)`, ending now): a human- and AI-legible markdown rendering of the same functions plus `coverage_gaps()`, `index_efficiency()`, `detect_regressions()`, and `detect_query_storms()`, as prose with one markdown table per section. Lock-wait forensics beyond `anomaly_report()`'s `LOCK_CONTENTION` check and `long_running_transactions()`, and role-level configuration changes (which would need a `pg_db_role_setting` capture `pgfr_record` does not have), are out of scope.
+
+Example header and one section, from a live test instance:
+
+```
+# pg_flight_recorder Report
+
+**Generated:** 2026-08-29 00:54:24 UTC
+**Range:** 2026-08-28 23:54:24 to 2026-08-29 00:54:24
+**Coverage:** 14/60.0 fast (23.3%), 5/12.0 medium (41.7%), 6/12.0 on_change (50.0%), 5/4.0 slow (125.0%); 8 tier(s) with missed ticks (see coverage_gaps())
+Coverage is below 90% for at least one tier in this window; conclusions below are qualified accordingly.
+
+## Vacuum Progress
+
+| Database | Table | Phase | Scanned | Vacuumed | Dead Tuple Buffer |
+|----------|-------|-------|---------|----------|-------------------|
+| postgres | t_demo | scanning heap | 56.0% | 0.0% | 1.9% |
+```
