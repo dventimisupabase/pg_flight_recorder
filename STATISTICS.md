@@ -20,7 +20,7 @@ Written for practitioners, not statisticians. Every claim is computable in plain
 
 The alternative to sampling is exhaustive event logging, for example `log_min_duration_statement = 0`. Exhaustive logging looks like ground truth but is not: it has an observer effect (every event pays a logging cost), and under load the logging pipeline itself drops or backpressures events. Its selection function is load-dependent and undocumented, and it degrades precisely under the conditions of greatest interest. Fixed-cadence sampling with a stated error model is the more truthful instrument, because its blind spots are known, constant, and published.
 
-This is a well-worn trade. Oracle's Active Session History estimates DB time as sample count times sampling interval. `pg_wait_sampling` and `pg_ash` apply the same idea natively in PostgreSQL. PostgreSQL's own planner runs entirely on `ANALYZE`'s sampled statistics. pg_flight_recorder adopts the same posture: publish the selection function, state the detection limits, and never present an estimate as a count.
+This is a well-worn trade. Oracle's Active Session History estimates DB time as sample count times sampling interval. `pg_wait_sampling` and `pg_ash` apply the same idea natively in PostgreSQL. PostgreSQL's own planner runs entirely on `ANALYZE`'s sampled statistics. pg_flight_recorder adopts the same posture: publish the selection function, state the detection limits, and never present an estimate as a count. The observer effect itself is measured rather than assumed: `pgfr_analyze.self_overhead()` reports the recorder's own per-tier tick duration, share of block traffic, and storage footprint, self-measured at call time rather than argued from first principles.
 
 ## Where the census and taxonomy live
 
@@ -44,6 +44,8 @@ Manifest rows with `debounce = false` and a non-empty result set per capture (Gr
 **What Mode A cannot do: count events.** Ten 1-second lock waits and one 10-second lock wait are indistinguishable at a given cadence; both contribute about the same amount of expected sampled state. Sample counts estimate *time*, never *frequency*.
 
 **Time-in-state estimation.** A state appearing in `k` of `n` samples over a window has estimated time-in-state `k * T`. The proportion `p_hat = k/n` carries binomial standard error `sqrt(p_hat * (1 - p_hat) / n)`.
+
+This limit reaches into any check built on a single instant of Mode A data, not just direct queries against it: `pgfr_analyze.anomaly_report()`'s current-state checks (idle-in-transaction, lock contention, connection leaks) read `pgfr_record.state_as_of(t)` at one instant, so a condition that starts and ends between two fast-tier ticks can go unflagged with exactly the detection probability above, whatever the analysis layer's own threshold happens to be.
 
 ### Mode B: cumulative-counter differencing
 
@@ -75,7 +77,7 @@ Applying the `troubleshooting` profile tightens the fast tier to `T = 20s`, whic
 ## Error and censoring rules
 
 1. **No proportion without its denominator.** A Mode A proportion is meaningless without the sample count behind it. `pgfr_record.health_check()`'s `ledger_miss_rate_1h` check reports both the miss count and the total in its `detail` text for exactly this reason.
-2. **Coverage is queryable, not asserted.** `pgfr_record.ledger_runs` and `ledger_captures` are the raw record of every tier run and every per-target outcome: `outcome <> 'ok'` rows in `ledger_captures`, joined to `ledger_runs` for the timestamp, are exactly the gap list.
+2. **Coverage is queryable, not asserted.** `pgfr_record.ledger_runs` and `ledger_captures` are the raw record of every tier run and every per-target outcome: `outcome <> 'ok'` rows in `ledger_captures`, joined to `ledger_runs` for the timestamp, are exactly the gap list. `pgfr_analyze.coverage()` and `coverage_gaps()` compute this directly from the live pg_cron schedule rather than a hardcoded tick assumption, and are the form any report or dashboard should actually query.
 3. **Censoring is flagged, not smoothed.** A counter reset, mid-flight, is not a noisy measurement; it's not a measurement. `deltas()` returns `NULL` rather than a negative or interpolated value across one, per Mode B above. The reset itself is visible directly in the affected source view's own `stats_reset` column, captured like any other value.
 4. **Retention is a resolution limit, stated as one.** A window whose start predates a target's retention horizon does not "come back empty"; it comes back with whatever survived partition drop, which is exactly what the manifest's own `retention` column documents per target.
 
