@@ -23,6 +23,8 @@
 --   09_capacity.sql           capacity_summary()
 --   10_self_overhead.sql      self_overhead()
 --   11_preflight.sql          preflight_check(), preflight_check_with_summary()
+--   12_check_alerts.sql       check_alerts()
+--   13_quarterly_review.sql   quarterly_review(), quarterly_review_with_summary()
 
 \ir sql/01_schema.sql
 \ir sql/02_coverage.sql
@@ -35,3 +37,5 @@
 \ir sql/09_capacity.sql
 \ir sql/10_self_overhead.sql
 \ir sql/11_preflight.sql
+\ir sql/12_check_alerts.sql
+\ir sql/13_quarterly_review.sql
