@@ -136,6 +136,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
     v_profile record;
     v_tier    record;
+    v_jobid   bigint;
 BEGIN
     SELECT * INTO v_profile FROM pgfr_record.profiles WHERE profile_name = p_profile_name;
     IF NOT FOUND THEN
@@ -143,7 +144,7 @@ BEGIN
     END IF;
 
     FOR v_tier IN SELECT * FROM pgfr_record.profile_tiers WHERE profile_name = p_profile_name LOOP
-        PERFORM cron.schedule(
+        v_jobid := cron.schedule(
             'pgfr_tier_' || v_tier.cadence_tier,
             pgfr_record._interval_to_cron(v_tier.tier_interval),
             format(
@@ -157,8 +158,13 @@ BEGIN
         -- had (confirmed against a live container) -- it does not
         -- reactivate a previously deactivated job. Applying a profile is
         -- an explicit "run this tier" instruction, so make that true
-        -- regardless of prior state.
-        UPDATE cron.job SET active = true WHERE jobname = 'pgfr_tier_' || v_tier.cadence_tier;
+        -- regardless of prior state. cron.alter_job(), not a raw UPDATE
+        -- on cron.job: managed Postgres (e.g. Supabase) grants EXECUTE on
+        -- pg_cron's own functions but not table-level UPDATE on cron.job
+        -- itself, confirmed against a live Supabase project (a raw UPDATE
+        -- here failed with a permission-denied error that cron.alter_job()
+        -- does not hit).
+        PERFORM cron.alter_job(v_jobid, active => true);
     END LOOP;
 END;
 $$;

@@ -11,12 +11,16 @@
 CREATE OR REPLACE FUNCTION pgfr_record.enable()
 RETURNS void
 LANGUAGE plpgsql AS $$
+DECLARE
+    v_jobid bigint;
 BEGIN
     PERFORM pgfr_record.apply_profile('default');
-    PERFORM cron.schedule('pgfr_maintain_partitions', '0 * * * *', 'SELECT pgfr_record.maintain_partitions()');
+    v_jobid := cron.schedule('pgfr_maintain_partitions', '0 * * * *', 'SELECT pgfr_record.maintain_partitions()');
     -- See the comment in apply_profile(): cron.schedule() does not
-    -- reactivate an already-existing, deactivated job on its own.
-    UPDATE cron.job SET active = true WHERE jobname = 'pgfr_maintain_partitions';
+    -- reactivate an already-existing, deactivated job on its own, and
+    -- cron.alter_job() (not a raw UPDATE on cron.job) is required on
+    -- managed Postgres, which does not grant table-level UPDATE on it.
+    PERFORM cron.alter_job(v_jobid, active => true);
 END;
 $$;
 
