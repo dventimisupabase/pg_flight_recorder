@@ -28,6 +28,9 @@
 --   14_table_hotspots.sql     table_hotspots()
 --   15_index_analysis.sql     unused_indexes(), index_efficiency()
 --   16_activity_readers.sql   vacuum_progress(), wal_archiver_status(), long_running_transactions()
+--   17_performance_report.sql performance_report()
+--   18_summary_report.sql     summary_report()
+--   19_report.sql             report()
 
 \ir sql/01_schema.sql
 \ir sql/02_coverage.sql
@@ -45,3 +48,6 @@
 \ir sql/14_table_hotspots.sql
 \ir sql/15_index_analysis.sql
 \ir sql/16_activity_readers.sql
+\ir sql/17_performance_report.sql
+\ir sql/18_summary_report.sql
+\ir sql/19_report.sql
