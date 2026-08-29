@@ -42,6 +42,19 @@ VALUES
      'receives the columns split out of pg_stat_bgwriter')
 ON CONFLICT (source_view) DO NOTHING;
 
+-- Group A addition, seeded after the initial v2 rewrite (additive, per
+-- schema evolution policy): per-slot and per-subscription cumulative
+-- counters, bounded/small cardinality like pg_stat_slru, each with its own
+-- stats_reset.
+INSERT INTO pgfr_record.manifest
+    (source_view, cadence_tier, natural_key, retention, size_class, notes)
+VALUES
+    ('pg_catalog.pg_stat_replication_slots', 'fast', ARRAY['slot_name'], interval '30 days', 'per_slot',
+     'logical-decoding spill/stream byte and txn counters, distinct from pg_replication_slots'' LSN/config columns (Group C); reset: stats_reset'),
+    ('pg_catalog.pg_stat_subscription_stats', 'fast', ARRAY['subid'], interval '30 days', 'per_slot',
+     'apply/sync error counts, distinct from pg_stat_subscription''s worker pid/lag columns (Group C); reset: stats_reset')
+ON CONFLICT (source_view) DO NOTHING;
+
 -- ---------------------------------------------------------------------------
 -- Group B -- cumulative counters, per-relation: the cardinality frontier.
 -- medium tier (statio: slow), debounce = true, anchor_every = 1 day,
@@ -108,6 +121,18 @@ VALUES
     ('pg_catalog.pg_stat_progress_basebackup', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on'),
     ('pg_catalog.pg_stat_progress_analyze', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on'),
     ('pg_catalog.pg_stat_progress_copy', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on')
+ON CONFLICT (source_view) DO NOTHING;
+
+-- Group C addition, seeded after the initial v2 rewrite (additive, per
+-- schema evolution policy): per-connection TLS/GSSAPI info, gauge-like and
+-- per-backend exactly like pg_stat_activity, no debounce.
+INSERT INTO pgfr_record.manifest
+    (source_view, cadence_tier, natural_key, retention, size_class, notes)
+VALUES
+    ('pg_catalog.pg_stat_ssl', 'fast', ARRAY['pid'], interval '2 hours', 'per_backend',
+     'one row per connection, regular and replication alike'),
+    ('pg_catalog.pg_stat_gssapi', 'fast', ARRAY['pid'], interval '2 hours', 'per_backend',
+     'one row per connection, regular and replication alike')
 ON CONFLICT (source_view) DO NOTHING;
 
 -- ---------------------------------------------------------------------------

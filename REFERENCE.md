@@ -73,15 +73,15 @@ Both `debounce = false OR anchor_every IS NOT NULL` and `keyless = false OR debo
 
 ### The PG15 seed census
 
-`03_seed_pg15.sql` plus one later, additive Group D row (`pg_catalog.pg_database`) seed 42 manifest rows. Counts below are the live table on PostgreSQL 15, queried directly rather than assumed:
+`03_seed_pg15.sql` plus later, additive rows (`pg_catalog.pg_database` in Group D; `pg_catalog.pg_stat_replication_slots` and `pg_catalog.pg_stat_subscription_stats` in Group A; `pg_catalog.pg_stat_ssl` and `pg_catalog.pg_stat_gssapi` in Group C) seed 46 manifest rows. Counts below are the live table on PostgreSQL 15, queried directly rather than assumed:
 
 | | rows |
 |---|---|
-| Total manifest rows | 42 |
-| Enabled | 36 |
+| Total manifest rows | 46 |
+| Enabled | 40 |
 | Disabled (Group E) | 6 |
 | Version-gated beyond PG15 (`min_major` 16 or 17) | 2 |
-| Active on PG15 (enabled and `min_major <= 15`) | 34 |
+| Active on PG15 (enabled and `min_major <= 15`) | 38 |
 
 **Group A: cumulative counters, singleton / per-db.** Fast tier, 30 days retention, `debounce = false` (cheap, always changing, every sample wanted).
 
@@ -95,6 +95,8 @@ Both `debounce = false OR anchor_every IS NOT NULL` and `keyless = false OR debo
 | `pg_stat_database_conflicts` | `{datid}` | nonzero only on standbys |
 | `pg_stat_io` (min_major 16) | `{backend_type, object, context}` | the single most valuable addition in the series |
 | `pg_stat_checkpointer` (min_major 17) | `{}` | receives the columns split out of `pg_stat_bgwriter` |
+| `pg_stat_replication_slots` | `{slot_name}` | logical-decoding spill/stream byte and txn counters; reset: `stats_reset`. Distinct from `pg_replication_slots` (Group C), which carries LSN/config columns, not counters |
+| `pg_stat_subscription_stats` | `{subid}` | apply/sync error counts; reset: `stats_reset`. Distinct from `pg_stat_subscription` (Group C), which carries worker pid/lag columns, not counters |
 
 **Group B: cumulative counters, per-relation, the cardinality frontier.** Medium tier (statio: slow), `debounce = true`, `anchor_every = 1 day`, 30 days retention.
 
@@ -128,6 +130,8 @@ Both `debounce = false OR anchor_every IS NOT NULL` and `keyless = false OR debo
 | `pg_stat_progress_basebackup` | `{pid}` | default-on |
 | `pg_stat_progress_analyze` | `{pid}` | default-on |
 | `pg_stat_progress_copy` | `{pid}` | default-on |
+| `pg_stat_ssl` | `{pid}` | one row per connection, regular and replication alike |
+| `pg_stat_gssapi` | `{pid}` | one row per connection, regular and replication alike |
 
 **Group D: state history.** `on_change` tier, `debounce = true`, `anchor_every = 1 month` (Group D uses monthly partitions per the retention-to-width rule below), 365 days retention.
 
@@ -242,7 +246,7 @@ Example (`\d+ pgfr_record.v_pg_stat_database`):
 `generate_column_classes()` derives this **mechanically**, rather than from a hand-typed per-column list. Hand-classifying every column of roughly 40 census views from memory risks exactly the kind of confidently-wrong answer the record/analyze boundary is designed to avoid. The rule order, checked top to bottom:
 
 1. Natural-key membership maps to `key` (identity always wins, even over the override list below: `pid` is a natural-key column on some targets and an override-list gauge on others).
-2. A small named override list for numeric-but-not-cumulative columns: `numbackends`, `pid`, `sender_port`, `client_port`, `sync_priority`.
+2. A small named override list for numeric-but-not-cumulative columns: `numbackends`, `pid`, `sender_port`, `client_port`, `sync_priority`, `reltuples`, `bits`, `client_serial`.
 3. A column literally named `stats_reset` maps to `label` (and becomes the `reset_column` for this view's own counters).
 4. Type `pg_lsn`, `xid`, or `xid8` maps to `odometer`.
 5. A column in this row's `compare_ignore` maps to `gauge` (the same rationale that put it in `compare_ignore`: it's estimate churn, not real change).

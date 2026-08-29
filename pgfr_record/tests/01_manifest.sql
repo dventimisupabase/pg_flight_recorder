@@ -3,7 +3,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(24);
+SELECT plan(28);
 
 -- ---------------------------------------------------------------------------
 -- Schema + core tables/views exist
@@ -46,13 +46,13 @@ SELECT throws_ok(
 -- ---------------------------------------------------------------------------
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.manifest),
-    42,
-    'manifest should have 42 total rows (6 Group A + 2 version-gated + 8 Group B + 13 Group C + 7 Group D + 6 Group E)'
+    46,
+    'manifest should have 46 total rows (8 Group A + 2 version-gated + 8 Group B + 15 Group C + 7 Group D + 6 Group E)'
 );
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.manifest WHERE enabled),
-    36,
-    '36 manifest rows should be enabled (42 total - 6 disabled Group E rows)'
+    40,
+    '40 manifest rows should be enabled (46 total - 6 disabled Group E rows)'
 );
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.manifest WHERE NOT enabled),
@@ -116,6 +116,26 @@ SELECT is(
     (SELECT min_major FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_stat_checkpointer'),
     17,
     'pg_stat_checkpointer should be version-gated to min_major 17'
+);
+SELECT results_eq(
+    $$SELECT natural_key, retention, size_class FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_stat_replication_slots'$$,
+    $$VALUES (ARRAY['slot_name'], interval '30 days', 'per_slot'::text)$$,
+    'pg_stat_replication_slots (Group A addition) should be keyed by slot_name with 30d retention'
+);
+SELECT results_eq(
+    $$SELECT natural_key, retention, size_class FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_stat_subscription_stats'$$,
+    $$VALUES (ARRAY['subid'], interval '30 days', 'per_slot'::text)$$,
+    'pg_stat_subscription_stats (Group A addition) should be keyed by subid with 30d retention'
+);
+SELECT results_eq(
+    $$SELECT natural_key, retention, size_class FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_stat_ssl'$$,
+    $$VALUES (ARRAY['pid'], interval '2 hours', 'per_backend'::text)$$,
+    'pg_stat_ssl (Group C addition) should be keyed by pid with 2h retention'
+);
+SELECT results_eq(
+    $$SELECT natural_key, retention, size_class FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_stat_gssapi'$$,
+    $$VALUES (ARRAY['pid'], interval '2 hours', 'per_backend'::text)$$,
+    'pg_stat_gssapi (Group C addition) should be keyed by pid with 2h retention'
 );
 
 -- ---------------------------------------------------------------------------

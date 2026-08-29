@@ -3,7 +3,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(13);
+SELECT plan(15);
 
 SELECT has_function('pgfr_record', 'generate_column_classes', 'Function pgfr_record.generate_column_classes should exist');
 
@@ -82,6 +82,16 @@ SELECT is(
     (SELECT class FROM pgfr_record.column_classes WHERE source_view = 'pgfr_record.src_catalog_identity' AND column_name = 'reltuples'),
     'gauge',
     'src_catalog_identity''s reltuples should be overridden to gauge (a periodically-recomputed estimate, not a counter)'
+);
+SELECT is(
+    (SELECT class FROM pgfr_record.column_classes WHERE source_view = 'pg_catalog.pg_stat_ssl' AND column_name = 'bits'),
+    'gauge',
+    'pg_stat_ssl.bits should be overridden to gauge (a fixed per-connection property, not a counter)'
+);
+SELECT is(
+    (SELECT class FROM pgfr_record.column_classes WHERE source_view = 'pg_catalog.pg_stat_ssl' AND column_name = 'client_serial'),
+    'gauge',
+    'pg_stat_ssl.client_serial should be overridden to gauge (a certificate identifier, not a counter)'
 );
 
 -- ---------------------------------------------------------------------------
