@@ -111,7 +111,23 @@ Both `debounce = false OR anchor_every IS NOT NULL` and `keyless = false OR debo
 
 `pg_stat_statements` and `pg_stat_statements_info` are extension-provided views, not `pg_catalog` builtins: `CREATE EXTENSION` installs them wherever the current schema was at the time (`public` on stock PostgreSQL, typically `extensions` on Supabase). The manifest references them unqualified and lets `::regclass` resolve them via `search_path`, exactly as any other client of an extension-provided object would.
 
-**Group C: gauges.** Fast tier, 2 hours retention, `debounce = false`. 13 rows: `pg_stat_activity` (key `{pid, backend_start}`, where `backend_start` disambiguates pid reuse), `pg_locks` (keyless; join to activity via `pid` at equal `captured_at`), `pg_stat_replication`, `pg_stat_wal_receiver`, `pg_stat_subscription`, `pg_replication_slots` (odometers `restart_lsn`/`confirmed_flush_lsn`; failure to advance is an analyze-side alarm), `pg_prepared_xacts` (usually empty; an aging row is itself an anomaly), and the six default-on progress views (`pg_stat_progress_vacuum`, `_cluster`, `_create_index`, `_basebackup`, `_analyze`, `_copy`).
+**Group C: gauges.** Fast tier, 2 hours retention, `debounce = false`.
+
+| source_view | key | notes |
+|---|---|---|
+| `pg_stat_activity` | `{pid, backend_start}` | `backend_start` disambiguates pid reuse; dict: `query` (analyze-side) |
+| `pg_locks` | keyless | no stable identity; join to activity via `pid` at equal `captured_at` (exact, by the single-stamp rule) |
+| `pg_stat_replication` | `{pid}` | odometers: `sent_lsn`, `write_lsn`, `flush_lsn`, `replay_lsn` |
+| `pg_stat_wal_receiver` | `{}` | standby-side; odometers on received LSNs |
+| `pg_stat_subscription` | `{subid}` | |
+| `pg_replication_slots` | `{slot_name}` | odometers: `restart_lsn`, `confirmed_flush_lsn`; failure to advance is an analyze-side alarm |
+| `pg_prepared_xacts` | `{gid}` | usually empty; an aging row is itself an anomaly |
+| `pg_stat_progress_vacuum` | `{pid}` | default-on: empty view costs one `SELECT` |
+| `pg_stat_progress_cluster` | `{pid}` | default-on |
+| `pg_stat_progress_create_index` | `{pid}` | default-on |
+| `pg_stat_progress_basebackup` | `{pid}` | default-on |
+| `pg_stat_progress_analyze` | `{pid}` | default-on |
+| `pg_stat_progress_copy` | `{pid}` | default-on |
 
 **Group D: state history.** `on_change` tier, `debounce = true`, `anchor_every = 1 month` (Group D uses monthly partitions per the retention-to-width rule below), 365 days retention.
 
@@ -125,7 +141,16 @@ Both `debounce = false OR anchor_every IS NOT NULL` and `keyless = false OR debo
 | `pgfr_record.src_catalog_identity` | `{oid}` | the dimension table: resolves any `relid`/`indexrelid` in Group B as of any `captured_at`, surviving OID reuse across DROP/CREATE. Also carries `relfrozenxid`/`relminmxid`/`reltuples` for per-relation XID/MultiXID wraparound distance |
 | `pg_database` | `{oid}` | a catalog table, not a view; `datfrozenxid`/`datminmxid` give the database-level half of wraparound distance tracking |
 
-**Group E: disabled, with reasons.** `pg_cursors`, `pg_prepared_statements`, `pg_backend_memory_contexts` (all session-local: they observe pg_cron's own session, not the workload), `pg_timezone_names` (static and enormous), `pg_stats` (per-column planner statistics, a different product, ANALYZE-cadenced), `pg_shmem_allocations` (low routine value; a troubleshooting-profile candidate).
+**Group E: disabled, with reasons.** Disabled rows never get an archive table or capture-plan entry; they exist so "why doesn't pgfr capture X" is queryable.
+
+| source_view | reason |
+|---|---|
+| `pg_cursors` | session-local: observes pg_cron's own session, not the workload |
+| `pg_prepared_statements` | session-local |
+| `pg_backend_memory_contexts` | session-local (PG15 form); a troubleshooting-profile candidate in later PG majors |
+| `pg_timezone_names` | static and enormous |
+| `pg_stats` | per-column planner statistics: huge, ANALYZE-cadenced, a different product |
+| `pg_shmem_allocations` | low routine value; a troubleshooting-profile candidate |
 
 ## Payload dictionary
 
