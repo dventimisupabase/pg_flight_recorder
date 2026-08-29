@@ -94,6 +94,21 @@ VALUES
      'singleton companion to pg_stat_statements; carries the reset signal (stats_reset) that distinguishes a real reset from per-query eviction')
 ON CONFLICT (source_view) DO NOTHING;
 
+-- Group B addition, seeded after the initial v2 rewrite (additive, per
+-- schema evolution policy): last_value against min_value/max_value is
+-- sequence-exhaustion risk, the same category of problem as XID/MultiXID
+-- wraparound distance, just missed the first time around. Keyed by name,
+-- not oid: this view exposes no oid column, so unlike every other
+-- relid/indexrelid-keyed Group B target, identity here does not survive a
+-- DROP/CREATE or rename via src_catalog_identity.
+INSERT INTO pgfr_record.manifest
+    (source_view, cadence_tier, natural_key, debounce, compare_ignore, anchor_every, retention, size_class, requires, notes)
+VALUES
+    ('pg_catalog.pg_sequences', 'medium', ARRAY['schemaname','sequencename'], true,
+     '{}', interval '1 day', interval '30 days', 'per_relation', NULL,
+     'last_value is NULL without USAGE/SELECT on the sequence; start_value/increment_by/cache_size are fixed config, not cumulative')
+ON CONFLICT (source_view) DO NOTHING;
+
 -- ---------------------------------------------------------------------------
 -- Group C -- gauges. fast tier, 2h retention (this is the v1 ring,
 -- expressed as a retention number), debounce = false.
@@ -155,6 +170,21 @@ VALUES
      'catalog table, not a view; extension installs/upgrades'),
     ('pgfr_record.src_catalog_identity', 'on_change', ARRAY['oid'], true, interval '1 month', interval '365 days', 'singleton', NULL,
      'the dimension table: resolves any relid/indexrelid in Group B as of any captured_at, surviving OID reuse across DROP/CREATE')
+ON CONFLICT (source_view) DO NOTHING;
+
+-- Group D additions, seeded after the initial v2 rewrite (additive, per
+-- schema evolution policy): pg_ident_file_mappings is pg_hba_file_rules'
+-- direct companion (same privileged-read/ledger-degradation story) that was
+-- missed the first time; pg_publication_tables is the publisher-side
+-- counterpart to pg_stat_subscription/pg_stat_subscription_stats
+-- (Group A/C), which only cover the subscriber side.
+INSERT INTO pgfr_record.manifest
+    (source_view, cadence_tier, natural_key, debounce, anchor_every, retention, size_class, requires, notes)
+VALUES
+    ('pg_catalog.pg_ident_file_mappings', 'on_change', ARRAY['line_number'], true, interval '1 month', interval '365 days', 'singleton',
+     'privileged read', 'the pg_ident.conf companion to pg_hba_file_rules; degrades via the ledger when unreadable'),
+    ('pg_catalog.pg_publication_tables', 'on_change', ARRAY['pubname','schemaname','tablename'], true, interval '1 month', interval '365 days', 'singleton', NULL,
+     'which tables are actually published; complements the subscriber-side pg_stat_subscription (Group C) and pg_stat_subscription_stats (Group A)')
 ON CONFLICT (source_view) DO NOTHING;
 
 -- Group D addition, seeded after the initial v2 rewrite (additive, per

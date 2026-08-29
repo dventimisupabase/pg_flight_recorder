@@ -83,13 +83,25 @@ BEGIN
                 -- below for targets where it is *not* part of the key
                 -- (pg_stat_wal_receiver).
                 v_class := 'key';
-            ELSIF v_col = ANY(ARRAY['numbackends','pid','sender_port','client_port','sync_priority','reltuples','bits','client_serial']) THEN
+            ELSIF v_col = ANY(ARRAY['numbackends','pid','sender_port','client_port','sync_priority','reltuples','bits','client_serial','start_value','increment_by','cache_size','map_number']) THEN
                 -- Known exceptions: numeric-typed but not cumulative --
                 -- current counts, process/network identity, config, a
                 -- periodically-recomputed estimate (reltuples can legitimately
-                -- decrease when ANALYZE reruns, so it is not a counter), or a
+                -- decrease when ANALYZE reruns, so it is not a counter), a
                 -- per-connection TLS property (bits, client_serial: fixed for
-                -- that connection's lifetime, not cumulative).
+                -- that connection's lifetime, not cumulative), or fixed
+                -- sequence config set at CREATE SEQUENCE time (start_value,
+                -- increment_by, cache_size). pg_sequences.last_value is
+                -- deliberately NOT on this list: it is the one column here
+                -- that behaves like a real counter (monotone under normal
+                -- use, reset-aware protection from deltas() covers RESTART/
+                -- CYCLE without needing a reset_column), and is exactly the
+                -- consumption-rate signal this target exists to capture. And
+                -- map_number: pg_ident_file_mappings' PG16+ ordinal position
+                -- of a mapping rule within its file, not a cumulative count
+                -- (a mid-major column addition of the same kind pg_stat_
+                -- statements is already known for, discovered here via a
+                -- live PG15-vs-PG17 comparison rather than assumed absent).
                 v_class := 'gauge';
             ELSIF v_col = 'stats_reset' THEN
                 v_class := 'label';

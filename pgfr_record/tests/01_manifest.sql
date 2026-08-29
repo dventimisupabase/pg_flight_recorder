@@ -3,7 +3,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(28);
+SELECT plan(31);
 
 -- ---------------------------------------------------------------------------
 -- Schema + core tables/views exist
@@ -46,13 +46,13 @@ SELECT throws_ok(
 -- ---------------------------------------------------------------------------
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.manifest),
-    46,
-    'manifest should have 46 total rows (8 Group A + 2 version-gated + 8 Group B + 15 Group C + 7 Group D + 6 Group E)'
+    49,
+    'manifest should have 49 total rows (8 Group A + 2 version-gated + 9 Group B + 15 Group C + 9 Group D + 6 Group E)'
 );
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.manifest WHERE enabled),
-    40,
-    '40 manifest rows should be enabled (46 total - 6 disabled Group E rows)'
+    43,
+    '43 manifest rows should be enabled (49 total - 6 disabled Group E rows)'
 );
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.manifest WHERE NOT enabled),
@@ -66,8 +66,8 @@ SELECT is(
 );
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.manifest WHERE debounce),
-    14,
-    '14 manifest rows should be debounced (7 Group B, excluding the non-debounced pg_stat_statements_info companion + 7 Group D)'
+    17,
+    '17 manifest rows should be debounced (8 Group B, excluding the non-debounced pg_stat_statements_info companion + 9 Group D)'
 );
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.manifest WHERE keyless),
@@ -136,6 +136,21 @@ SELECT results_eq(
     $$SELECT natural_key, retention, size_class FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_stat_gssapi'$$,
     $$VALUES (ARRAY['pid'], interval '2 hours', 'per_backend'::text)$$,
     'pg_stat_gssapi (Group C addition) should be keyed by pid with 2h retention'
+);
+SELECT results_eq(
+    $$SELECT natural_key, debounce, anchor_every, retention FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_sequences'$$,
+    $$VALUES (ARRAY['schemaname','sequencename'], true, interval '1 day', interval '30 days')$$,
+    'pg_sequences (Group B addition) should be keyed by schemaname/sequencename, debounced with a 1-day anchor'
+);
+SELECT results_eq(
+    $$SELECT natural_key, debounce, anchor_every, retention FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_ident_file_mappings'$$,
+    $$VALUES (ARRAY['line_number'], true, interval '1 month', interval '365 days')$$,
+    'pg_ident_file_mappings (Group D addition) should be keyed by line_number, debounced with a monthly anchor'
+);
+SELECT results_eq(
+    $$SELECT natural_key, debounce, anchor_every, retention FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_publication_tables'$$,
+    $$VALUES (ARRAY['pubname','schemaname','tablename'], true, interval '1 month', interval '365 days')$$,
+    'pg_publication_tables (Group D addition) should be keyed by pubname/schemaname/tablename, debounced with a monthly anchor'
 );
 
 -- ---------------------------------------------------------------------------

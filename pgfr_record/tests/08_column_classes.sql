@@ -3,7 +3,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(15);
+SELECT plan(18);
 
 SELECT has_function('pgfr_record', 'generate_column_classes', 'Function pgfr_record.generate_column_classes should exist');
 
@@ -92,6 +92,22 @@ SELECT is(
     (SELECT class FROM pgfr_record.column_classes WHERE source_view = 'pg_catalog.pg_stat_ssl' AND column_name = 'client_serial'),
     'gauge',
     'pg_stat_ssl.client_serial should be overridden to gauge (a certificate identifier, not a counter)'
+);
+SELECT is(
+    (SELECT class FROM pgfr_record.column_classes WHERE source_view = 'pg_catalog.pg_sequences' AND column_name = 'last_value'),
+    'counter',
+    'pg_sequences.last_value should classify as counter (the intended consumption-rate signal via deltas())'
+);
+SELECT ok(
+    (SELECT bool_and(class = 'gauge') FROM pgfr_record.column_classes
+     WHERE source_view = 'pg_catalog.pg_sequences' AND column_name IN ('min_value', 'max_value', 'start_value', 'increment_by', 'cache_size')),
+    'pg_sequences'' fixed config columns (min/max/start_value, increment_by, cache_size) should all classify as gauge, not counter'
+);
+
+SELECT ok(
+    (SELECT class = 'gauge' FROM pgfr_record.column_classes WHERE source_view = 'pg_catalog.pg_ident_file_mappings' AND column_name = 'map_number')
+    OR NOT EXISTS (SELECT 1 FROM pgfr_record.column_classes WHERE source_view = 'pg_catalog.pg_ident_file_mappings' AND column_name = 'map_number'),
+    'pg_ident_file_mappings.map_number, when present (a PG16+ column), should classify as gauge (an ordinal position, not a counter)'
 );
 
 -- ---------------------------------------------------------------------------

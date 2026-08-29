@@ -73,15 +73,15 @@ Both `debounce = false OR anchor_every IS NOT NULL` and `keyless = false OR debo
 
 ### The PG15 seed census
 
-`03_seed_pg15.sql` plus later, additive rows (`pg_catalog.pg_database` in Group D; `pg_catalog.pg_stat_replication_slots` and `pg_catalog.pg_stat_subscription_stats` in Group A; `pg_catalog.pg_stat_ssl` and `pg_catalog.pg_stat_gssapi` in Group C) seed 46 manifest rows. Counts below are the live table on PostgreSQL 15, queried directly rather than assumed:
+`03_seed_pg15.sql` plus later, additive rows (`pg_catalog.pg_database`, `pg_catalog.pg_ident_file_mappings`, and `pg_catalog.pg_publication_tables` in Group D; `pg_catalog.pg_stat_replication_slots` and `pg_catalog.pg_stat_subscription_stats` in Group A; `pg_catalog.pg_sequences` in Group B; `pg_catalog.pg_stat_ssl` and `pg_catalog.pg_stat_gssapi` in Group C) seed 49 manifest rows. Counts below are the live table on PostgreSQL 15, queried directly rather than assumed:
 
 | | rows |
 |---|---|
-| Total manifest rows | 46 |
-| Enabled | 40 |
+| Total manifest rows | 49 |
+| Enabled | 43 |
 | Disabled (Group E) | 6 |
 | Version-gated beyond PG15 (`min_major` 16 or 17) | 2 |
-| Active on PG15 (enabled and `min_major <= 15`) | 38 |
+| Active on PG15 (enabled and `min_major <= 15`) | 41 |
 
 **Group A: cumulative counters, singleton / per-db.** Fast tier, 30 days retention, `debounce = false` (cheap, always changing, every sample wanted).
 
@@ -110,6 +110,7 @@ Both `debounce = false OR anchor_every IS NOT NULL` and `keyless = false OR debo
 | `pg_stat_user_functions` | `{funcid}` | `{}` | `track_functions <> none` | |
 | `pg_stat_statements` | `{userid, dbid, queryid, toplevel}` | `{}` | `pg_stat_statements` extension | unqualified on purpose, see below |
 | `pg_stat_statements_info` | `{}` | `{}` | `pg_stat_statements` extension | fast tier; singleton companion carrying the reset signal that distinguishes a real reset from per-query eviction |
+| `pg_sequences` | `{schemaname, sequencename}` | `{}` | n/a | `last_value` against `max_value` is sequence-exhaustion risk, the same category of problem as XID/MultiXID wraparound distance. No `oid` column on this view, so identity here is name-based and does not survive a DROP/CREATE or rename the way every other `relid`/`indexrelid`-keyed Group B target does via `src_catalog_identity` |
 
 `pg_stat_statements` and `pg_stat_statements_info` are extension-provided views, not `pg_catalog` builtins: `CREATE EXTENSION` installs them wherever the current schema was at the time (`public` on stock PostgreSQL, typically `extensions` on Supabase). The manifest references them unqualified and lets `::regclass` resolve them via `search_path`, exactly as any other client of an extension-provided object would.
 
@@ -144,6 +145,8 @@ Both `debounce = false OR anchor_every IS NOT NULL` and `keyless = false OR debo
 | `pg_extension` | `{oid}` | a catalog table, not a view; captures extension installs/upgrades |
 | `pgfr_record.src_catalog_identity` | `{oid}` | the dimension table: resolves any `relid`/`indexrelid` in Group B as of any `captured_at`, surviving OID reuse across DROP/CREATE. Also carries `relfrozenxid`/`relminmxid`/`reltuples` for per-relation XID/MultiXID wraparound distance |
 | `pg_database` | `{oid}` | a catalog table, not a view; `datfrozenxid`/`datminmxid` give the database-level half of wraparound distance tracking |
+| `pg_ident_file_mappings` | `{line_number}` | the `pg_ident.conf` companion to `pg_hba_file_rules`, same privileged-read/ledger-degradation story. PG16+ adds `map_number`/`file_name` columns absent on PG15, handled automatically by the payload dictionary's per-major schema variants |
+| `pg_publication_tables` | `{pubname, schemaname, tablename}` | which tables are actually published; the publisher-side counterpart to `pg_stat_subscription` (Group C) and `pg_stat_subscription_stats` (Group A), which only cover the subscriber side |
 
 **Group E: disabled, with reasons.** Disabled rows never get an archive table or capture-plan entry; they exist so "why doesn't pgfr capture X" is queryable.
 
@@ -246,7 +249,7 @@ Example (`\d+ pgfr_record.v_pg_stat_database`):
 `generate_column_classes()` derives this **mechanically**, rather than from a hand-typed per-column list. Hand-classifying every column of roughly 40 census views from memory risks exactly the kind of confidently-wrong answer the record/analyze boundary is designed to avoid. The rule order, checked top to bottom:
 
 1. Natural-key membership maps to `key` (identity always wins, even over the override list below: `pid` is a natural-key column on some targets and an override-list gauge on others).
-2. A small named override list for numeric-but-not-cumulative columns: `numbackends`, `pid`, `sender_port`, `client_port`, `sync_priority`, `reltuples`, `bits`, `client_serial`.
+2. A small named override list for numeric-but-not-cumulative columns: `numbackends`, `pid`, `sender_port`, `client_port`, `sync_priority`, `reltuples`, `bits`, `client_serial`, `start_value`, `increment_by`, `cache_size`, `map_number`. `pg_sequences.last_value` is deliberately not on this list: it behaves like a real counter (reset-aware protection from `deltas()` covers a `RESTART` or a `CYCLE` wraparound without needing a `reset_column`), and is exactly the consumption-rate signal that target exists to capture.
 3. A column literally named `stats_reset` maps to `label` (and becomes the `reset_column` for this view's own counters).
 4. Type `pg_lsn`, `xid`, or `xid8` maps to `odometer`.
 5. A column in this row's `compare_ignore` maps to `gauge` (the same rationale that put it in `compare_ignore`: it's estimate churn, not real change).
