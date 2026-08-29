@@ -17,6 +17,32 @@ SELECT has_function('pgfr_analyze', 'self_overhead', ARRAY['timestamptz', 'times
 SELECT lives_ok($$SELECT pgfr_record.run_tier('slow')$$, 'run_tier(''slow'') should capture a real baseline for pg_statio_all_tables');
 
 SELECT clock_timestamp() AS t_ref \gset ref_
+SELECT set_config('pgfr_test.t_ref', :'ref_t_ref', true);
+
+-- ---------------------------------------------------------------------------
+-- Backdated rows below (ledger_runs at t_ref - 5 minutes, pg_statio_all_tables
+-- at t_ref - 10 minutes) need a partition covering that point; if the test
+-- happens to run in the first few minutes after midnight, that point falls
+-- in yesterday's (not-yet-existing) partition instead of today's.
+-- ---------------------------------------------------------------------------
+DO $do$
+DECLARE
+    v_point timestamptz := current_setting('pgfr_test.t_ref')::timestamptz - interval '10 minutes';
+    v_lower timestamptz := date_trunc('day', v_point);
+    v_upper timestamptz := v_lower + interval '1 day';
+    v_table text;
+    v_child text;
+BEGIN
+    FOREACH v_table IN ARRAY ARRAY['ledger_runs', 'a_pg_statio_all_tables']
+    LOOP
+        IF to_regclass('pgfr_record.' || v_table) IS NOT NULL THEN
+            v_child := pgfr_record._partition_child_name(v_table, v_lower, 'day');
+            IF to_regclass('pgfr_record.' || v_child) IS NULL THEN
+                EXECUTE format('CREATE TABLE pgfr_record.%I PARTITION OF pgfr_record.%I FOR VALUES FROM (%L) TO (%L)', v_child, v_table, v_lower, v_upper);
+            END IF;
+        END IF;
+    END LOOP;
+END $do$;
 
 -- ---------------------------------------------------------------------------
 -- ledger_runs: a synthetic tier with two runs, 100ms and 300ms, averaging

@@ -88,18 +88,35 @@ INSERT INTO pgfr_analyze.config (key, value) VALUES
     ('regression_detection_metric', 'time')
 ON CONFLICT (key) DO UPDATE SET value = excluded.value;
 
-DO $$
-DECLARE
-    v_lower timestamptz := date_trunc('day', now()) - interval '1 day';
-    v_upper timestamptz := date_trunc('day', now());
-    v_child text := 'a_pg_stat_statements_p' || to_char(v_lower, 'YYYYMMDD');
-BEGIN
-    IF to_regclass('pgfr_record.' || v_child) IS NULL THEN
-        EXECUTE format('CREATE TABLE pgfr_record.%I PARTITION OF pgfr_record.a_pg_stat_statements FOR VALUES FROM (%L) TO (%L)', v_child, v_lower, v_upper);
-    END IF;
-END $$;
-
 SELECT clock_timestamp() AS t_ref \gset ref_
+
+-- Both this section and the storm test below backdate rows as far as
+-- t_ref - 1 day - 1 hour; when t_ref is within the first hour of a day,
+-- that point falls a full two calendar days back from t_ref's own day, not
+-- just one, so every distinct day actually touched by these four points is
+-- ensured here rather than assuming exactly "yesterday relative to now()".
+SELECT set_config('pgfr_test.t_ref', :'ref_t_ref', true);
+
+DO $do$
+DECLARE
+    v_t_ref  timestamptz := current_setting('pgfr_test.t_ref')::timestamptz;
+    v_points timestamptz[] := ARRAY[
+        v_t_ref - interval '1 day' - interval '1 hour',
+        v_t_ref - interval '1 day',
+        v_t_ref - interval '1 hour',
+        v_t_ref
+    ];
+    v_day   timestamptz;
+    v_child text;
+BEGIN
+    FOR v_day IN SELECT DISTINCT date_trunc('day', p) FROM unnest(v_points) p
+    LOOP
+        v_child := pgfr_record._partition_child_name('a_pg_stat_statements', v_day, 'day');
+        IF to_regclass('pgfr_record.' || v_child) IS NULL THEN
+            EXECUTE format('CREATE TABLE pgfr_record.%I PARTITION OF pgfr_record.a_pg_stat_statements FOR VALUES FROM (%L) TO (%L)', v_child, v_day, v_day + interval '1 day');
+        END IF;
+    END LOOP;
+END $do$;
 
 INSERT INTO pgfr_record.a_pg_stat_statements (captured_at, key, key_hash, row_hash, schema_id, payload)
 SELECT c.t, jsonb_build_object('userid', 10, 'dbid', 5, 'queryid', 222222222222, 'toplevel', true), 555, c.rh, :schema_schema_id,

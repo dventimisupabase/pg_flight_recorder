@@ -14,6 +14,33 @@ SELECT has_function('pgfr_analyze', 'capacity_summary', ARRAY['timestamptz', 'ti
 SELECT lives_ok($$SELECT pgfr_record.run_tier('fast')$$, 'run_tier(''fast'') should capture a real baseline for pg_stat_bgwriter and pg_stat_database');
 
 SELECT clock_timestamp() AS t_ref \gset ref_
+SELECT set_config('pgfr_test.t_ref', :'ref_t_ref', true);
+
+-- ---------------------------------------------------------------------------
+-- Every deltas()-based check below inserts a row-pair at t_ref - 10 minutes
+-- and t_ref; if the test happens to run in the first 10 minutes after
+-- midnight, t_ref - 10 minutes falls in yesterday's (not-yet-existing)
+-- partition instead of today's. Ensure it exists for every Group A table
+-- this file backdates into.
+-- ---------------------------------------------------------------------------
+DO $do$
+DECLARE
+    v_point timestamptz := current_setting('pgfr_test.t_ref')::timestamptz - interval '10 minutes';
+    v_lower timestamptz := date_trunc('day', v_point);
+    v_upper timestamptz := v_lower + interval '1 day';
+    v_table text;
+    v_child text;
+BEGIN
+    FOREACH v_table IN ARRAY ARRAY['a_pg_stat_bgwriter', 'a_pg_stat_checkpointer', 'a_pg_stat_io', 'a_pg_stat_database']
+    LOOP
+        IF to_regclass('pgfr_record.' || v_table) IS NOT NULL THEN
+            v_child := pgfr_record._partition_child_name(v_table, v_lower, 'day');
+            IF to_regclass('pgfr_record.' || v_child) IS NULL THEN
+                EXECUTE format('CREATE TABLE pgfr_record.%I PARTITION OF pgfr_record.%I FOR VALUES FROM (%L) TO (%L)', v_child, v_table, v_lower, v_upper);
+            END IF;
+        END IF;
+    END LOOP;
+END $do$;
 
 -- ---------------------------------------------------------------------------
 -- Connections: always present when pg_stat_database has any capture in the
@@ -37,8 +64,6 @@ SELECT is(
 -- buffers_backend off pg_stat_bgwriter directly; PG17+ removes that column
 -- in favor of summed pg_stat_io client-backend rows.
 -- ---------------------------------------------------------------------------
-SELECT set_config('pgfr_test.t_ref', :'ref_t_ref', true);
-
 DO $do$
 DECLARE
     v_t_ref timestamptz := current_setting('pgfr_test.t_ref')::timestamptz;

@@ -6,9 +6,9 @@
 -- array_position(), never hardcoded), the same technique used in
 -- 06_query_performance.sql and pgfr_record's own 10_deltas.sql test.
 -- pg_stat_bgwriter/pg_stat_database are Group A (30d retention, daily
--- partitions), and today's partition already exists, so no manual
--- partition creation is needed here (unlike the query-performance tests,
--- which needed a "yesterday" partition for their baseline window).
+-- partitions); today's partition always exists, but a possible-yesterday
+-- partition is ensured too below, for whichever tables this file backdates
+-- a row into (see the DO block right after t_ref is captured).
 
 BEGIN;
 SELECT plan(21);
@@ -20,6 +20,35 @@ SELECT lives_ok($$SELECT pgfr_record.run_tier('medium')$$, 'run_tier(''medium'')
 SELECT lives_ok($$SELECT pgfr_record.run_tier('on_change')$$, 'run_tier(''on_change'') should capture a real baseline for pg_database and src_catalog_identity');
 
 SELECT clock_timestamp() AS t_ref \gset ref_
+SELECT set_config('pgfr_test.t_ref', :'ref_t_ref', true);
+
+-- ---------------------------------------------------------------------------
+-- Every deltas()-based check below inserts a row-pair at t_ref - 10 minutes
+-- and t_ref; today's partition covers t_ref, but if the test happens to run
+-- in the first 10 minutes after midnight, t_ref - 10 minutes falls in
+-- yesterday's (not-yet-existing, since partitions are only created ahead of
+-- now()) partition instead. Ensure it exists for every Group A table this
+-- file backdates into, rather than assuming today's partition is always
+-- enough.
+-- ---------------------------------------------------------------------------
+DO $do$
+DECLARE
+    v_point timestamptz := current_setting('pgfr_test.t_ref')::timestamptz - interval '10 minutes';
+    v_lower timestamptz := date_trunc('day', v_point);
+    v_upper timestamptz := v_lower + interval '1 day';
+    v_table text;
+    v_child text;
+BEGIN
+    FOREACH v_table IN ARRAY ARRAY['a_pg_stat_bgwriter', 'a_pg_stat_checkpointer', 'a_pg_stat_io', 'a_pg_stat_database']
+    LOOP
+        IF to_regclass('pgfr_record.' || v_table) IS NOT NULL THEN
+            v_child := pgfr_record._partition_child_name(v_table, v_lower, 'day');
+            IF to_regclass('pgfr_record.' || v_child) IS NULL THEN
+                EXECUTE format('CREATE TABLE pgfr_record.%I PARTITION OF pgfr_record.%I FOR VALUES FROM (%L) TO (%L)', v_child, v_table, v_lower, v_upper);
+            END IF;
+        END IF;
+    END LOOP;
+END $do$;
 
 -- ---------------------------------------------------------------------------
 -- Checkpoint + buffer-pressure anomalies: version-aware on two axes.
@@ -35,8 +64,6 @@ SELECT clock_timestamp() AS t_ref \gset ref_
 -- would violate the singleton archive's one-row-per-timestamp shape); on
 -- PG17+ they're independent inserts on three different tables.
 -- ---------------------------------------------------------------------------
-SELECT set_config('pgfr_test.t_ref', :'ref_t_ref', true);
-
 DO $do$
 DECLARE
     v_ckpt_view       text := CASE WHEN pgfr_record._current_major() >= 17 THEN 'pg_catalog.pg_stat_checkpointer' ELSE 'pg_catalog.pg_stat_bgwriter' END;
