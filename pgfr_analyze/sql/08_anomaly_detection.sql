@@ -137,8 +137,9 @@ BEGIN
 
     -- Idle-in-transaction: a backend holding an open transaction without
     -- doing anything, blocking vacuum's xmin horizon and holding locks.
-    -- Current-state read via state_as_of(p_to_t), not deltas() -- state and
-    -- xact_start are gauges, not counters.
+    -- Current-state read via latest_state(p_to_t), not deltas() -- state
+    -- and xact_start are gauges, not counters; latest_state(), not
+    -- state_as_of(), since a disconnected backend must actually disappear.
     v_sql := format(
         $q$
         SELECT
@@ -147,7 +148,7 @@ BEGIN
             format('Backend %%s (user %%s) has been idle in transaction for %%s', pid, usename, (age(%2$L::timestamptz, xact_start))::text),
             extract(epoch FROM (%2$L::timestamptz - xact_start))::numeric, 300::numeric,
             'Investigate the client holding this transaction open; a long idle transaction blocks vacuum''s xmin horizon and can hold locks'
-        FROM pgfr_record.state_as_of(%1$L, %2$L::timestamptz) AS d(%3$s)
+        FROM pgfr_record.latest_state(%1$L, %2$L::timestamptz) AS d(%3$s)
         WHERE state = 'idle in transaction' AND %2$L::timestamptz - xact_start > interval '5 minutes'
         $q$,
         'pg_catalog.pg_stat_activity', p_to_t, v_activity_col_defs
@@ -167,7 +168,7 @@ BEGIN
             format('Backend %%s (user %%s) has been waiting on a lock for %%s (query: %%s)', pid, usename, (age(%2$L::timestamptz, query_start))::text, left(query, 120)),
             extract(epoch FROM (%2$L::timestamptz - query_start))::numeric, 10::numeric,
             'Identify the blocking session via pg_locks/pg_stat_activity, and consider a shorter lock_timeout or breaking up long-held locking transactions'
-        FROM pgfr_record.state_as_of(%1$L, %2$L::timestamptz) AS d(%3$s)
+        FROM pgfr_record.latest_state(%1$L, %2$L::timestamptz) AS d(%3$s)
         WHERE wait_event_type = 'Lock' AND %2$L::timestamptz - query_start > interval '10 seconds'
         $q$,
         'pg_catalog.pg_stat_activity', p_to_t, v_activity_col_defs
@@ -184,7 +185,7 @@ BEGIN
             format('%%s backend(s) have been idle for over an hour', count(*)),
             count(*)::numeric, 20::numeric,
             'Investigate whether the application''s connection pool is releasing connections; consider a lower idle_session_timeout'
-        FROM pgfr_record.state_as_of(%1$L, %2$L::timestamptz) AS d(%3$s)
+        FROM pgfr_record.latest_state(%1$L, %2$L::timestamptz) AS d(%3$s)
         WHERE state = 'idle' AND %2$L::timestamptz - state_change > interval '1 hour'
         HAVING count(*) > 20
         $q$,
@@ -242,7 +243,7 @@ BEGIN
             format('Replica %%s is replaying %%s behind', coalesce(application_name, client_addr::text, pid::text), replay_lag::text),
             extract(epoch FROM replay_lag)::numeric, 30::numeric,
             'Investigate replica I/O or network throughput; sustained replay lag risks the primary retaining excess WAL'
-        FROM pgfr_record.state_as_of(%1$L, %2$L::timestamptz) AS d(%3$s)
+        FROM pgfr_record.latest_state(%1$L, %2$L::timestamptz) AS d(%3$s)
         WHERE replay_lag > interval '30 seconds'
         $q$,
         'pg_catalog.pg_stat_replication', p_to_t, v_repl_col_defs
@@ -258,7 +259,7 @@ BEGIN
             format('Replication slot %%s (database %%s) is inactive; it will retain WAL indefinitely until dropped or reactivated', slot_name, database),
             0::numeric, 0::numeric,
             'Drop this slot if it is no longer needed, or investigate why its consumer is not connected; an inactive slot blocks WAL recycling and vacuum''s xmin horizon'
-        FROM pgfr_record.state_as_of(%1$L, %2$L::timestamptz) AS d(%3$s)
+        FROM pgfr_record.latest_state(%1$L, %2$L::timestamptz) AS d(%3$s)
         WHERE active = false
         $q$,
         'pg_catalog.pg_replication_slots', p_to_t, v_slots_col_defs

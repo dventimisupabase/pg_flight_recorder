@@ -10,9 +10,10 @@
 -- column list.
 
 BEGIN;
-SELECT plan(12);
+SELECT plan(16);
 
 SELECT has_function('pgfr_record', 'state_as_of', 'Function pgfr_record.state_as_of should exist');
+SELECT has_function('pgfr_record', 'latest_state', 'Function pgfr_record.latest_state should exist');
 SELECT has_function('pgfr_record', 'resolve_relation', 'Function pgfr_record.resolve_relation should exist');
 SELECT has_function('pgfr_record', 'resolve_index', 'Function pgfr_record.resolve_index should exist');
 
@@ -57,6 +58,29 @@ SELECT is(
     (SELECT count(*)::int FROM pgfr_record.state_as_of('pg_catalog.pg_settings', :'before_t0'::timestamptz - interval '1 hour') AS t(:settings_defs)),
     0,
     'state_as_of before any capture existed should return zero rows'
+);
+
+-- ---------------------------------------------------------------------------
+-- latest_state(): the true-current-snapshot sibling of state_as_of(),
+-- for non-debounced targets. Correctness on fresh data, and both guards
+-- (unknown source_view, debounced target).
+-- ---------------------------------------------------------------------------
+SELECT is(
+    (SELECT count(*)::int FROM pgfr_record.latest_state('pg_catalog.pg_stat_archiver', clock_timestamp()) AS t(:archiver_defs)),
+    1,
+    'latest_state on a singleton, non-debounced target should return exactly one row'
+);
+SELECT throws_ok(
+    $$SELECT * FROM pgfr_record.latest_state('pg_catalog.pg_settings', clock_timestamp()) AS t(name text, setting text)$$,
+    NULL,
+    'pgfr_record.latest_state: pg_catalog.pg_settings is debounced; a missing row means unchanged, not absent -- use state_as_of() instead',
+    'latest_state on a debounced target should raise, not silently return misleading results'
+);
+SELECT throws_ok(
+    $$SELECT * FROM pgfr_record.latest_state('pg_catalog.not_a_real_view', clock_timestamp()) AS t(x text)$$,
+    NULL,
+    'pgfr_record.latest_state: unknown source_view pg_catalog.not_a_real_view',
+    'latest_state on an unknown source_view should raise'
 );
 
 -- ---------------------------------------------------------------------------

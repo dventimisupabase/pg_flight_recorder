@@ -66,6 +66,55 @@ $$;
 COMMENT ON FUNCTION pgfr_record.state_as_of(text, timestamptz) IS
     'LOCF reconstruction (§6): for each key, the most recent sample at or before t, never searching further back than the start of t''s own partition (anchor cadence = partition width, by manifest construction). Returns SETOF record -- supply a column-definition list matching \d pgfr_record.v_<short_name>, e.g. state_as_of(''pg_catalog.pg_stat_database'', now()) AS t(captured_at timestamptz, datid oid, ...).';
 
+-- latest_state(): the true current state of a non-debounced target, as
+-- distinct from state_as_of()'s per-key LOCF. A debounce = false target
+-- (every row of Group A/C) fully recaptures its entire current row set
+-- on every tick, with one captured_at shared by the whole tick (the
+-- single-stamp rule, §5); LOCF is the wrong tool here, because a key
+-- that has since vanished (a backend that disconnected, a lock that was
+-- released) has no future row to ever supersede its last one, so
+-- state_as_of() would keep returning that stale row as if it were still
+-- current for as long as it remains within the partition bound.
+-- latest_state() instead returns every row at the single most recent
+-- captured_at: exactly the true current set, whether the target is
+-- keyed or keyless, since a non-debounced tick is a full snapshot either
+-- way. Confirmed against a live install: a pg_cron-spawned backend,
+-- captured once mid-execution, otherwise reads as a false long-running
+-- transaction under state_as_of() for the rest of that partition.
+CREATE OR REPLACE FUNCTION pgfr_record.latest_state(p_source_view text, p_t timestamptz DEFAULT clock_timestamp())
+RETURNS SETOF record
+LANGUAGE plpgsql STABLE AS $$
+DECLARE
+    v_manifest record;
+    v_view     text;
+    v_unit     text;
+    v_bucket   timestamptz;
+    v_sql      text;
+BEGIN
+    SELECT * INTO v_manifest FROM pgfr_record.manifest WHERE source_view = p_source_view;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'pgfr_record.latest_state: unknown source_view %', p_source_view;
+    END IF;
+    IF v_manifest.debounce THEN
+        RAISE EXCEPTION 'pgfr_record.latest_state: % is debounced; a missing row means unchanged, not absent -- use state_as_of() instead', p_source_view;
+    END IF;
+
+    v_view   := 'pgfr_record.v_' || pgfr_record._short_name(p_source_view);
+    v_unit   := pgfr_record._partition_unit(v_manifest.retention);
+    v_bucket := date_trunc(v_unit, p_t);
+
+    v_sql := format(
+        'SELECT * FROM %s WHERE captured_at = (SELECT max(captured_at) FROM %s WHERE captured_at <= $1 AND captured_at >= $2)',
+        v_view, v_view
+    );
+
+    RETURN QUERY EXECUTE v_sql USING p_t, v_bucket;
+END;
+$$;
+
+COMMENT ON FUNCTION pgfr_record.latest_state(text, timestamptz) IS
+    'The true current state of a non-debounced (Group A/C) target as of t: every row at the single most recent captured_at within t''s partition, never a stale per-key carry-forward. Raises if called on a debounced target, where a missing row means unchanged rather than gone and state_as_of() is the correct choice instead. Returns SETOF record -- same column-definition-list calling convention as state_as_of().';
+
 -- resolve_relation() / resolve_index() (§4.5): join through the catalog
 -- identity dimension as of t, OID-reuse-safe by construction. Mechanically
 -- identical -- pg_class covers every relkind, including indexes -- named
