@@ -26,9 +26,9 @@ Two extensions:
 | Extension | Schema | Status | Purpose |
 |---|---|---|---|
 | [pgfr_record](pgfr_record/README.md) | `pgfr_record` | Required, stable | Core: the manifest, capture, partitioning, retention, and the definitional helpers needed to reconstruct history |
-| [pgfr_analyze](pgfr_analyze/README.md) | `pgfr_analyze` | Optional, not yet rebuilt for v2 | Reporting, anomaly detection, and time-travel forensics, once rebuilt |
+| [pgfr_analyze](pgfr_analyze/README.md) | `pgfr_analyze` | Optional, stable | Reporting, anomaly detection, capacity views, and the diagnostic `report()` |
 
-`pgfr_analyze` only ever reads from `pgfr_record`; it never writes to the core schema. `pgfr_record` alone, or a `pg_dump` of it, is fully self-contained: a dump restored into an empty database on a different PostgreSQL major, with the typed views regenerated offline and no `pgfr_analyze` object present, is enough to answer real troubleshooting questions using nothing but psql (`scripts/agent_test.sh` proves exactly this end to end). `pgfr_analyze` will make conclusions faster once it's rebuilt; it is not required to reach them.
+`pgfr_analyze` only ever reads from `pgfr_record`; it never writes to the core schema. `pgfr_record` alone, or a `pg_dump` of it, is fully self-contained: a dump restored into an empty database on a different PostgreSQL major, with the typed views regenerated offline and no `pgfr_analyze` object present, is enough to answer real troubleshooting questions using nothing but psql (`scripts/agent_test.sh` proves exactly this end to end). `pgfr_analyze` makes conclusions faster; it is not required to reach them.
 
 ## Requirements
 
@@ -54,7 +54,7 @@ Other install channels (single-file bundle for SQL editors, [dbdev](https://data
 - [pgfr_record/README.md](pgfr_record/README.md): what it is, how to install it, and the design's pitch (append-only, the record/analyze boundary and agent test, no adaptive safety mechanisms).
 - [REFERENCE.md](REFERENCE.md): the full technical reference, every table, view, and function.
 - [STATISTICS.md](STATISTICS.md): what's collected, in what shape, and why.
-- [pgfr_analyze/README.md](pgfr_analyze/README.md): the optional analysis extension (not yet rebuilt for v2).
+- [pgfr_analyze/README.md](pgfr_analyze/README.md): the optional analysis extension.
 
 ## Testing
 
