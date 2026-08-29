@@ -95,13 +95,11 @@ SELECT ok(
 -- ---------------------------------------------------------------------------
 -- Should not write anywhere.
 -- ---------------------------------------------------------------------------
-SAVEPOINT analyze_readonly;
 SET TRANSACTION READ ONLY;
 SELECT ok(
     (SELECT count(*) FROM pgfr_analyze.self_overhead(:'ref_t_ref'::timestamptz - interval '10 minutes', :'ref_t_ref'::timestamptz)) >= 0,
     'self_overhead() should execute successfully inside a hard READ ONLY transaction'
 );
-ROLLBACK TO SAVEPOINT analyze_readonly;
 
 SELECT * FROM finish();
 ROLLBACK;

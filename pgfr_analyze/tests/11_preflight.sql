@@ -54,7 +54,6 @@ SELECT is(
 -- ---------------------------------------------------------------------------
 -- Should not write anywhere.
 -- ---------------------------------------------------------------------------
-SAVEPOINT analyze_readonly;
 SET TRANSACTION READ ONLY;
 SELECT ok(
     (SELECT count(*) FROM pgfr_analyze.preflight_check()) >= 0,
@@ -64,7 +63,6 @@ SELECT ok(
     (SELECT count(*) FROM pgfr_analyze.preflight_check_with_summary()) >= 0,
     'preflight_check_with_summary() should execute successfully inside a hard READ ONLY transaction'
 );
-ROLLBACK TO SAVEPOINT analyze_readonly;
 
 SELECT * FROM finish();
 ROLLBACK;

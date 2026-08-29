@@ -186,7 +186,6 @@ SELECT is(
 -- ---------------------------------------------------------------------------
 -- Neither function should write anywhere.
 -- ---------------------------------------------------------------------------
-SAVEPOINT analyze_readonly;
 SET TRANSACTION READ ONLY;
 SELECT ok(
     (SELECT count(*) FROM pgfr_analyze.detect_regressions(interval '1 hour', 50.0)) >= 0,
@@ -196,7 +195,6 @@ SELECT ok(
     (SELECT count(*) FROM pgfr_analyze.detect_query_storms(interval '1 hour', 3.0)) >= 0,
     'detect_query_storms() should execute successfully inside a hard READ ONLY transaction'
 );
-ROLLBACK TO SAVEPOINT analyze_readonly;
 
 SELECT * FROM finish();
 ROLLBACK;

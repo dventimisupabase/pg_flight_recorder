@@ -152,13 +152,11 @@ SELECT is(
 -- ---------------------------------------------------------------------------
 -- Should not write anywhere.
 -- ---------------------------------------------------------------------------
-SAVEPOINT analyze_readonly;
 SET TRANSACTION READ ONLY;
 SELECT ok(
     (SELECT count(*) FROM pgfr_analyze.capacity_summary(:'ref_t_ref'::timestamptz - interval '10 minutes', :'ref_t_ref'::timestamptz)) >= 0,
     'capacity_summary() should execute successfully inside a hard READ ONLY transaction'
 );
-ROLLBACK TO SAVEPOINT analyze_readonly;
 
 SELECT * FROM finish();
 ROLLBACK;

@@ -48,13 +48,11 @@ SELECT is(
 -- ---------------------------------------------------------------------------
 -- Should not write anywhere.
 -- ---------------------------------------------------------------------------
-SAVEPOINT analyze_readonly;
 SET TRANSACTION READ ONLY;
 SELECT ok(
     (SELECT count(*) FROM pgfr_analyze.check_alerts()) >= 0,
     'check_alerts() should execute successfully inside a hard READ ONLY transaction'
 );
-ROLLBACK TO SAVEPOINT analyze_readonly;
 
 SELECT * FROM finish();
 ROLLBACK;

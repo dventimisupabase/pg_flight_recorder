@@ -58,13 +58,11 @@ SELECT is(
 -- ---------------------------------------------------------------------------
 -- Neither function should write anywhere.
 -- ---------------------------------------------------------------------------
-SAVEPOINT analyze_readonly;
 SET TRANSACTION READ ONLY;
 SELECT ok(
     (SELECT count(*) FROM pgfr_analyze.current_xmin_horizon_holder()) >= 0,
     'current_xmin_horizon_holder() should execute successfully inside a hard READ ONLY transaction'
 );
-ROLLBACK TO SAVEPOINT analyze_readonly;
 
 SELECT * FROM finish();
 ROLLBACK;
