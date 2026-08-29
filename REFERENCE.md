@@ -22,6 +22,7 @@ Everything through [Profiles](#profiles) and [`health_check()`](#health_check) i
 - [Capture ledger](#capture-ledger)
 - [Definitional helpers](#definitional-helpers)
   - [`state_as_of(source_view, t)`](#state_as_ofsource_view-t)
+  - [`latest_state(source_view, t)`](#latest_statesource_view-t)
   - [`resolve_relation(oid, t)` / `resolve_index(oid, t)`](#resolve_relationoid-t--resolve_indexoid-t)
   - [`deltas(source_view, from_t, to_t)`](#deltassource_view-from_t-to_t)
   - [Generated `COMMENT ON`](#generated-comment-on)
@@ -249,14 +250,15 @@ Example (`\d+ pgfr_record.v_pg_stat_database`):
 `generate_column_classes()` derives this **mechanically**, rather than from a hand-typed per-column list. Hand-classifying every column of roughly 40 census views from memory risks exactly the kind of confidently-wrong answer the record/analyze boundary is designed to avoid. The rule order, checked top to bottom:
 
 1. Natural-key membership maps to `key` (identity always wins, even over the override list below: `pid` is a natural-key column on some targets and an override-list gauge on others).
-2. A small named override list for numeric-but-not-cumulative columns: `numbackends`, `pid`, `sender_port`, `client_port`, `sync_priority`, `reltuples`, `bits`, `client_serial`, `start_value`, `increment_by`, `cache_size`, `map_number`. `pg_sequences.last_value` is deliberately not on this list: it behaves like a real counter (reset-aware protection from `deltas()` covers a `RESTART` or a `CYCLE` wraparound without needing a `reset_column`), and is exactly the consumption-rate signal that target exists to capture.
-3. A column literally named `stats_reset` maps to `label` (and becomes the `reset_column` for this view's own counters).
-4. Type `pg_lsn`, `xid`, or `xid8` maps to `odometer`.
-5. A column in this row's `compare_ignore` maps to `gauge` (the same rationale that put it in `compare_ignore`: it's estimate churn, not real change).
-6. Column name matching `min_`, `max_`, `mean_`, or `stddev_` maps to `gauge`.
-7. Type `timestamptz` or `interval` maps to `gauge`.
-8. Remaining numeric types map to `counter`, with `reset_column` linked to `stats_reset` when present.
-9. Everything else maps to `label`.
+2. A small named override list for numeric-but-not-cumulative columns: `numbackends`, `pid`, `sender_port`, `client_port`, `sync_priority`, `reltuples`, `bits`, `client_serial`, `start_value`, `increment_by`, `cache_size`, `map_number`, `leader_pid`, `query_id`. `pg_sequences.last_value` is deliberately not on this list: it behaves like a real counter (reset-aware protection from `deltas()` covers a `RESTART` or a `CYCLE` wraparound without needing a `reset_column`), and is exactly the consumption-rate signal that target exists to capture.
+3. A second, name-based override for point-in-time condition text columns: `wait_event`, `wait_event_type`, `state` map to `gauge`. These are the sampled quantity Mode A's time-in-state estimation (see `STATISTICS.md`) is actually built on, not inert identity text like `usename`/`datname`; the type-driven default further down can't tell the two apart on its own.
+4. A column literally named `stats_reset` maps to `label` (and becomes the `reset_column` for this view's own counters).
+5. Type `pg_lsn`, `xid`, or `xid8` maps to `odometer`.
+6. A column in this row's `compare_ignore` maps to `gauge` (the same rationale that put it in `compare_ignore`: it's estimate churn, not real change).
+7. Column name matching `min_`, `max_`, `mean_`, or `stddev_` maps to `gauge`.
+8. Type `timestamptz` or `interval` maps to `gauge`.
+9. Remaining numeric types map to `counter`, with `reset_column` linked to `stats_reset` when present.
+10. Everything else maps to `label`.
 
 This is a best-effort mechanical classification, not a hand-verified audit against PostgreSQL's own documentation for every column. The override list is a documented starting point, expected to grow as misclassifications surface in practice, the same maintenance posture as `compare_ignore`.
 
@@ -317,6 +319,14 @@ WHERE datname = 'postgres';
 ```
 
 A point in time before any capture existed returns zero rows, not the earliest available row.
+
+### `latest_state(source_view, t)`
+
+The true-current-state sibling of `state_as_of()`, for non-debounced (Group A/C) targets only: every row at the single most recent `captured_at` within `t`'s partition, rather than per-key LOCF. Same calling convention as `state_as_of()` (`SETOF record`, caller-supplied column-definition list). Raises if called on a debounced target, where a missing row means unchanged rather than gone, and `state_as_of()` is the correct choice instead.
+
+The distinction matters because a non-debounced target (`pg_stat_activity`, `pg_locks`, the progress views, and the rest of Group A/C) fully recaptures its entire current row set on every tick, with one `captured_at` shared by the whole tick (the single-stamp rule). A key that has since vanished, such as a backend that disconnected, has no future row to ever supersede its last one; `state_as_of()`'s LOCF would keep returning that stale row as if it were still current for as long as it remains within the partition bound (up to an hour, for Group C's hourly partitions). `latest_state()` avoids this by construction: every row it returns shares the single most recent `captured_at`, so a vanished key simply isn't there.
+
+Confirmed against a live install: a backend captured once mid-transaction, then disconnected, still reads as an active idle-in-transaction backend under `state_as_of()` for the rest of that hour, but correctly disappears under `latest_state()`. `pgfr_analyze.long_running_transactions()`, `vacuum_progress()`, and `anomaly_report()`'s `IDLE_IN_TRANSACTION`/`LOCK_CONTENTION`/`CONNECTION_LEAK`/`REPLICATION_LAG`/`REPLICATION_SLOT_INACTIVE` checks all use `latest_state()` for exactly this reason.
 
 ### `resolve_relation(oid, t)` / `resolve_index(oid, t)`
 
@@ -389,7 +399,7 @@ Every check is read-only and threshold-free in the judgmental sense: each is a f
 
 ## `pgfr_analyze`
 
-`pgfr_analyze` reads `pgfr_record`'s captured data, column classes, and definitional helpers to answer questions requiring a threshold, baseline, or opinion; it never writes to `pgfr_record`'s schema. Everything in `pgfr_record` has exactly one correct answer; everything below encodes a judgment call instead, tunable in most cases via `pgfr_analyze.config`. Most functions build their query dynamically against `pgfr_record.deltas()` or `pgfr_record.state_as_of()`, using an internal helper (`_deltas_col_defs()` / `_state_col_defs()`) to generate the caller-supplied column-definition list those functions require; a function built this way raises if the source view has no `pgfr_record.payload_schemas` row yet (that is, `pgfr_record` hasn't captured it even once) rather than silently returning nothing.
+`pgfr_analyze` reads `pgfr_record`'s captured data, column classes, and definitional helpers to answer questions requiring a threshold, baseline, or opinion; it never writes to `pgfr_record`'s schema. Everything in `pgfr_record` has exactly one correct answer; everything below encodes a judgment call instead, tunable in most cases via `pgfr_analyze.config`. Most functions build their query dynamically against `pgfr_record.deltas()`, `pgfr_record.state_as_of()`, or `pgfr_record.latest_state()`, using an internal helper (`_deltas_col_defs()` / `_state_col_defs()`, the latter shared by both `state_as_of()` and `latest_state()` since they return the same column shape) to generate the caller-supplied column-definition list those functions require; a function built this way raises if the source view has no `pgfr_record.payload_schemas` row yet (that is, `pgfr_record` hasn't captured it even once) rather than silently returning nothing.
 
 ### Configuration
 
@@ -438,7 +448,7 @@ Every raw xid these functions need is already captured on the fast tier (Group C
 
 ### Anomaly detection
 
-`anomaly_report(from_t, to_t)` returns every flagged anomaly across a fixed but growing set of checks, each built on `pgfr_record.deltas()` (rate/count checks) or a current-state read via `state_as_of(to_t)` (gauge checks), never on a new capture:
+`anomaly_report(from_t, to_t)` returns every flagged anomaly across a fixed but growing set of checks, each built on `pgfr_record.deltas()` (rate/count checks) or a current-state read via `latest_state(to_t)` (gauge checks over non-debounced Group A/C targets: `IDLE_IN_TRANSACTION`, `LOCK_CONTENTION`, `CONNECTION_LEAK`, `REPLICATION_LAG`, `REPLICATION_SLOT_INACTIVE`) or `state_as_of(to_t)` (the debounced Group B/D checks: dead-tuple and wraparound distance), never on a new capture:
 
 | anomaly_type | basis | trigger (severity escalates past the second figure where one is given) |
 |---|---|---|
@@ -561,9 +571,9 @@ Both functions are built on `pg_stat_all_indexes` deltas. Index size is never a 
 
 Three thin presentation functions, each over a single source:
 
-- **`vacuum_progress(t)`** (default now): in-flight `VACUUM` operations as of `t`, via `state_as_of()`. `relname` is resolved through `resolve_relation()` since only `relid` is captured directly on `pg_stat_progress_vacuum`. `pct_dead_tuple_buffer` collapses PG15/16's tuple-count tracking (`num_dead_tuples`/`max_dead_tuples`) and PG17+'s byte-based tracking (`dead_tuple_bytes`/`max_dead_tuple_bytes`) into one version-stable fill percentage. Verified live against an in-flight `VACUUM` on PG17 (`scanning heap`, 56.0% scanned, 1.9% dead-tuple buffer); PG15's branch is the same computation over the pre-PG17 column names. All three percentages are `NULL` before their denominator is known.
+- **`vacuum_progress(t)`** (default now): in-flight `VACUUM` operations as of `t`, via `latest_state()` (not `state_as_of()`: a finished vacuum must actually disappear, not carry forward as a stale row). `relname` is resolved through `resolve_relation()` since only `relid` is captured directly on `pg_stat_progress_vacuum`. `pct_dead_tuple_buffer` collapses PG15/16's tuple-count tracking (`num_dead_tuples`/`max_dead_tuples`) and PG17+'s byte-based tracking (`dead_tuple_bytes`/`max_dead_tuple_bytes`) into one version-stable fill percentage. Verified live against an in-flight `VACUUM` on PG17 (`scanning heap`, 56.0% scanned, 1.9% dead-tuple buffer); PG15's branch is the same computation over the pre-PG17 column names. All three percentages are `NULL` before their denominator is known.
 - **`wal_archiver_status(from_t, to_t)`**: archiving throughput and failures over the window, from `pg_stat_archiver` deltas. `last_archived_wal`/`last_archived_time`/`last_failed_wal`/`last_failed_time` are the archiver-reported end-of-window values, not window-relative.
-- **`long_running_transactions(t, threshold)`** (default now, 5 minutes): any backend whose transaction has been open longer than `threshold` as of `t`, regardless of state; broader than `anomaly_report()`'s `IDLE_IN_TRANSACTION` check, which only flags idle ones.
+- **`long_running_transactions(t, threshold)`** (default now, 5 minutes): any backend whose transaction has been open longer than `threshold` as of `t`, regardless of state, via `latest_state()` (not `state_as_of()`: a disconnected backend must actually disappear, not carry forward as a false long-running transaction); broader than `anomaly_report()`'s `IDLE_IN_TRANSACTION` check, which only flags idle ones.
 
 ### Composing reports
 
