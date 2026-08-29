@@ -115,8 +115,9 @@ SELECT ok(
     'pg_stat_activity''s leader_pid/query_id should classify as gauge, not counter (identity-shaped values, not cumulative)'
 );
 SELECT ok(
-    (SELECT class = 'gauge' FROM pgfr_record.column_classes WHERE source_view = 'pg_catalog.pg_stat_subscription' AND column_name = 'leader_pid'),
-    'pg_stat_subscription.leader_pid should classify as gauge, not counter'
+    (SELECT class = 'gauge' FROM pgfr_record.column_classes WHERE source_view = 'pg_catalog.pg_stat_subscription' AND column_name = 'leader_pid')
+    OR NOT EXISTS (SELECT 1 FROM pgfr_record.column_classes WHERE source_view = 'pg_catalog.pg_stat_subscription' AND column_name = 'leader_pid'),
+    'pg_stat_subscription.leader_pid, when present (added after PG15), should classify as gauge, not counter'
 );
 SELECT ok(
     (SELECT bool_and(class = 'gauge') FROM pgfr_record.column_classes
