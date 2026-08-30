@@ -85,17 +85,34 @@ $$;
 -- inside a function or procedure body on any supported PostgreSQL version
 -- (confirmed against the manual and pgsql-hackers -- no CALL/procedure
 -- workaround exists), so this function never issues that statement
--- directly. Instead it is a small hourly reconciliation loop:
+-- directly; DETACH PARTITION ... FINALIZE has no such restriction
+-- (confirmed against a live server) and does run directly here. This is a
+-- small hourly reconciliation loop:
 --
 --   1. Create-ahead: pre-create partitions covering >= 2 widths beyond
 --      now(), for every target. Ordinary DDL.
---   2. Schedule detaches: for each expired, still-attached partition,
---      cron.schedule() a one-off job (exact one-time minute/hour/day/month
---      spec, not a recurring wildcard) whose command text is *only* the
---      bare ALTER TABLE ... DETACH PARTITION ... CONCURRENTLY statement --
+--   2. Detach expired, still-attached partitions. A CONCURRENTLY detach is
+--      a two-phase operation; something interrupting the session between
+--      phases (a connection pooler recycling it, observed in practice on
+--      managed Postgres) leaves the partition marked
+--      pg_inherits.inhdetachpending until a FINALIZE completes it.
+--      FINALIZE has none of CONCURRENTLY's cross-transaction restriction
+--      (confirmed against a live server), so a pending partition is
+--      finalized directly, right here, ordinary DDL. A normally-attached
+--      expired partition instead gets a fresh cron.schedule() one-off job
+--      (exact one-time minute/hour/day/month spec, not a recurring
+--      wildcard) whose command text is *only* the bare
+--      ALTER TABLE ... DETACH PARTITION ... CONCURRENTLY statement --
 --      nothing else may share that command string, since pg_cron dispatches
 --      it as a lone top-level statement and a multi-statement command would
 --      be wrapped in an implicit transaction, breaking CONCURRENTLY again.
+--      cron.schedule() upserts by jobname unconditionally, with no "already
+--      scheduled" guard: a prior one-off attempt that already fired and
+--      failed (for this or any other transient reason) is spent and will
+--      never retry on its own, so every still-expired-and-attached
+--      partition gets a fresh attempt scheduled on every hourly cycle until
+--      one actually succeeds. Self-healing, matching the same posture as
+--      the collector's anchor detection.
 --   3. Drop retired tables: any standalone table (relispartition = false)
 --      matching a target's naming convention, left over once a prior
 --      cycle's detach job fired. Ordinary DDL -- no longer attached to
@@ -104,9 +121,10 @@ $$;
 --      fully dropped by step 3.
 --
 -- A partition's full retirement therefore spans up to two maintenance
--- cycles (schedule -> detach fires within a minute -> next hourly cycle
--- drops + reaps), immaterial given retention windows measured in hours to
--- months and create-ahead already buffering two widths.
+-- cycles in the common case (schedule -> detach fires within a minute ->
+-- next hourly cycle drops + reaps), or more if an attempt fails and needs
+-- retrying, immaterial given retention windows measured in hours to months
+-- and create-ahead already buffering two widths.
 CREATE OR REPLACE FUNCTION pgfr_record.maintain_partitions()
 RETURNS void
 LANGUAGE plpgsql AS $$
@@ -123,6 +141,7 @@ DECLARE
     v_jobname     text;
     v_cron_spec   text;
     v_job         record;
+    v_part        record;
 BEGIN
     -- Step 1: create-ahead.
     FOR v_target IN SELECT * FROM pgfr_record._partition_targets() LOOP
@@ -144,10 +163,11 @@ BEGIN
     END LOOP;
 
     -- Step 2: schedule detaches for expired, still-attached partitions.
+    -- No "already scheduled" guard: see the comment above this function.
     FOR v_target IN SELECT * FROM pgfr_record._partition_targets() LOOP
         v_unit := pgfr_record._partition_unit(v_target.retention);
-        FOR v_child IN
-            SELECT c.relname
+        FOR v_part IN
+            SELECT c.relname, i.inhdetachpending
             FROM pg_inherits i
             JOIN pg_class c ON c.oid = i.inhrelid
             JOIN pg_class p ON p.oid = i.inhparent
@@ -155,11 +175,22 @@ BEGIN
             WHERE n.nspname = 'pgfr_record'
               AND p.relname = v_target.parent_table
         LOOP
+            v_child := v_part.relname;
             v_lower := pgfr_record._partition_lower_bound(v_child, v_target.parent_table, v_unit);
             v_upper := v_lower + ('1 ' || v_unit)::interval;
             IF v_upper < v_now - v_target.retention THEN
-                v_jobname := 'pgfr_detach_' || v_child;
-                IF NOT EXISTS (SELECT 1 FROM cron.job WHERE jobname = v_jobname) THEN
+                IF v_part.inhdetachpending THEN
+                    -- FINALIZE has none of CONCURRENTLY's cross-transaction
+                    -- restriction (confirmed against a live server), so it
+                    -- runs immediately here rather than waiting on another
+                    -- one-off job; step 3 below can drop the now-standalone
+                    -- table in this same cycle.
+                    EXECUTE format(
+                        'ALTER TABLE pgfr_record.%I DETACH PARTITION pgfr_record.%I FINALIZE',
+                        v_target.parent_table, v_child
+                    );
+                ELSE
+                    v_jobname   := 'pgfr_detach_' || v_child;
                     v_cron_spec := to_char(v_now + interval '1 minute', 'MI HH24 DD MM') || ' *';
                     PERFORM cron.schedule(
                         v_jobname,
@@ -203,4 +234,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION pgfr_record.maintain_partitions() IS
-    'Hourly reconciliation: create partitions >= 2 widths ahead, schedule CONCURRENTLY detaches for expired ones via one-off pg_cron jobs, drop tables a prior cycle detached, and reap completed one-off jobs. DETACH ... CONCURRENTLY never runs from inside this function -- see the comment above its definition.';
+    'Hourly reconciliation: create partitions >= 2 widths ahead, schedule a detach for every expired one via a one-off pg_cron job (CONCURRENTLY, or FINALIZE if a prior attempt left it pending), drop tables a prior cycle detached, and reap completed one-off jobs. Rescheduled unconditionally every cycle, not just once, so a failed attempt retries on its own. DETACH PARTITION never runs from inside this function -- see the comment above its definition.';

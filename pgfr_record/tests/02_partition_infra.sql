@@ -3,7 +3,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(35);
+SELECT plan(44);
 
 -- ---------------------------------------------------------------------------
 -- Functions + tables exist
@@ -141,6 +141,59 @@ SELECT is(
 SELECT ok(
     NOT EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pgfr_detach_ledger_runs_p19990101'),
     'the stale one-off job should be reaped once its target table is gone'
+);
+
+-- ---------------------------------------------------------------------------
+-- Failed-attempt retry: a prior one-off job for this exact partition
+-- already exists (as if it fired once and failed for any transient
+-- reason -- a killed connection, a pooler recycling the session, etc.)
+-- and the partition is still attached. There must be no "already
+-- scheduled" guard blocking a fresh attempt.
+-- ---------------------------------------------------------------------------
+SELECT lives_ok(
+    $$CREATE TABLE pgfr_record.ledger_runs_p20000201 PARTITION OF pgfr_record.ledger_runs
+      FOR VALUES FROM ('2000-02-01') TO ('2000-02-02')$$,
+    'creating a second manufactured expired partition should succeed'
+);
+SELECT lives_ok(
+    $$SELECT cron.schedule('pgfr_detach_ledger_runs_p20000201', '0 0 1 1 *', 'SELECT 1')$$,
+    'scheduling a manufactured spent one-off job (as if a prior attempt already fired) should succeed'
+);
+SELECT lives_ok($$SELECT pgfr_record.maintain_partitions()$$, 'maintain_partitions() should execute without error over an already-scheduled, still-attached partition');
+SELECT isnt(
+    (SELECT schedule FROM cron.job WHERE jobname = 'pgfr_detach_ledger_runs_p20000201'),
+    '0 0 1 1 *',
+    'a spent one-off job for a still-attached partition should be rescheduled, not left untouched'
+);
+SELECT is(
+    (SELECT command FROM cron.job WHERE jobname = 'pgfr_detach_ledger_runs_p20000201'),
+    'ALTER TABLE pgfr_record.ledger_runs DETACH PARTITION pgfr_record.ledger_runs_p20000201 CONCURRENTLY',
+    'the rescheduled job should carry the bare DETACH ... CONCURRENTLY statement'
+);
+
+-- ---------------------------------------------------------------------------
+-- Pending-detach recovery: a partition left in PostgreSQL's own
+-- pg_inherits.inhdetachpending state by an interrupted CONCURRENTLY
+-- detach (confirmed live: a connection pooler recycling the session
+-- mid-operation on managed Postgres leaves exactly this state) should be
+-- finalized directly, inline, not via another one-off job -- and, since
+-- step 3 runs in the same call, fully dropped in one maintain_partitions()
+-- pass.
+-- ---------------------------------------------------------------------------
+SELECT lives_ok(
+    $$CREATE TABLE pgfr_record.ledger_runs_p20000301 PARTITION OF pgfr_record.ledger_runs
+      FOR VALUES FROM ('2000-03-01') TO ('2000-03-02')$$,
+    'creating a third manufactured expired partition should succeed'
+);
+SELECT lives_ok(
+    $$UPDATE pg_inherits SET inhdetachpending = true WHERE inhrelid = 'pgfr_record.ledger_runs_p20000301'::regclass$$,
+    'marking the manufactured partition pending-detach should succeed'
+);
+SELECT lives_ok($$SELECT pgfr_record.maintain_partitions()$$, 'maintain_partitions() should execute without error over a pending-detach partition');
+SELECT is(
+    to_regclass('pgfr_record.ledger_runs_p20000301'),
+    NULL::regclass,
+    'a pending-detach partition should be finalized and dropped within the same maintain_partitions() call'
 );
 
 SELECT * FROM finish();
