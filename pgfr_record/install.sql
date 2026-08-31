@@ -34,6 +34,8 @@
 --   15_health_check.sql      health_check()
 --   16_rollups.sql           generate_rollups(): long-horizon compressed
 --                            history for Groups B/C (milestone 8)
+--   17_rollup_deltas.sql     rollup_deltas(): the long-horizon analog of
+--                            deltas(), for endpoint-shaped rollups
 
 \ir sql/01_schema.sql
 \ir sql/02_manifest.sql
@@ -51,6 +53,7 @@
 \ir sql/14_enable.sql
 \ir sql/15_health_check.sql
 \ir sql/16_rollups.sql
+\ir sql/17_rollup_deltas.sql
 
 -- Create every enabled target's archive table + initial partitions,
 -- regenerate the typed presentation views, reclassify every column,
