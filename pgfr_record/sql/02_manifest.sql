@@ -102,7 +102,7 @@ CREATE TABLE IF NOT EXISTS pgfr_record.rollup_specs (
 COMMENT ON TABLE pgfr_record.rollup_specs IS
     'Hand-seeded rollup statistics for Group C (gauge) targets: one row per (source_view, stat_name), aggregated across every key in a rollup bucket (not per-key -- Group C''s value is "did this happen in this bucket", not per-backend/per-slot history). Consumed by generate_rollups()/run_tier()''s bucket-close step. Group B (counter/odometer) targets need no entries here: their rollup is mechanical, derived directly from column_classes.';
 COMMENT ON COLUMN pgfr_record.rollup_specs.agg IS 'How value_expr is aggregated across every row in the bucket: count | sum | max | min.';
-COMMENT ON COLUMN pgfr_record.rollup_specs.value_expr IS 'A SQL expression over the target''s presentation view columns, e.g. captured_at - xact_start. Must be a continuous quantity, never a pre-thresholded boolean -- see the comment above this table for why.';
+COMMENT ON COLUMN pgfr_record.rollup_specs.value_expr IS 'A SQL expression over the target''s presentation view columns. Must evaluate to numeric (the rollup table''s value column is numeric) -- a duration needs extract(epoch FROM ...), not a bare interval subtraction. Must be a continuous quantity, never a pre-thresholded boolean -- see the comment above this table for why.';
 COMMENT ON COLUMN pgfr_record.rollup_specs.predicate_sql IS 'Optional structural row filter (e.g. state = ''idle in transaction''). Identity/state equality only, never a duration or magnitude threshold -- that judgment belongs to pgfr_analyze at read time.';
 
 -- Payload dictionary: the positional order of every jsonb-array payload

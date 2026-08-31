@@ -201,9 +201,9 @@ INSERT INTO pgfr_record.rollup_specs
     (source_view, stat_name, agg, value_expr, predicate_sql)
 VALUES
     ('pg_catalog.pg_stat_activity', 'idle_in_xact_max_duration', 'max',
-     'captured_at - xact_start', $$state = 'idle in transaction'$$),
+     'extract(epoch FROM captured_at - xact_start)', $$state = 'idle in transaction'$$),
     ('pg_catalog.pg_stat_activity', 'lock_wait_max_duration', 'max',
-     'captured_at - query_start', $$wait_event_type = 'Lock'$$),
+     'extract(epoch FROM captured_at - query_start)', $$wait_event_type = 'Lock'$$),
     ('pg_catalog.pg_locks', 'blocked_sample_count', 'count',
      '1', 'granted = false'),
     ('pg_catalog.pg_stat_replication', 'non_streaming_sample_count', 'count',
@@ -213,7 +213,7 @@ VALUES
     ('pg_catalog.pg_replication_slots', 'inactive_sample_count', 'count',
      '1', 'active = false'),
     ('pg_catalog.pg_prepared_xacts', 'prepared_max_age', 'max',
-     'captured_at - prepared', NULL),
+     'extract(epoch FROM captured_at - prepared)', NULL),
     ('pg_catalog.pg_stat_ssl', 'unencrypted_sample_count', 'count',
      '1', 'ssl = false'),
     ('pg_catalog.pg_stat_gssapi', 'unencrypted_sample_count', 'count',
