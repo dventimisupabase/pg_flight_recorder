@@ -19,12 +19,14 @@ Everything through [Profiles](#profiles) and [`health_check()`](#health_check) i
 - [Presentation views](#presentation-views)
 - [Column classes](#column-classes)
 - [Capture plan and the collector](#capture-plan-and-the-collector)
+- [Rollups](#rollups)
 - [Capture ledger](#capture-ledger)
 - [Definitional helpers](#definitional-helpers)
   - [`state_as_of(source_view, t)`](#state_as_ofsource_view-t)
   - [`latest_state(source_view, t)`](#latest_statesource_view-t)
   - [`resolve_relation(oid, t)` / `resolve_index(oid, t)`](#resolve_relationoid-t--resolve_indexoid-t)
   - [`deltas(source_view, from_t, to_t)`](#deltassource_view-from_t-to_t)
+  - [`rollup_deltas(source_view, from_bucket, to_bucket)`](#rollup_deltassource_view-from_bucket-to_bucket)
   - [Generated `COMMENT ON`](#generated-comment-on)
 - [Profiles](#profiles)
 - [`health_check()`](#health_check)
@@ -64,13 +66,15 @@ Everything through [Profiles](#profiles) and [`health_check()`](#health_check) i
 | `compare_ignore` | `text[]` | Columns nulled out of the *compare* payload before hashing (estimator churn, etc.), though the stored payload keeps every value |
 | `anchor_every` | `interval` | Cadence of an unconditional full capture for a debounced target; required when `debounce = true` |
 | `retention` | `interval` | How long rows are kept, implemented as partition drop, never `DELETE` |
+| `rollup_retention` | `interval` | How long compressed rollup rows are kept, independent of `retention`; `NULL` means this target has no rollup. See [Rollups](#rollups) |
+| `rollup_granularity` | `interval` | Rollup bucket width, e.g. 1 day. Required when `rollup_retention` is set, and must be strictly less than `retention` |
 | `logged` | `boolean` | `false` makes the archive table's partitions `UNLOGGED` (default `true`) |
 | `size_class` | `text` | Coarse cardinality label (`singleton`, `per_db`, `per_relation`, `per_backend`, or `per_slot`), used only by the cost model and docs |
 | `requires` | `text` | Precondition for full visibility: an extension, a GUC, or a role/privilege note |
 | `enabled` | `boolean` | `false` rows are still listed, with notes, so "why doesn't pgfr capture X" is queryable. They get no archive table or capture-plan entry |
 | `notes` | `text` | Free-text design rationale |
 
-Both `debounce = false OR anchor_every IS NOT NULL` and `keyless = false OR debounce = false` are enforced by `CHECK` constraints, not convention.
+Both `debounce = false OR anchor_every IS NOT NULL` and `keyless = false OR debounce = false` are enforced by `CHECK` constraints, not convention. So is `rollup_retention IS NULL OR (rollup_granularity IS NOT NULL AND rollup_granularity < retention)`.
 
 ### The PG15 seed census
 
@@ -84,7 +88,7 @@ Both `debounce = false OR anchor_every IS NOT NULL` and `keyless = false OR debo
 | Version-gated beyond PG15 (`min_major` 16 or 17) | 2 |
 | Active on PG15 (enabled and `min_major <= 15`) | 41 |
 
-**Group A: cumulative counters, singleton / per-db.** Fast tier, 30 days retention, `debounce = false` (cheap, always changing, every sample wanted).
+**Group A: cumulative counters, singleton / per-db.** Fast tier, 365 days retention, `debounce = false` (cheap, always changing, every sample wanted). Bounded, singleton/per-db cardinality keeps a year's depth cheap even at raw resolution, so Group A has no rollup: unlike Group B, there is no compression problem here to solve.
 
 | source_view | key | notes |
 |---|---|---|
@@ -99,7 +103,7 @@ Both `debounce = false OR anchor_every IS NOT NULL` and `keyless = false OR debo
 | `pg_stat_replication_slots` | `{slot_name}` | logical-decoding spill/stream byte and txn counters; reset: `stats_reset`. Distinct from `pg_replication_slots` (Group C), which carries LSN/config columns, not counters |
 | `pg_stat_subscription_stats` | `{subid}` | apply/sync error counts; reset: `stats_reset`. Distinct from `pg_stat_subscription` (Group C), which carries worker pid/lag columns, not counters |
 
-**Group B: cumulative counters, per-relation, the cardinality frontier.** Medium tier (statio: slow), `debounce = true`, `anchor_every = 1 day`, 30 days retention.
+**Group B: cumulative counters, per-relation, the cardinality frontier.** Medium tier (statio: slow), `debounce = true`, `anchor_every = 1 day`, 30 days retention. All nine targets below also roll up to 365 days at 1-day buckets; see [Rollups](#rollups).
 
 | source_view | key | compare_ignore | requires | notes |
 |---|---|---|---|---|
@@ -115,7 +119,7 @@ Both `debounce = false OR anchor_every IS NOT NULL` and `keyless = false OR debo
 
 `pg_stat_statements` and `pg_stat_statements_info` are extension-provided views, not `pg_catalog` builtins: `CREATE EXTENSION` installs them wherever the current schema was at the time (`public` on stock PostgreSQL, typically `extensions` on Supabase). The manifest references them unqualified and lets `::regclass` resolve them via `search_path`, exactly as any other client of an extension-provided object would.
 
-**Group C: gauges.** Fast tier, 2 hours retention, `debounce = false`.
+**Group C: gauges.** Fast tier, 2 hours retention, `debounce = false`. Eight of the fifteen targets below (`pg_stat_activity`, `pg_locks`, `pg_stat_replication`, `pg_stat_subscription`, `pg_replication_slots`, `pg_prepared_xacts`, `pg_stat_ssl`, `pg_stat_gssapi`) also roll up to 365 days at 1-hour buckets; see [Rollups](#rollups).
 
 | source_view | key | notes |
 |---|---|---|
@@ -275,6 +279,23 @@ This is a best-effort mechanical classification, not a hand-verified audit again
 
 `pg_cron` never runs two instances of the same tier job concurrently: an overrunning job simply delays that tier's next tick rather than stacking a second instance on top of it. Together with `job_timeout(tier) < tier_interval(tier)` (enforced by a `CHECK` constraint on `profile_tiers`), a tier never accumulates more than one running collector backend at a time.
 
+## Rollups
+
+Group B's 30-day retention and Group C's 2-hour retention are both far shorter than Group D's 365-day config-change history, which limits how far back a config change (`pgfr_analyze.config_changes()`) can be correlated against the counter/gauge behavior around it. Rollups close that gap: a compressed, long-horizon history alongside each target's raw archive, at a fraction of the storage a full year at raw resolution would cost.
+
+`pgfr_record.manifest.rollup_retention` and `rollup_granularity` (bucket width) govern it, per target: `NULL` on both means no rollup; when set, `rollup_granularity` must be strictly narrower than `retention` (a `CHECK` constraint, not convention), since a bucket can only close by aggregating raw rows still guaranteed to exist.
+
+A rollup takes one of two shapes, chosen automatically from what the target's own `column_classes`/`rollup_specs` rows say:
+
+- **Endpoint** (Group B, counters/odometers): one row per `(bucket, key)`, storing the first and last observed value of every counter/odometer column in that bucket, the two points a reset-aware delta needs. Column order follows `payload_schemas`' own order. No primary key, matching the archive tables' own convention: uniqueness is the collector's bucket-close discipline (below), not a database constraint.
+- **Stat** (Group C, gauges): one row per `(bucket, stat_name)`, aggregated across every key in the bucket, since Group C's value is "did this happen in this bucket", not a per-backend/per-slot history. Which statistic to compute is a judgment call, seeded in `pgfr_record.rollup_specs(source_view, stat_name, agg, value_expr, predicate_sql)` for eight of Group C's fifteen targets; the rest (the progress views, `pg_stat_wal_receiver`) have no rollup yet, the same maintenance posture as `column_classes`' own override list.
+
+`rollup_specs` is deliberately threshold-free: `value_expr`/`agg` compute a continuous quantity, such as a duration in seconds via `extract(epoch FROM ...)`, or a count of samples in a structurally-defined state, never a pre-thresholded boolean. A cutoff like "longer than 5 minutes" is `pgfr_analyze`'s opinion to apply at read time against the stored value, not `pgfr_record`'s to decide once at capture time.
+
+`generate_rollups()` creates each rollup table (`pgfr_record.r_<short_name>`) and its initial partitions, using the same retention-to-width rule as archive tables, against `rollup_retention` rather than `retention`. `generate_capture_plan()` mints each rollup-enabled target's bucket-close aggregate as `capture_plan.rollup_close_sql`, reading from the target's presentation view rather than its raw payload, so mid-major schema accretion is handled by the view's own `UNION`/`NULL`-fill rather than reimplemented here.
+
+`run_tier()` closes eligible buckets on every tick, per target, in its own subtransaction separate from the raw capture: a rollup failure can never roll back an already-succeeded capture, and gets no ledger row either way (`health_check()`, below, surfaces it instead). It self-heals over a bounded range, every closed bucket between the oldest one still covered by the target's own raw retention and the most recently closed one, not just the bucket immediately before now, so a real gap (an outage shorter than retention) is recovered from on the next tick rather than silently skipped forever. A candidate bucket with no raw data at all, such as a fresh install's "yesterday", is left alone rather than recorded as a spurious "zero observed".
+
 ## Capture ledger
 
 Misses are telemetry, not silence: every target's per-run outcome is recorded, never inferred from absence.
@@ -359,6 +380,18 @@ FROM pgfr_record.deltas('pg_catalog.pg_stat_wal', :from_t, :to_t)
 --               6366 |         1669927
 ```
 
+### `rollup_deltas(source_view, from_bucket, to_bucket)`
+
+The long-horizon analog of `deltas()`, for endpoint-shaped (Group B) rollup targets only: diffs the `last_values` of the bucket containing `to_bucket` against the `first_values` of the bucket containing `from_bucket`, per key. Reset-aware in exactly the same way `deltas()` is: a decreased value, or an advanced linked `reset_column`, yields `NULL` rather than a bogus delta. Raises for a stat-shaped (Group C) target, whose rollup rows are already the final per-bucket value with nothing left to difference; read `pgfr_record.r_<name>` directly instead.
+
+Same `SETOF record` / caller-supplies-a-column-definition-list calling convention as `deltas()`:
+
+```sql
+SELECT relid, seq_scan_delta, seq_tup_read_delta, from_bucket, to_bucket
+FROM pgfr_record.rollup_deltas('pg_catalog.pg_stat_all_tables', :from_bucket, :to_bucket)
+    AS d(relid oid, seq_scan_delta bigint, seq_tup_read_delta bigint, ..., from_bucket timestamptz, to_bucket timestamptz);
+```
+
 ### Generated `COMMENT ON`
 
 `generate_comments()` derives a `COMMENT ON` for every archive table, presentation view, and column from the manifest and `column_classes`: the discovery channel an agent actually uses. `\d+` on any archive table or presentation view explains itself (what it is, its cadence/retention/debounce facts, and per-column class/reset-linkage) without this reference open alongside it. Regenerate whenever the manifest or `column_classes` changes; safe to re-run.
@@ -392,6 +425,7 @@ Shipped profiles:
 - **`last_capture: <tier>`**: when the tier last finished, judged against that tier's own live schedule (read back from `cron.job`, not a hardcoded assumption) rather than a fixed threshold.
 - **`ledger_miss_rate_1h`**: the fraction of captures in the last hour that didn't come back `ok`.
 - **`partitions: <table>`**: does every pgfr-owned partitioned table have at least two widths of partitions ahead of now, and zero expired-but-still-attached partitions.
+- **`rollup: <source_view>`**: for every rollup-enabled target, does its most recently closed bucket have a row yet. Only flagged when that bucket actually has raw data to roll up: a bucket with no raw data at all (a fresh install's "yesterday") reads `ok`, not `attention`, the same distinction `run_tier()`'s own bucket-close step makes.
 
 Every check is read-only and threshold-free in the judgmental sense: each is a fixed structural fact (is a job scheduled, is a partition still attached past retention), never an opinion about what's normal. Opinions are `pgfr_analyze`'s job.
 
@@ -426,7 +460,7 @@ A `coverage_ratio` above 1.0 (as with `slow` above) means more runs landed in th
 
 Three functions, all built on `pgfr_record.state_as_of()` against `pg_settings`'s already-debounced Group D history, so GUC change detection needs no dedicated snapshot table:
 
-- **`config_changes(from_t, to_t)`**: GUCs whose setting or source differ between the state as of `from_t` and as of `to_t`. `changed_at` is the actual capture timestamp of the `to_t` value, not a precisely detected change moment. Because `state_as_of()` returns zero rows before any capture existed, a window whose `from_t` predates the recorder's first `on_change`-tier capture reports every currently-set GUC as "changed" (`old_setting` `NULL`) rather than a small, real diff; anchor `from_t` after the recorder has had at least one debounce anchor cycle to run for a meaningful result.
+- **`config_changes(from_t, to_t)`**: GUCs whose setting or source differ between the state as of `from_t` and as of `to_t`. `changed_at` is the actual capture timestamp of the `to_t` value, not a precisely detected change moment. Because `state_as_of()` returns zero rows before any capture existed, a window whose `from_t` predates the recorder's first `on_change`-tier capture reports every currently-set GUC as "changed" (`old_setting` `NULL`) rather than a small, real diff; anchor `from_t` after the recorder has had at least one debounce anchor cycle to run for a meaningful result. Correlating a config change against the counter/gauge behavior around it, once raw retention has passed, is what [Rollups](#rollups) are for.
 - **`config_at(t, name_prefix)`**: GUC values as of `t` (LOCF), optionally filtered to names starting with `name_prefix`.
 - **`config_health_check()`**: opinionated checks against the *live* (not historical) `pg_settings`: low `shared_buffers` (under 128MB), low `work_mem` (under 16MB), high `max_connections` (over 200), no `statement_timeout` set. Zero rows when nothing is flagged.
 

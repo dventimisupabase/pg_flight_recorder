@@ -24,12 +24,13 @@ This is a well-worn trade. Oracle's Active Session History estimates DB time as 
 
 ## Where the census and taxonomy live
 
-Two things that used to require a hand-maintained document are now generated, and are more trustworthy read live than copied here:
+Three things that used to require a hand-maintained document are now generated or hand-seeded in queryable form, and are more trustworthy read live than copied here:
 
 - **What's captured, at what cadence, with what retention, and why**: `pgfr_record.manifest`, one row per capture target. Query it directly (`SELECT source_view, cadence_tier, retention, debounce, notes FROM pgfr_record.manifest WHERE enabled`), or see [REFERENCE.md](REFERENCE.md#the-manifest) for the full census by group.
 - **Per-column semantic classification** (counter, odometer, gauge, label, key) and reset linkage: `pgfr_record.column_classes`, or run `\d+` on any presentation view. `generate_comments()` writes the class directly into the column comment, so the schema is self-documenting without this file open alongside it.
+- **Which targets have a rollup, at what retention and bucket width**: `pgfr_record.manifest`'s own `rollup_retention`/`rollup_granularity` columns; which specific statistic a gauge target rolls up: `pgfr_record.rollup_specs`. See [REFERENCE.md](REFERENCE.md#rollups).
 
-Both are mechanically derived, not hand-typed, and both can change (a new PostgreSQL major adding a column, an operator disabling a manifest row) without this document going stale, because this document no longer asserts either.
+All three are mechanically derived or explicitly hand-seeded rather than restated, and all three can change (a new PostgreSQL major adding a column, an operator disabling a manifest row, a new rollup statistic) without this document going stale, because this document no longer asserts any of them.
 
 ## The three measurement modes
 
@@ -55,6 +56,8 @@ Manifest rows whose columns are classified `counter` or `odometer` in `column_cl
 
 **Resets are handled, not just documented.** `deltas()` is reset-aware: a decreased counter value, or an advance in its linked `reset_column` (from `column_classes`), yields `NULL` for that interval rather than a negative or fabricated rate. Odometers (LSNs, XIDs) skip reset detection by definition, since they don't reset. This is enforced in the function itself, not left to the reader to guard against by hand.
 
+**Beyond raw retention, the same differencing continues at coarser resolution.** For Group B targets, `pgfr_record.rollup_deltas()` extends Mode B differencing past raw retention (30 days) out to a rollup's own retention (365 days), reset-aware in the same way. The resolution changes, not the method: a rollup bucket stores only the first and last observed value within it, so the finest delta available beyond raw retention is one bucket wide (1 day), where an arbitrary two-point delta was available within it. See [REFERENCE.md](REFERENCE.md#rollups).
+
 ### Mode C: debounced state-change capture
 
 Manifest rows with `debounce = true` (Group B and Group D) append a row for a key only when its compared payload changes since that key's most recent capture, within the current anchor window, plus an unconditional full capture at every anchor.
@@ -79,7 +82,7 @@ Applying the `troubleshooting` profile tightens the fast tier to `T = 20s`, whic
 1. **No proportion without its denominator.** A Mode A proportion is meaningless without the sample count behind it. `pgfr_record.health_check()`'s `ledger_miss_rate_1h` check reports both the miss count and the total in its `detail` text for exactly this reason.
 2. **Coverage is queryable, not asserted.** `pgfr_record.ledger_runs` and `ledger_captures` are the raw record of every tier run and every per-target outcome: `outcome <> 'ok'` rows in `ledger_captures`, joined to `ledger_runs` for the timestamp, are exactly the gap list. `pgfr_analyze.coverage()` and `coverage_gaps()` compute this directly from the live pg_cron schedule rather than a hardcoded tick assumption, and are the form any report or dashboard should actually query.
 3. **Censoring is flagged, not smoothed.** A counter reset, mid-flight, is not a noisy measurement; it's not a measurement. `deltas()` returns `NULL` rather than a negative or interpolated value across one, per Mode B above. The reset itself is visible directly in the affected source view's own `stats_reset` column, captured like any other value.
-4. **Retention is a resolution limit, stated as one.** A window whose start predates a target's retention horizon does not "come back empty"; it comes back with whatever survived partition drop, which is exactly what the manifest's own `retention` column documents per target.
+4. **Retention is a resolution limit, stated as one.** A window whose start predates a target's retention horizon does not "come back empty"; it comes back with whatever survived partition drop, which is exactly what the manifest's own `retention` column documents per target. For a target with a rollup, this is a two-tier limit rather than a single cliff: within `retention`, resolution is exact between any two captured instants; beyond it and within `rollup_retention`, resolution is bounded by `rollup_granularity`, the bucket width, a real and stated number rather than the absence of one.
 
 ## Scope
 
