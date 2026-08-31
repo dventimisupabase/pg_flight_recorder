@@ -12,6 +12,12 @@
 CREATE OR REPLACE FUNCTION pgfr_record.health_check()
 RETURNS TABLE(check_name text, status text, detail text)
 LANGUAGE plpgsql STABLE AS $$
+DECLARE
+    v_rollup          record;
+    v_rollup_unit     text;
+    v_last_closed     timestamptz;
+    v_rollup_ok       boolean;
+    v_rollup_has_data boolean;
 BEGIN
     -- Tier + maintenance jobs scheduled and active.
     RETURN QUERY
@@ -89,8 +95,50 @@ BEGIN
         JOIN pg_class parent ON parent.oid = i.inhparent
         WHERE parent.relname = t.parent_table
     ) c;
+
+    -- Rollup lag (milestone 8): for every rollup-enabled target, does the
+    -- most recently closed bucket have a row yet -- but only when that
+    -- bucket actually has raw data to roll up. Without that guard, a
+    -- brand-new install would report "attention" for every rollup target
+    -- on day one: yesterday's bucket has neither a rollup row nor any raw
+    -- data (the install didn't exist yesterday), which is correctly
+    -- nothing to do, not a lagging collector -- the same "empty candidate
+    -- is not a problem" distinction run_tier()'s own bucket-close step
+    -- already makes. A gap where raw data *does* exist means either the
+    -- collector hasn't ticked since that bucket closed, or its
+    -- bucket-close step is genuinely failing (see run_tier()'s RAISE
+    -- WARNING) -- either way, a structural fact worth surfacing, not an
+    -- opinion about whether it matters (that judgment is pgfr_analyze's).
+    -- Needs per-target dynamic SQL (unlike the partition check above,
+    -- there is no generic catalog view that answers "does this specific
+    -- table have a row for this bucket"), so this is a loop, not a single
+    -- RETURN QUERY SELECT like every other check here.
+    FOR v_rollup IN
+        SELECT DISTINCT source_view, archive_table, rollup_table, rollup_granularity
+        FROM pgfr_record.capture_plan
+        WHERE rollup_table IS NOT NULL
+    LOOP
+        v_rollup_unit := pgfr_record._partition_unit(v_rollup.rollup_granularity);
+        v_last_closed := date_trunc(v_rollup_unit, clock_timestamp()) - v_rollup.rollup_granularity;
+        EXECUTE format(
+            'SELECT EXISTS (SELECT 1 FROM pgfr_record.%I WHERE bucket_start = $1),
+                    EXISTS (SELECT 1 FROM pgfr_record.%I WHERE captured_at >= $1 AND captured_at < $1 + $2::interval)',
+            v_rollup.rollup_table, v_rollup.archive_table
+        )
+        INTO v_rollup_ok, v_rollup_has_data
+        USING v_last_closed, v_rollup.rollup_granularity;
+
+        check_name := 'rollup: ' || v_rollup.source_view;
+        status := CASE WHEN v_rollup_ok OR NOT v_rollup_has_data THEN 'ok' ELSE 'attention' END;
+        detail := CASE
+            WHEN v_rollup_ok THEN format('most recently closed bucket (%s) is rolled up', v_last_closed)
+            WHEN NOT v_rollup_has_data THEN format('most recently closed bucket (%s) has no raw data to roll up', v_last_closed)
+            ELSE format('most recently closed bucket (%s) has raw data but is not rolled up yet', v_last_closed)
+        END;
+        RETURN NEXT;
+    END LOOP;
 END;
 $$;
 
 COMMENT ON FUNCTION pgfr_record.health_check() IS
-    'pg_cron jobs active per tier, last capture per tier, ledger miss rate (1h), and partition-maintenance status (§9). Read-only and threshold-free in the judgmental sense -- every check is against a fixed structural fact (is a job scheduled, is a partition still attached past retention), never an opinion; opinions are pgfr_analyze''s job.';
+    'pg_cron jobs active per tier, last capture per tier, ledger miss rate (1h), partition-maintenance status (§9), and rollup lag per rollup-enabled target (milestone 8). Read-only and threshold-free in the judgmental sense -- every check is against a fixed structural fact (is a job scheduled, is a partition still attached past retention, does the most recently closed bucket have a rollup row), never an opinion; opinions are pgfr_analyze''s job.';
