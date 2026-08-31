@@ -82,6 +82,10 @@ DECLARE
     v_sql               text;
     v_rows              int;
     v_orig_lock_timeout text := current_setting('lock_timeout');
+    -- Rollup bucket-close (milestone 8).
+    v_rollup_unit        text;
+    v_missing_sql        text;
+    v_rollup_bucket      timestamptz;
 BEGIN
     v_run_id := nextval(pg_get_serial_sequence('pgfr_record.ledger_runs', 'run_id'));
 
@@ -166,6 +170,55 @@ BEGIN
                 INSERT INTO pgfr_record.ledger_captures (run_id, source_view, outcome, detail, captured_at, elapsed)
                 VALUES (v_run_id, v_target.source_view, 'error', SQLERRM, v_t0, clock_timestamp() - v_started_at);
         END;
+
+        -- Rollup bucket-close (milestone 8): a second, sibling subtransaction
+        -- from the raw capture above, not nested inside it -- the raw
+        -- capture's BEGIN...EXCEPTION block has already completed and
+        -- released its own subtransaction by this point, so a failure here
+        -- can never roll back an already-succeeded raw capture. No ledger
+        -- row either way (§8.2's append-only ledger governs the *record*;
+        -- see the comment on health_check() for how rollup lag is surfaced
+        -- instead): a bucket-close failure just gets retried on the next
+        -- tick, the same self-healing posture as anchor detection and
+        -- partition-detach retry.
+        --
+        -- Self-healing over a bounded range, not just "the bucket
+        -- immediately before now": every closed bucket between the oldest
+        -- one still covered by this target's own raw retention and the
+        -- most recently closed one, that (a) has no rollup row yet and
+        -- (b) has at least one raw row to aggregate (an empty candidate is
+        -- left alone rather than recorded as a spurious "zero observed" --
+        -- see 16_rollups.sql's header for why that distinction matters for
+        -- the stat shape). A gap wider than retention simply falls outside
+        -- this range and is silently, correctly abandoned: its source data
+        -- is already gone, so there is nothing left to recover.
+        IF v_target.rollup_table IS NOT NULL THEN
+            BEGIN
+                v_rollup_unit := pgfr_record._partition_unit(v_target.rollup_granularity);
+                v_missing_sql := format(
+                    'SELECT gs FROM generate_series(%L::timestamptz, %L::timestamptz, %L::interval) gs
+                     WHERE NOT EXISTS (SELECT 1 FROM pgfr_record.%I r WHERE r.bucket_start = gs)
+                       AND EXISTS (SELECT 1 FROM pgfr_record.%I a WHERE a.captured_at >= gs AND a.captured_at < gs + %L::interval)',
+                    date_trunc(v_rollup_unit, v_t0 - v_target.retention),
+                    date_trunc(v_rollup_unit, v_t0) - v_target.rollup_granularity,
+                    v_target.rollup_granularity,
+                    v_target.rollup_table,
+                    v_target.archive_table,
+                    v_target.rollup_granularity
+                );
+                FOR v_rollup_bucket IN EXECUTE v_missing_sql LOOP
+                    BEGIN
+                        EXECUTE v_target.rollup_close_sql USING v_rollup_bucket, v_rollup_bucket + v_target.rollup_granularity;
+                    EXCEPTION WHEN others THEN
+                        -- One bad bucket must not stop the catch-up loop
+                        -- from attempting the others in this same run.
+                        RAISE WARNING 'pgfr_record.run_tier: rollup close failed for % bucket %: %', v_target.source_view, v_rollup_bucket, SQLERRM;
+                    END;
+                END LOOP;
+            EXCEPTION WHEN others THEN
+                RAISE WARNING 'pgfr_record.run_tier: rollup bucket scan failed for %: %', v_target.source_view, SQLERRM;
+            END;
+        END IF;
     END LOOP;
 
     -- SET LOCAL only auto-reverts on a subtransaction's own rollback (the
@@ -187,4 +240,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION pgfr_record.run_tier(text, interval, interval) IS
-    'Runs one tier''s capture_plan targets under one shared captured_at (§5). Each target executes in its own EXCEPTION block (ok/timeout/lock_timeout/denied/error), recorded in ledger_captures; one target''s failure cannot fail the tier. lock_timeout is a real per-target bound; job_timeout is enforced cooperatively here (stops further targets from starting) and, when dispatched via apply_profile()''s two-statement cron command, preemptively by the caller''s own statement_timeout -- see the comment atop this file for why a per-target statement_timeout could not be implemented directly.';
+    'Runs one tier''s capture_plan targets under one shared captured_at (§5). Each target executes in its own EXCEPTION block (ok/timeout/lock_timeout/denied/error), recorded in ledger_captures; one target''s failure cannot fail the tier. lock_timeout is a real per-target bound; job_timeout is enforced cooperatively here (stops further targets from starting) and, when dispatched via apply_profile()''s two-statement cron command, preemptively by the caller''s own statement_timeout -- see the comment atop this file for why a per-target statement_timeout could not be implemented directly. For a target with a rollup (milestone 8), also closes every eligible bucket since the last successful close, in its own subtransaction separate from the raw capture -- see the comment above that step for the self-healing range and why it is not ledger-visible.';
