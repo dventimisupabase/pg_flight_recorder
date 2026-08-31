@@ -32,6 +32,8 @@
 --   13_profiles.sql          profiles, profile_tiers, apply_profile()
 --   14_enable.sql            enable() / disable()
 --   15_health_check.sql      health_check()
+--   16_rollups.sql           generate_rollups(): long-horizon compressed
+--                            history for Groups B/C (milestone 8)
 
 \ir sql/01_schema.sql
 \ir sql/02_manifest.sql
@@ -48,16 +50,25 @@
 \ir sql/13_profiles.sql
 \ir sql/14_enable.sql
 \ir sql/15_health_check.sql
+\ir sql/16_rollups.sql
 
 -- Create every enabled target's archive table + initial partitions,
--- regenerate the typed presentation views, rebuild the capture plan,
--- reclassify every column, and regenerate every comment -- all against
--- this server's live catalog. Safe to re-run (§7): this is also the
--- post-major-upgrade procedure.
+-- regenerate the typed presentation views, reclassify every column,
+-- create every rollup table, rebuild the capture plan, and regenerate
+-- every comment -- all against this server's live catalog. Safe to
+-- re-run (§7): this is also the post-major-upgrade procedure.
+--
+-- generate_column_classes() must run before generate_capture_plan() and
+-- generate_rollups(): both of the latter need to know which columns are
+-- counters/odometers (generate_rollups(), to choose a rollup shape) or
+-- just want a stable, already-classified target (generate_capture_plan()
+-- has no such dependency today, but ordering it after costs nothing and
+-- keeps one dependency direction instead of two).
 SELECT pgfr_record.generate_archives();
 SELECT pgfr_record.generate_presentation_views();
-SELECT pgfr_record.generate_capture_plan();
 SELECT pgfr_record.generate_column_classes();
+SELECT pgfr_record.generate_rollups();
+SELECT pgfr_record.generate_capture_plan();
 SELECT pgfr_record.generate_comments();
 
 -- Schedule all pg_cron jobs via the single source of truth (enable()).

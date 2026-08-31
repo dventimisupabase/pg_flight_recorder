@@ -37,10 +37,13 @@ COMMENT ON FUNCTION pgfr_record._partition_unit(interval) IS 'retention <= 6h ->
 -- retention and logged flag. The single source maintain_partitions()
 -- iterates: the two ledger tables (fixed 30d retention -- see 04_ledger.sql)
 -- plus one row per enabled, version-applicable manifest entry whose archive
--- table has already been created by generate_archives(). to_regclass
--- returns NULL (rather than erroring) for archive tables not yet created,
--- so this function is safe to call before generate_archives() has run for
--- every row.
+-- table has already been created by generate_archives(), plus one row per
+-- rollup table already created by generate_rollups() (milestone 8) -- a
+-- rollup's own retention is rollup_retention, not retention (the raw
+-- window it aggregates from), so it gets its own partition-drop timeline,
+-- through the exact same mechanism. to_regclass returns NULL (rather than
+-- erroring) for a table not yet created, so this function is safe to call
+-- before generate_archives()/generate_rollups() has run for every row.
 CREATE OR REPLACE FUNCTION pgfr_record._partition_targets()
 RETURNS TABLE(parent_table text, retention interval, logged boolean)
 LANGUAGE sql STABLE AS $$
@@ -53,9 +56,17 @@ LANGUAGE sql STABLE AS $$
     WHERE m.enabled
       AND m.min_major <= pgfr_record._current_major()
       AND pgfr_record._current_major() <= coalesce(m.max_major, 999)
-      AND to_regclass('pgfr_record.a_' || pgfr_record._short_name(m.source_view)) IS NOT NULL;
+      AND to_regclass('pgfr_record.a_' || pgfr_record._short_name(m.source_view)) IS NOT NULL
+    UNION ALL
+    SELECT 'r_' || pgfr_record._short_name(m.source_view), m.rollup_retention, m.logged
+    FROM pgfr_record.manifest m
+    WHERE m.enabled
+      AND m.rollup_retention IS NOT NULL
+      AND m.min_major <= pgfr_record._current_major()
+      AND pgfr_record._current_major() <= coalesce(m.max_major, 999)
+      AND to_regclass('pgfr_record.r_' || pgfr_record._short_name(m.source_view)) IS NOT NULL;
 $$;
-COMMENT ON FUNCTION pgfr_record._partition_targets() IS 'Every pgfr-owned partitioned parent (ledger tables + created archive tables) with its retention and logged flag; the input to maintain_partitions().';
+COMMENT ON FUNCTION pgfr_record._partition_targets() IS 'Every pgfr-owned partitioned parent (ledger tables + created archive tables + created rollup tables) with its retention and logged flag; the input to maintain_partitions().';
 
 -- Deterministic partition naming lets maintain_partitions() recover a
 -- child's lower bound from its name alone, so it never has to parse
