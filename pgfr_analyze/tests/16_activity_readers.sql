@@ -20,14 +20,14 @@ SELECT lives_ok($$SELECT pgfr_record.run_tier('fast')$$, 'run_tier(''fast'') sho
 SELECT clock_timestamp() AS t_ref \gset ref_
 SELECT set_config('pgfr_test.t_ref', :'ref_t_ref', true);
 
--- Group A (pg_stat_archiver) is daily-partitioned; ensure a possible-
--- yesterday partition exists for the backdated point.
+-- Group A (pg_stat_archiver) is monthly-partitioned; ensure a possible-
+-- previous-month partition exists for the backdated point.
 DO $do$
 DECLARE
     v_point timestamptz := current_setting('pgfr_test.t_ref')::timestamptz - interval '10 minutes';
-    v_lower timestamptz := date_trunc('day', v_point);
-    v_upper timestamptz := v_lower + interval '1 day';
-    v_child text := pgfr_record._partition_child_name('a_pg_stat_archiver', v_lower, 'day');
+    v_lower timestamptz := date_trunc('month', v_point);
+    v_upper timestamptz := v_lower + interval '1 month';
+    v_child text := pgfr_record._partition_child_name('a_pg_stat_archiver', v_lower, 'month');
 BEGIN
     IF to_regclass('pgfr_record.' || v_child) IS NULL THEN
         EXECUTE format('CREATE TABLE pgfr_record.%I PARTITION OF pgfr_record.a_pg_stat_archiver FOR VALUES FROM (%L) TO (%L)', v_child, v_lower, v_upper);

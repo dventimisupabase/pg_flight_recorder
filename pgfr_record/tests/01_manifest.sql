@@ -80,8 +80,8 @@ SELECT is(
 -- ---------------------------------------------------------------------------
 SELECT results_eq(
     $$SELECT cadence_tier, retention, size_class FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_stat_database'$$,
-    $$VALUES ('fast'::text, interval '30 days', 'per_db'::text)$$,
-    'pg_stat_database (Group A) should carry fast/30d/per_db'
+    $$VALUES ('fast'::text, interval '365 days', 'per_db'::text)$$,
+    'pg_stat_database (Group A) should carry fast/365d/per_db'
 );
 SELECT results_eq(
     $$SELECT debounce, anchor_every, retention, compare_ignore FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_stat_all_tables'$$,
@@ -119,13 +119,13 @@ SELECT is(
 );
 SELECT results_eq(
     $$SELECT natural_key, retention, size_class FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_stat_replication_slots'$$,
-    $$VALUES (ARRAY['slot_name'], interval '30 days', 'per_slot'::text)$$,
-    'pg_stat_replication_slots (Group A addition) should be keyed by slot_name with 30d retention'
+    $$VALUES (ARRAY['slot_name'], interval '365 days', 'per_slot'::text)$$,
+    'pg_stat_replication_slots (Group A addition) should be keyed by slot_name with 365d retention'
 );
 SELECT results_eq(
     $$SELECT natural_key, retention, size_class FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_stat_subscription_stats'$$,
-    $$VALUES (ARRAY['subid'], interval '30 days', 'per_slot'::text)$$,
-    'pg_stat_subscription_stats (Group A addition) should be keyed by subid with 30d retention'
+    $$VALUES (ARRAY['subid'], interval '365 days', 'per_slot'::text)$$,
+    'pg_stat_subscription_stats (Group A addition) should be keyed by subid with 365d retention'
 );
 SELECT results_eq(
     $$SELECT natural_key, retention, size_class FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_stat_ssl'$$,

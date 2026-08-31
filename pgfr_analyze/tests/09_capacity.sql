@@ -18,23 +18,23 @@ SELECT set_config('pgfr_test.t_ref', :'ref_t_ref', true);
 
 -- ---------------------------------------------------------------------------
 -- Every deltas()-based check below inserts a row-pair at t_ref - 10 minutes
--- and t_ref; if the test happens to run in the first 10 minutes after
--- midnight, t_ref - 10 minutes falls in yesterday's (not-yet-existing)
--- partition instead of today's. Ensure it exists for every Group A table
--- this file backdates into.
+-- and t_ref; if the test happens to run in the first 10 minutes after the
+-- start of a month, t_ref - 10 minutes falls in the previous month's
+-- (not-yet-existing) partition instead of the current one. Ensure it exists
+-- for every Group A table this file backdates into.
 -- ---------------------------------------------------------------------------
 DO $do$
 DECLARE
     v_point timestamptz := current_setting('pgfr_test.t_ref')::timestamptz - interval '10 minutes';
-    v_lower timestamptz := date_trunc('day', v_point);
-    v_upper timestamptz := v_lower + interval '1 day';
+    v_lower timestamptz := date_trunc('month', v_point);
+    v_upper timestamptz := v_lower + interval '1 month';
     v_table text;
     v_child text;
 BEGIN
     FOREACH v_table IN ARRAY ARRAY['a_pg_stat_bgwriter', 'a_pg_stat_checkpointer', 'a_pg_stat_io', 'a_pg_stat_database']
     LOOP
         IF to_regclass('pgfr_record.' || v_table) IS NOT NULL THEN
-            v_child := pgfr_record._partition_child_name(v_table, v_lower, 'day');
+            v_child := pgfr_record._partition_child_name(v_table, v_lower, 'month');
             IF to_regclass('pgfr_record.' || v_child) IS NULL THEN
                 EXECUTE format('CREATE TABLE pgfr_record.%I PARTITION OF pgfr_record.%I FOR VALUES FROM (%L) TO (%L)', v_child, v_table, v_lower, v_upper);
             END IF;

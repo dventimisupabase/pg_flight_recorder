@@ -11,23 +11,28 @@
 -- are noted inline rather than treated as a design question.
 
 -- ---------------------------------------------------------------------------
--- Group A -- cumulative counters, singleton / per-db. fast tier, 30d
--- retention, debounce = false (cheap, always changing, every sample wanted).
+-- Group A -- cumulative counters, singleton / per-db. fast tier, 365d
+-- retention, debounce = false (cheap, always changing, every sample
+-- wanted). Retention is 365d directly, not a rollup: Group A is bounded
+-- and small (singleton/per-db cardinality) even at a year's depth, so
+-- there is no compression problem here to solve -- unlike Group B, the
+-- cost-model frontier, milestone 8 gives Group A the same long horizon as
+-- Group D for free rather than building rollup machinery it doesn't need.
 -- ---------------------------------------------------------------------------
 INSERT INTO pgfr_record.manifest
     (source_view, cadence_tier, natural_key, retention, size_class, notes)
 VALUES
-    ('pg_catalog.pg_stat_archiver', 'fast', '{}', interval '30 days', 'singleton',
+    ('pg_catalog.pg_stat_archiver', 'fast', '{}', interval '365 days', 'singleton',
      'reset: stats_reset'),
-    ('pg_catalog.pg_stat_bgwriter', 'fast', '{}', interval '30 days', 'singleton',
+    ('pg_catalog.pg_stat_bgwriter', 'fast', '{}', interval '365 days', 'singleton',
      'reset: stats_reset. PG17 removes checkpoint columns (moved to pg_stat_checkpointer); agnostic capture absorbs'),
-    ('pg_catalog.pg_stat_wal', 'fast', '{}', interval '30 days', 'singleton',
+    ('pg_catalog.pg_stat_wal', 'fast', '{}', interval '365 days', 'singleton',
      'reset: stats_reset'),
-    ('pg_catalog.pg_stat_slru', 'fast', ARRAY['name'], interval '30 days', 'singleton',
+    ('pg_catalog.pg_stat_slru', 'fast', ARRAY['name'], interval '365 days', 'singleton',
      'per-cache row set, bounded/small cardinality -- closest fit is singleton; reset: stats_reset'),
-    ('pg_catalog.pg_stat_database', 'fast', ARRAY['datid'], interval '30 days', 'per_db',
+    ('pg_catalog.pg_stat_database', 'fast', ARRAY['datid'], interval '365 days', 'per_db',
      'includes datid=0 shared-objects row; reset: stats_reset'),
-    ('pg_catalog.pg_stat_database_conflicts', 'fast', ARRAY['datid'], interval '30 days', 'per_db',
+    ('pg_catalog.pg_stat_database_conflicts', 'fast', ARRAY['datid'], interval '365 days', 'per_db',
      'nonzero only on standbys')
 ON CONFLICT (source_view) DO NOTHING;
 
@@ -36,9 +41,9 @@ ON CONFLICT (source_view) DO NOTHING;
 INSERT INTO pgfr_record.manifest
     (source_view, min_major, cadence_tier, natural_key, retention, size_class, notes)
 VALUES
-    ('pg_catalog.pg_stat_io', 16, 'fast', ARRAY['backend_type','object','context'], interval '30 days', 'singleton',
+    ('pg_catalog.pg_stat_io', 16, 'fast', ARRAY['backend_type','object','context'], interval '365 days', 'singleton',
      'the single most valuable addition in the series; bounded/small cardinality -- closest fit is singleton'),
-    ('pg_catalog.pg_stat_checkpointer', 17, 'fast', '{}', interval '30 days', 'singleton',
+    ('pg_catalog.pg_stat_checkpointer', 17, 'fast', '{}', interval '365 days', 'singleton',
      'receives the columns split out of pg_stat_bgwriter')
 ON CONFLICT (source_view) DO NOTHING;
 
@@ -49,9 +54,9 @@ ON CONFLICT (source_view) DO NOTHING;
 INSERT INTO pgfr_record.manifest
     (source_view, cadence_tier, natural_key, retention, size_class, notes)
 VALUES
-    ('pg_catalog.pg_stat_replication_slots', 'fast', ARRAY['slot_name'], interval '30 days', 'per_slot',
+    ('pg_catalog.pg_stat_replication_slots', 'fast', ARRAY['slot_name'], interval '365 days', 'per_slot',
      'logical-decoding spill/stream byte and txn counters, distinct from pg_replication_slots'' LSN/config columns (Group C); reset: stats_reset'),
-    ('pg_catalog.pg_stat_subscription_stats', 'fast', ARRAY['subid'], interval '30 days', 'per_slot',
+    ('pg_catalog.pg_stat_subscription_stats', 'fast', ARRAY['subid'], interval '365 days', 'per_slot',
      'apply/sync error counts, distinct from pg_stat_subscription''s worker pid/lag columns (Group C); reset: stats_reset')
 ON CONFLICT (source_view) DO NOTHING;
 
@@ -61,24 +66,37 @@ ON CONFLICT (source_view) DO NOTHING;
 -- retention 30d. size_class is per_relation for all rows below as the
 -- closest fit; pg_stat_statements(_info) actually scale with distinct
 -- queries, not relations, but no better-fitting class exists in §3.1.
+--
+-- rollup_retention/rollup_granularity (milestone 8): 365d at 1-day
+-- buckets. Group B is the cost-model frontier (§10.2), so raw retention
+-- stays 30d; the rollup is mechanical (first/last value per counter/
+-- odometer column per bucket, derived from column_classes, not hand-
+-- seeded) and gives a year of correlatable history at a fraction of raw
+-- storage. See generate_rollups().
 -- ---------------------------------------------------------------------------
 INSERT INTO pgfr_record.manifest
-    (source_view, cadence_tier, natural_key, debounce, compare_ignore, anchor_every, retention, size_class, requires, notes)
+    (source_view, cadence_tier, natural_key, debounce, compare_ignore, anchor_every, retention, size_class, requires, notes, rollup_retention, rollup_granularity)
 VALUES
     ('pg_catalog.pg_stat_all_tables', 'medium', ARRAY['relid'], true,
      ARRAY['n_live_tup','n_dead_tup','n_mod_since_analyze','n_ins_since_vacuum'],
      interval '1 day', interval '30 days', 'per_relation', NULL,
-     'ignore-list prevents estimator churn from defeating debounce; ignored columns are still stored'),
+     'ignore-list prevents estimator churn from defeating debounce; ignored columns are still stored',
+     interval '365 days', interval '1 day'),
     ('pg_catalog.pg_stat_all_indexes', 'medium', ARRAY['indexrelid'], true,
-     '{}', interval '1 day', interval '30 days', 'per_relation', NULL, NULL),
+     '{}', interval '1 day', interval '30 days', 'per_relation', NULL, NULL,
+     interval '365 days', interval '1 day'),
     ('pg_catalog.pg_statio_all_tables', 'slow', ARRAY['relid'], true,
-     '{}', interval '1 day', interval '30 days', 'per_relation', NULL, NULL),
+     '{}', interval '1 day', interval '30 days', 'per_relation', NULL, NULL,
+     interval '365 days', interval '1 day'),
     ('pg_catalog.pg_statio_all_indexes', 'slow', ARRAY['indexrelid'], true,
-     '{}', interval '1 day', interval '30 days', 'per_relation', NULL, NULL),
+     '{}', interval '1 day', interval '30 days', 'per_relation', NULL, NULL,
+     interval '365 days', interval '1 day'),
     ('pg_catalog.pg_statio_all_sequences', 'slow', ARRAY['relid'], true,
-     '{}', interval '1 day', interval '30 days', 'per_relation', NULL, NULL),
+     '{}', interval '1 day', interval '30 days', 'per_relation', NULL, NULL,
+     interval '365 days', interval '1 day'),
     ('pg_catalog.pg_stat_user_functions', 'medium', ARRAY['funcid'], true,
-     '{}', interval '1 day', interval '30 days', 'per_relation', 'GUC track_functions <> none', NULL),
+     '{}', interval '1 day', interval '30 days', 'per_relation', 'GUC track_functions <> none', NULL,
+     interval '365 days', interval '1 day'),
     -- Unqualified on purpose: pg_stat_statements is an extension-provided
     -- view, not a pg_catalog builtin. CREATE EXTENSION installs it into
     -- whichever schema was current at the time (public on stock
@@ -88,10 +106,12 @@ VALUES
     -- an extension-provided object.
     ('pg_stat_statements', 'medium', ARRAY['userid','dbid','queryid','toplevel'], true,
      '{}', interval '1 day', interval '30 days', 'per_relation', 'pg_stat_statements extension',
-     'dict: query (analyze-side dictionary over queryid -> text). Reset via pg_stat_statements_info.stats_reset. Eviction-aware: a vanished queryid is eviction, not reset.'),
+     'dict: query (analyze-side dictionary over queryid -> text). Reset via pg_stat_statements_info.stats_reset. Eviction-aware: a vanished queryid is eviction, not reset.',
+     interval '365 days', interval '1 day'),
     ('pg_stat_statements_info', 'fast', '{}', false,
      '{}', NULL, interval '30 days', 'per_relation', 'pg_stat_statements extension',
-     'singleton companion to pg_stat_statements; carries the reset signal (stats_reset) that distinguishes a real reset from per-query eviction')
+     'singleton companion to pg_stat_statements; carries the reset signal (stats_reset) that distinguishes a real reset from per-query eviction',
+     interval '365 days', interval '1 day')
 ON CONFLICT (source_view) DO NOTHING;
 
 -- Group B addition, seeded after the initial v2 rewrite (additive, per
@@ -102,53 +122,103 @@ ON CONFLICT (source_view) DO NOTHING;
 -- relid/indexrelid-keyed Group B target, identity here does not survive a
 -- DROP/CREATE or rename via src_catalog_identity.
 INSERT INTO pgfr_record.manifest
-    (source_view, cadence_tier, natural_key, debounce, compare_ignore, anchor_every, retention, size_class, requires, notes)
+    (source_view, cadence_tier, natural_key, debounce, compare_ignore, anchor_every, retention, size_class, requires, notes, rollup_retention, rollup_granularity)
 VALUES
     ('pg_catalog.pg_sequences', 'medium', ARRAY['schemaname','sequencename'], true,
      '{}', interval '1 day', interval '30 days', 'per_relation', NULL,
-     'last_value is NULL without USAGE/SELECT on the sequence; start_value/increment_by/cache_size are fixed config, not cumulative')
+     'last_value is NULL without USAGE/SELECT on the sequence; start_value/increment_by/cache_size are fixed config, not cumulative',
+     interval '365 days', interval '1 day')
 ON CONFLICT (source_view) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
 -- Group C -- gauges. fast tier, 2h retention (this is the v1 ring,
 -- expressed as a retention number), debounce = false.
+--
+-- rollup_retention/rollup_granularity (milestone 8): 365d at 1-hour
+-- buckets -- comfortably inside the 2h raw retention, so a bucket always
+-- closes while its source rows still exist. Unlike Group B, a Group C
+-- rollup is not mechanical (a gauge has no single correct "delta"); it
+-- aggregates the hand-seeded statistics in pgfr_record.rollup_specs, below.
+-- Set only on targets that have rollup_specs rows -- a rollup_retention
+-- with nothing to aggregate would be dead weight. pg_stat_wal_receiver and
+-- the pg_stat_progress_* views are deferred (standby-only / rare and
+-- bursty; candidates for a later rollup_specs addition, same maintenance
+-- posture as column_classes' override list).
 -- ---------------------------------------------------------------------------
 INSERT INTO pgfr_record.manifest
-    (source_view, cadence_tier, natural_key, keyless, retention, size_class, notes)
+    (source_view, cadence_tier, natural_key, keyless, retention, size_class, notes, rollup_retention, rollup_granularity)
 VALUES
     ('pg_catalog.pg_stat_activity', 'fast', ARRAY['pid','backend_start'], false, interval '2 hours', 'per_backend',
-     'backend_start disambiguates pid reuse; dict: query (analyze-side)'),
+     'backend_start disambiguates pid reuse; dict: query (analyze-side)',
+     interval '365 days', interval '1 hour'),
     ('pg_catalog.pg_locks', 'fast', '{}', true, interval '2 hours', 'per_backend',
-     'no stable identity; join to activity via pid at equal captured_at (exact -- single-stamp rule, §5)'),
+     'no stable identity; join to activity via pid at equal captured_at (exact -- single-stamp rule, §5)',
+     interval '365 days', interval '1 hour'),
     ('pg_catalog.pg_stat_replication', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_slot',
-     'odometers: sent_lsn, write_lsn, flush_lsn, replay_lsn'),
+     'odometers: sent_lsn, write_lsn, flush_lsn, replay_lsn',
+     interval '365 days', interval '1 hour'),
     ('pg_catalog.pg_stat_wal_receiver', 'fast', '{}', false, interval '2 hours', 'singleton',
-     'standby-side; odometers on received LSNs'),
-    ('pg_catalog.pg_stat_subscription', 'fast', ARRAY['subid'], false, interval '2 hours', 'per_slot', NULL),
+     'standby-side; odometers on received LSNs', NULL, NULL),
+    ('pg_catalog.pg_stat_subscription', 'fast', ARRAY['subid'], false, interval '2 hours', 'per_slot', NULL,
+     interval '365 days', interval '1 hour'),
     ('pg_catalog.pg_replication_slots', 'fast', ARRAY['slot_name'], false, interval '2 hours', 'per_slot',
-     'odometers: restart_lsn, confirmed_flush_lsn; failure to advance is the alarm (analyze-side)'),
+     'odometers: restart_lsn, confirmed_flush_lsn; failure to advance is the alarm (analyze-side)',
+     interval '365 days', interval '1 hour'),
     ('pg_catalog.pg_prepared_xacts', 'fast', ARRAY['gid'], false, interval '2 hours', 'singleton',
-     'usually empty; an aging row is itself an anomaly'),
+     'usually empty; an aging row is itself an anomaly',
+     interval '365 days', interval '1 hour'),
     ('pg_catalog.pg_stat_progress_vacuum', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend',
-     'default-on: empty view costs one SELECT'),
-    ('pg_catalog.pg_stat_progress_cluster', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on'),
-    ('pg_catalog.pg_stat_progress_create_index', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on'),
-    ('pg_catalog.pg_stat_progress_basebackup', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on'),
-    ('pg_catalog.pg_stat_progress_analyze', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on'),
-    ('pg_catalog.pg_stat_progress_copy', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on')
+     'default-on: empty view costs one SELECT', NULL, NULL),
+    ('pg_catalog.pg_stat_progress_cluster', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on', NULL, NULL),
+    ('pg_catalog.pg_stat_progress_create_index', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on', NULL, NULL),
+    ('pg_catalog.pg_stat_progress_basebackup', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on', NULL, NULL),
+    ('pg_catalog.pg_stat_progress_analyze', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on', NULL, NULL),
+    ('pg_catalog.pg_stat_progress_copy', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on', NULL, NULL)
 ON CONFLICT (source_view) DO NOTHING;
 
 -- Group C addition, seeded after the initial v2 rewrite (additive, per
 -- schema evolution policy): per-connection TLS/GSSAPI info, gauge-like and
 -- per-backend exactly like pg_stat_activity, no debounce.
 INSERT INTO pgfr_record.manifest
-    (source_view, cadence_tier, natural_key, retention, size_class, notes)
+    (source_view, cadence_tier, natural_key, retention, size_class, notes, rollup_retention, rollup_granularity)
 VALUES
     ('pg_catalog.pg_stat_ssl', 'fast', ARRAY['pid'], interval '2 hours', 'per_backend',
-     'one row per connection, regular and replication alike'),
+     'one row per connection, regular and replication alike',
+     interval '365 days', interval '1 hour'),
     ('pg_catalog.pg_stat_gssapi', 'fast', ARRAY['pid'], interval '2 hours', 'per_backend',
-     'one row per connection, regular and replication alike')
+     'one row per connection, regular and replication alike',
+     interval '365 days', interval '1 hour')
 ON CONFLICT (source_view) DO NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- Rollup specs (milestone 8): the hand-seeded, threshold-free statistics
+-- for the Group C targets above that carry a rollup_retention. See the
+-- comment on pgfr_record.rollup_specs (02_manifest.sql) for why these are
+-- deliberately not threshold-based (that judgment is pgfr_analyze's, at
+-- read time, against the stored continuous value here).
+-- ---------------------------------------------------------------------------
+INSERT INTO pgfr_record.rollup_specs
+    (source_view, stat_name, agg, value_expr, predicate_sql)
+VALUES
+    ('pg_catalog.pg_stat_activity', 'idle_in_xact_max_duration', 'max',
+     'captured_at - xact_start', $$state = 'idle in transaction'$$),
+    ('pg_catalog.pg_stat_activity', 'lock_wait_max_duration', 'max',
+     'captured_at - query_start', $$wait_event_type = 'Lock'$$),
+    ('pg_catalog.pg_locks', 'blocked_sample_count', 'count',
+     '1', 'granted = false'),
+    ('pg_catalog.pg_stat_replication', 'non_streaming_sample_count', 'count',
+     '1', $$state <> 'streaming'$$),
+    ('pg_catalog.pg_stat_subscription', 'disconnected_sample_count', 'count',
+     '1', 'pid IS NULL'),
+    ('pg_catalog.pg_replication_slots', 'inactive_sample_count', 'count',
+     '1', 'active = false'),
+    ('pg_catalog.pg_prepared_xacts', 'prepared_max_age', 'max',
+     'captured_at - prepared', NULL),
+    ('pg_catalog.pg_stat_ssl', 'unencrypted_sample_count', 'count',
+     '1', 'ssl = false'),
+    ('pg_catalog.pg_stat_gssapi', 'unencrypted_sample_count', 'count',
+     '1', 'encrypted = false')
+ON CONFLICT (source_view, stat_name) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
 -- Group D -- state history. on_change tier, debounce = true,

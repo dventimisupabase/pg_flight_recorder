@@ -42,6 +42,24 @@ COMMENT ON COLUMN pgfr_record.manifest.requires IS 'Precondition for full visibi
 COMMENT ON COLUMN pgfr_record.manifest.enabled IS 'False rows are still listed (with notes) so "why doesn''t pgfr capture X" is queryable, but get no archive table or capture-plan entry.';
 COMMENT ON COLUMN pgfr_record.manifest.notes IS 'Free-text design rationale for this row.';
 
+-- Rollups (milestone 8): long-horizon, compressed history for targets
+-- whose raw retention is too short to correlate against Group D's 365d
+-- config-change history. Added via ALTER, not the CREATE TABLE above, per
+-- the additive-only schema-evolution policy -- re-running install.sql is
+-- the upgrade path for an already-installed manifest table.
+ALTER TABLE pgfr_record.manifest
+  ADD COLUMN IF NOT EXISTS rollup_retention   interval,
+  ADD COLUMN IF NOT EXISTS rollup_granularity interval;
+
+ALTER TABLE pgfr_record.manifest DROP CONSTRAINT IF EXISTS rollup_shape;
+ALTER TABLE pgfr_record.manifest
+  ADD CONSTRAINT rollup_shape
+  CHECK (rollup_retention IS NULL
+         OR (rollup_granularity IS NOT NULL AND rollup_granularity < retention));
+
+COMMENT ON COLUMN pgfr_record.manifest.rollup_retention IS 'How long compressed rollup rows are kept, independent of retention (the raw window). NULL means this target has no rollup. Implemented as partition drop, same mechanism as retention.';
+COMMENT ON COLUMN pgfr_record.manifest.rollup_granularity IS 'Bucket width for this target''s rollup (e.g. 1 day). Must be strictly less than retention: a bucket can only be closed by aggregating raw rows that are still guaranteed to exist.';
+
 -- Column-class legend: the taxonomy pgfr_record stores and describes but
 -- never judges with (that boundary is the agent test, §1 invariant 2).
 -- Seeded in milestone 4, not here; the table exists now because
@@ -58,6 +76,34 @@ CREATE TABLE IF NOT EXISTS pgfr_record.column_classes (
 COMMENT ON TABLE pgfr_record.column_classes IS
     'Legend mapping each source_view column to its class: counter (monotone, resettable), odometer (monotone, non-resettable, e.g. LSNs/XIDs), gauge (point-in-time), label (identity/dimension). Consumed by definitional helpers (deltas()) and by pgfr_analyze; owned only here.';
 COMMENT ON COLUMN pgfr_record.column_classes.reset_column IS 'Name of the column (in the same source_view) whose advance signals a reset for this counter, when applicable.';
+
+-- Rollup specs (milestone 8): hand-seeded, Group C (gauge) targets only.
+-- A gauge's per-bucket rollup is a judgment call about which statistic
+-- matters (unlike a counter's, which is mechanically "first/last value" --
+-- see generate_rollups()), so this is a small override list in the same
+-- spirit as column_classes' own override list: a documented starting
+-- point, not a claim of exhaustive coverage.
+--
+-- Deliberately threshold-free (§ record/analyze boundary): value_expr and
+-- agg compute a continuous quantity (a duration, a count of samples in a
+-- structurally-defined state) with no hardcoded cutoff baked in here. A
+-- cutoff like "longer than 5 minutes" is an opinion, and belongs to
+-- pgfr_analyze reading a stored MAX at query time, not to pgfr_record
+-- deciding it once at capture time.
+CREATE TABLE IF NOT EXISTS pgfr_record.rollup_specs (
+  source_view   text NOT NULL,
+  stat_name     text NOT NULL,
+  agg           text NOT NULL CHECK (agg IN ('count','sum','max','min')),
+  value_expr    text NOT NULL,
+  predicate_sql text,
+  PRIMARY KEY (source_view, stat_name)
+);
+
+COMMENT ON TABLE pgfr_record.rollup_specs IS
+    'Hand-seeded rollup statistics for Group C (gauge) targets: one row per (source_view, stat_name), aggregated across every key in a rollup bucket (not per-key -- Group C''s value is "did this happen in this bucket", not per-backend/per-slot history). Consumed by generate_rollups()/run_tier()''s bucket-close step. Group B (counter/odometer) targets need no entries here: their rollup is mechanical, derived directly from column_classes.';
+COMMENT ON COLUMN pgfr_record.rollup_specs.agg IS 'How value_expr is aggregated across every row in the bucket: count | sum | max | min.';
+COMMENT ON COLUMN pgfr_record.rollup_specs.value_expr IS 'A SQL expression over the target''s presentation view columns, e.g. captured_at - xact_start. Must be a continuous quantity, never a pre-thresholded boolean -- see the comment above this table for why.';
+COMMENT ON COLUMN pgfr_record.rollup_specs.predicate_sql IS 'Optional structural row filter (e.g. state = ''idle in transaction''). Identity/state equality only, never a duration or magnitude threshold -- that judgment belongs to pgfr_analyze at read time.';
 
 -- Payload dictionary: the positional order of every jsonb-array payload
 -- ever captured. Append-only — a changed view shape is a new row, never
