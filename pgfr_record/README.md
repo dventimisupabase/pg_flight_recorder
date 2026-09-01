@@ -1,241 +1,114 @@
 # pgfr_record
 
-Core flight recorder extension for PostgreSQL. Continuously samples database state in the background so you can answer "what was happening in my database?" after the fact.
+Core extension of [pg_flight_recorder](https://github.com/dventimisupabase/pg_flight_recorder). Continuously appends PostgreSQL's own stats views and system views into time-partitioned tables, so you can answer "what was happening in my database?" after the fact, without adding an external agent, sidecar, or polling process.
 
-## What it does
+## Contents
 
-pgfr_record installs a set of tables, views, and pg_cron jobs that continuously capture PostgreSQL system state. It uses UNLOGGED ring buffers for high-frequency sampling of wait events, active sessions, and locks, and durable snapshot tables for periodic capture of WAL activity, checkpoints, I/O, table and index stats, query stats, replication state, and configuration. Ring buffers rotate out via TRUNCATE on a fixed schedule, rolling up wait/lock/activity data into durable summary tables just before each rotation for trend visibility beyond the ring's window. Snapshot tables carry their own long-term retention via daily partition drop.
+- [The pitch](#the-pitch)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Profiles](#profiles)
+- [Testing](#testing)
+- [Upgrade](#upgrade)
+- [Uninstall](#uninstall)
+- [Related](#related)
 
-## Key features
+## The pitch
 
-- **Continuous background sampling** via pg_cron -- no external agents or sidecars
-- **Ring buffers** (UNLOGGED) for real-time wait events, active sessions, and lock contention -- TRUNCATE-rotated on a fixed schedule (default 2h), rolling up into durable wait/lock/activity rollup tables just before each rotation
-- **Durable snapshots** every minute: WAL, checkpoints, I/O, tables, indexes, statements, replication, configuration
-- **xmin horizon attribution**: captures who is pinning the xmin horizon (long-running txns, stale replication slots, hot-standby-feedback, prepared xacts) so wraparound forensics isn't reduced to live-querying four catalogs after the offender has disconnected
-- **Partition-based retention** for snapshot tables (default 30 days), enforced via partition drop rather than DELETE
-- **Safety mechanisms**: circuit breaker, load shedding
-- **Collection modes**: normal, light, emergency (modes shed optional collectors; `disable()` stops collection entirely)
-- **Configurable profiles**: default, production_safe, development, troubleshooting, minimal_overhead
-- **Delta views**: snapshot-over-snapshot changes for trend analysis
+PostgreSQL's cumulative stats system gives you the integral: a running total since the last reset. The system catalogs give you the latest: the current state, with no history. `pgfr_record` gives you the derivative over the stats and the history over the catalogs, by sampling both on a schedule and keeping the samples. The data model is not invented; it is exactly the tables and views already documented in the PostgreSQL manual, presented as a time series.
+
+A few things follow from that, and they are the reasons to install this rather than something else:
+
+- **Append-only, everywhere.** No `UPDATE`, no `DELETE`, anywhere in this schema. Retention is partition drop, never a `DELETE` statement. A crash mid-capture leaves no partial row, ever.
+- **The record/analyze boundary, and the agent test.** Everything with a single correct answer (what was captured, its shape, what kind of quantity each column is, how identity resolves over time) lives here, in `pgfr_record`. Everything requiring a threshold or an opinion belongs in the optional `pgfr_analyze` extension. The proof of that boundary is the agent test (`scripts/agent_test.sh`): dump `pgfr_record` alone, restore it into an empty database on a *different* PostgreSQL major version, regenerate the typed views offline from the stored payload dictionary with no live source views to copy from, and answer real troubleshooting questions using nothing but psql. That script passes today.
+- **Static bounds, always recorded.** `lock_timeout` bounds each target's lock wait, `job_timeout` bounds a tier's total run time, and a capture ledger records every miss with its reason. This keeps the recorder valuable exactly when an incident makes it most valuable: it degrades in a bounded, visible way rather than going dark. `pg_cron` never runs two instances of the same tier job concurrently, so those bounds alone are enough to keep collection predictable.
+- **One design artifact.** Every archive table, presentation view, capture-plan entry, and column classification is generated from a single table, `pgfr_record.manifest`, plus the live catalog. Re-running `install.sql` regenerates all of it; that is the entire upgrade procedure, including after a PostgreSQL major version upgrade.
+- **Long-horizon rollups where retention is short.** Raw retention is deliberately short for the targets that would otherwise dominate storage (30 days for per-relation counters, 2 hours for gauges). A compressed rollup alongside the raw archive extends those targets to 365 days at a fraction of the storage, so a config change from months ago can still be correlated against the counter/gauge behavior around it.
+- **Record is sufficient; analyze is acceleration.** A `pgfr_record`-only install, or a `pg_dump` of one, is fully self-contained and self-describing: typed presentation views, a column-class legend, identity resolution across time, definitional helpers, and generated `COMMENT ON` for every object so `\d+` explains itself. The optional `pgfr_analyze` extension makes conclusions faster; nothing an agent needs to reach a conclusion lives only there.
+
+See [REFERENCE.md](../REFERENCE.md) for the full technical reference: every table, view, and function, what it means, and how to use it.
 
 ## Requirements
 
-- PostgreSQL 15, 16, or 17
-- `pg_cron` extension
-- Superuser privileges for installation
-- Optional: `pg_stat_statements` for query-level analysis
+- PostgreSQL 15, 16, 17, or 18
+- The `pg_cron` extension
+- Optional: `pg_stat_statements`, for per-query capture (the corresponding manifest rows are skipped with a `NOTICE`, not an error, when it's absent)
 
 ## Install
 
-```sql
-\i pgfr_record/install.sql
-SELECT pgfr_record.enable();
-```
+Three channels, matching the three ways this repo ships the extension:
 
-Or from the command line:
+**psql**, from a checkout of this repo. Runs `install.sql`'s `\ir` includes directly:
 
 ```bash
 psql --single-transaction -f pgfr_record/install.sql
-psql -c "SELECT pgfr_record.enable();"
 ```
+
+**Bundle**, a self-contained single SQL file with no psql metacommands, for clients that can't process `\ir` (a SQL editor, for example the Supabase dashboard). Build it from a checkout, or download the bundle from a [GitHub release](https://github.com/dventimisupabase/pg_flight_recorder/releases/latest):
+
+```bash
+./scripts/build_install_bundle.sh pgfr_record dist/pgfr_record-bundle.sql
+```
+
+The bundle wraps itself in `BEGIN`/`COMMIT`, so paste it whole into a SQL editor and run it.
+
+**dbdev**, via [database.dev](https://database.dev):
+
+```sql
+select dbdev.install('dventimi@pgfr_record');
+```
+
+All three install the same objects. `install.sql` finishes by calling `pgfr_record.enable()`, so collection starts immediately after install; nothing before that point schedules any pg_cron job.
 
 ## Quick start
 
 ```sql
--- Check health
+-- Confirm collection is running: cron jobs active, recent captures per tier,
+-- ledger miss rate, and partition-maintenance status.
 SELECT * FROM pgfr_record.health_check();
 
--- View recent wait events
-SELECT * FROM pgfr_record.recent_waits;
+-- See what's actually captured, at what cadence, and why.
+SELECT source_view, cadence_tier, retention, notes FROM pgfr_record.manifest WHERE enabled ORDER BY cadence_tier;
 
--- View recent active sessions
-SELECT * FROM pgfr_record.recent_activity;
-
--- View recent lock contention
-SELECT * FROM pgfr_record.recent_locks;
-
--- Snapshot-over-snapshot deltas
-SELECT * FROM pgfr_record.deltas;
+-- Read a typed presentation view like any other PostgreSQL stats view.
+SELECT * FROM pgfr_record.v_pg_stat_database ORDER BY captured_at DESC LIMIT 10;
 ```
-
-## Key views
-
-| View                              | Description                      |
-|-----------------------------------|----------------------------------|
-| `pgfr_record.deltas`                     | Snapshot-over-snapshot changes   |
-| `pgfr_record.recent_waits`               | Wait events from the v2 ring     |
-| `pgfr_record.recent_activity`            | Active sessions from the v2 ring |
-| `pgfr_record.recent_locks`               | Lock contention from the v2 ring |
-| `pgfr_record.recent_idle_in_transaction` | Idle-in-transaction sessions     |
-| `pgfr_record.recent_replication`         | Replication status               |
-| `pgfr_record.recent_vacuum_progress`     | Vacuum operations in progress    |
-| `pgfr_record.archiver_status`            | WAL archiving status             |
-| `pgfr_record.consumption_flows`          | Reset-guarded block/WAL/tuple flow rates and efficiency ratios |
-| `pgfr_record.consumption_deltas`         | Reset-guarded per-tick component deltas backing `consumption_flows` and the daily rollup |
-| `pgfr_record.consumption_daily_flows`    | Daily-grain ratios reconstructed from `consumption_daily_rollups` |
-| `pgfr_record.consumption_weekly_flows`   | Weekly-grain ratios (rolling 7-day buckets), one tier up |
-
-## Consumption ledger
-
-`pgfr_record.consumption_snapshots_v2` records the database's cumulative block,
-WAL, and tuple activity counters once per snapshot tick (piggybacked on the
-existing per-minute snapshot trigger -- no extra pg_cron job). `consumption_flows`
-derives per-second flow rates and efficiency ratios from consecutive rows: how
-much work the database is doing, measured in blocks moved and WAL bytes
-generated rather than milliseconds, so the numbers stay comparable across
-different hardware.
-
-### Reset handling
-
-Flows and ratios are reset-guarded via `pgfr_record._reset_guarded_delta()`, a
-generic primitive: an interval is discarded (NULL) if its source counters
-regressed or their `pg_stat_*` view was reset between ticks. Guarding is
-per-source, not per-row -- a `pg_stat_reset()` invalidates only the
-`pg_stat_database`-scoped flows (rows returned/mutated, transactions, cache
-hit fraction) for that interval, and a `pg_stat_reset_shared('wal')`
-invalidates only the `pg_stat_wal`-scoped ones (WAL record/FPI decomposition).
-`wal_bytes_per_s` is the exception: it's derived from `pg_current_wal_lsn()`
-directly, which is monotonic on a primary regardless of any stats reset, and
-is treated as the ledger of record for WAL volume. `pg_stat_wal`'s own
-`wal_bytes` counter is advisory decomposition only.
-
-### Scope and caveats
-
-- **Primary only.** The collector no-ops under `pg_is_in_recovery()`: several
-  source views (`pg_current_wal_lsn()`, `pg_stat_checkpointer`) are absent,
-  zero, or misleading on a hot standby. A gap in `consumption_snapshots_v2`
-  during a known recovery window is expected, not a bug.
-- **Cluster vs. database scope.** `tup_*`, `xact_*`, `blks_*`, `temp_*`, and
-  `db_*` columns are scoped to `current_database()`; WAL, I/O-by-agent, and
-  checkpointer/bgwriter columns are cluster-wide. On single-database
-  deployments this distinction is cosmetic but the schema carries it honestly.
-- **`track_io_timing`.** `blk_read_time_ms` / `blk_write_time_ms` are `0` (not
-  NULL) for the entire history when `track_io_timing` is off -- treat a
-  persistent `0` there as "unknown", not "instant". Recommended on for most
-  systems; check the overhead first with `pg_test_timing`.
-- **No "physical" I/O, on purpose.** `os_read_blocks_per_s` / `os_write_blocks_per_s`
-  count block read/write requests Postgres issues *to the OS* (buffer-pool
-  misses) -- not confirmed disk I/O. Postgres has no visibility past that
-  boundary: the OS page cache may satisfy an "OS read" without ever touching
-  physical storage, and Postgres can't tell which happened. True disk-level
-  I/O requires OS/platform metrics (`iostat`, cloud provider disk metrics)
-  from outside this database. `block_demand_per_s` (buffer-pool hits + misses)
-  has the same property in reverse: it's everything the executor asked the
-  buffer pool for, regardless of how each access was satisfied.
-- **No CPU.** Core Postgres exposes wall-clock, not cycles; CPU-seconds would
-  have to join in from outside the database. Out of scope here.
-- **No per-statement attribution.** This is a cluster/database-level ledger;
-  `pg_stat_statements`-based drill-down is a separate concern.
-- **`recorder_overhead_fraction`.** A footnote-grade self-accounting figure in
-  `consumption_flows`: the recorder's own block footprint
-  (`pg_statio_user_tables` for the `pgfr_record` schema) as a fraction of the
-  ledger's total block demand for that interval.
-
-### Daily rollups
-
-`consumption_snapshots_v2` retains 30 days; trend analysis over longer windows
-needs something that survives past that. `pgfr_record.consumption_daily_rollups`
-is a daily-grain durable rollup -- one row per calendar day per `datname` --
-populated by `_rollup_consumption_daily()` from the existing daily `pgfr_cleanup`
-cron job (no separate schedule). It stores summed numerator/denominator
-components, not pre-computed ratios, matching this schema's Σnum/Σden rollup
-convention: ratios are reconstructed from sums, never averaged from
-finer-grained ratios.
-
-Unlike every other durable table in this schema, it's deliberately **not**
-partitioned and has **no retention/cleanup**: at one row per day it stays tiny
-indefinitely (a decade is ~3,650 rows), so the bloat problem partition-drop
-retention exists to solve can't occur here.
-
-`consumption_deltas` -- the reset-guarded per-tick component view that used to
-be an inline part of `consumption_flows` -- is now its own view, shared by both
-`consumption_flows` (live per-tick ratios) and the daily rollup (`SUM()` across
-a day; NULLs from a reset-invalidated tick are skipped by `SUM()` automatically,
-so a mid-day `pg_stat_reset()` excludes that tick from the affected sums rather
-than corrupting them).
-
-`pgfr_record.consumption_daily_flows` is the daily-grain sibling of
-`consumption_flows`: it reconstructs ratios from `consumption_daily_rollups`'
-summed components, the same Σnum/Σden reconstruction one tier up. It's the
-input `pgfr_analyze`'s consumption trend engine reads (see Issue #83); a NULL
-ratio here means its day's underlying sum was itself NULL (reset-excluded) or
-a denominator was zero, never a division error.
-
-`pgfr_record.consumption_weekly_flows` is the weekly-grain sibling, one tier
-further up (Issue #92, in progress): the same components re-summed into
-rolling 7-day buckets counting backward from today (week 0 = today back to 6
-days ago, not an ISO calendar week -- the most recent ISO week is usually
-partial, and a partial week's sum next to full weeks' sums would reintroduce
-the exact naive distortion aggregating exists to avoid). No physical weekly
-table: `consumption_daily_rollups` never expires, so re-aggregating it fresh
-on every read is cheap and always current.
-
-## Ring rollups
-
-Just before `rotate_ring()` truncates a ring buffer slot, that slot's wait/lock/activity
-data is rolled up into three durable tables for trend visibility beyond the ring's 2h
-window -- no separate cron job, no persisted flush watermark, just an in-place rollup at
-the exact moment the data would otherwise be destroyed.
-
-- **`wait_event_rollups_archive_v2`**: one row per (backend_type, wait_event_type,
-  wait_event) per rotation window -- sample counts, waiter counts, percentage of samples.
-- **`lock_rollups_archive_v2`**: one row per (lock_type, locked relation) per rotation
-  window -- occurrence counts and blocked-duration stats.
-- **`activity_rollups_archive_v2`**: one row per (backend_type, state, duration_bucket)
-  per rotation window -- how long sessions had been running their current query when
-  sampled, bucketed rather than grouped by raw query text (that's what
-  `pgfr_record.statement_snapshots_v2`'s real `queryid`-based stats are for).
-
-All three are daily RANGE-partitioned by `sample_ts` and named `*_archive_v2` so they
-fall under `_partition_inventory()`'s existing archive-tier retention
-(`retention_archive_days`, default 7 days) with no separate config key.
-
-## Key functions
-
-| Function                        | Description                   |
-|---------------------------------|-------------------------------|
-| `pgfr_record.enable()`                 | Start collection jobs         |
-| `pgfr_record.disable()`                | Stop collection jobs          |
-| `pgfr_record.health_check()`           | System health status          |
-| `pgfr_record.set_mode(mode)`           | Set collection mode           |
-| `pgfr_record.apply_profile(name)`      | Apply a configuration profile |
-| `pgfr_record.list_profiles()`          | List available profiles       |
-| `pgfr_record.sample_ring()`            | One-shot v2 ring sample       |
-| `pgfr_record.cleanup()`                | Manual retention cleanup      |
 
 ## Profiles
 
-| Profile            | Sample Interval | Use Case                               |
-|--------------------|-----------------|----------------------------------------|
-| `default`          | 60s             | General purpose monitoring             |
-| `production_safe`  | 300s            | Production with maximum safety margins |
-| `development`      | 60s             | Staging and development                |
-| `troubleshooting`  | 60s             | Active incident response               |
-| `minimal_overhead` | 300s            | Resource-constrained systems           |
-
-## pg_cron run history
-
-Every scheduled job writes a row to `cron.job_run_details`, and pg_cron has no built-in purge. pgfr_record schedules 7 jobs (two fire every minute: `pgfr_snapshot` and `pgfr_sample_ring`), so expect roughly 2,900 rows/day growing forever on top of any other pg_cron jobs; `enable()`'s warning computes the exact figure from the jobs actually scheduled.
-
-`pgfr_record.enable()` raises a `WARNING` when it detects `cron.log_run` is on. To silence it, pick one:
-
 ```sql
--- Preferred: disable run logging entirely (errors still hit the server log).
-ALTER SYSTEM SET cron.log_run = off;
--- requires a Postgres restart (postmaster context)
-
--- Or, if you need run history for other pg_cron jobs, purge periodically:
-SELECT cron.schedule(
-  'pgfr_purge_cron_log',
-  '0 * * * *',
-  $$DELETE FROM cron.job_run_details WHERE end_time < now() - interval '1 day'$$
-);
+SELECT pgfr_record.apply_profile('troubleshooting'); -- tighter fast/medium cadence for active incident work
+SELECT pgfr_record.apply_profile('default');         -- back to steady-state cadence
+SELECT pgfr_record.disable();                        -- stop all collection (data, manifest, and capture plan untouched)
+SELECT pgfr_record.enable();                          -- resume with the default profile
 ```
 
-See the [top-level README](https://github.com/dventimisupabase/pg_flight_recorder/blob/main/README.md#pg_cron-run-history) for the full rationale.
+See [REFERENCE.md](../REFERENCE.md#profiles) for the exact cadence and timeout values each profile sets.
 
-## Related extensions
+## Testing
 
-- [pgfr_analyze](https://database.dev/dventimi/pgfr_analyze) -- reporting, anomaly detection, time-travel forensics
+```bash
+./test.sh              # all PostgreSQL versions (15-18), all three install channels
+./test.sh 17            # one version, all channels
+./test.sh --channel=psql # all versions, one channel
+```
 
-See the [top-level README](https://github.com/dventimisupabase/pg_flight_recorder/blob/main/README.md) and [REFERENCE.md](https://github.com/dventimisupabase/pg_flight_recorder/blob/main/REFERENCE.md) for full documentation.
+## Upgrade
+
+Re-run `install.sql` (or the equivalent bundle/dbdev channel). Every generator function is safe to re-run: it regenerates archive tables, presentation views, the capture plan, and column classes against whatever the live catalog looks like now, and history is untouched. This is also the procedure after a PostgreSQL major version upgrade.
+
+## Uninstall
+
+```bash
+psql --single-transaction -f pgfr_record/uninstall.sql
+```
+
+Unschedules every `pgfr_*` pg_cron job and drops the `pgfr_record` schema (and, if installed, `pgfr_analyze`) with `CASCADE`. Destructive: this removes all captured data.
+
+## Related
+
+- [Top-level README](../README.md): project overview and the two-extension structure.
+- [REFERENCE.md](../REFERENCE.md): full technical reference.
+- [STATISTICS.md](../STATISTICS.md): what's collected and why, and the manifest census in more detail.
+- [pgfr_analyze](../pgfr_analyze/README.md): the optional reporting/analysis extension.
