@@ -119,7 +119,7 @@ Both `debounce = false OR anchor_every IS NOT NULL` and `keyless = false OR debo
 
 `pg_stat_statements` and `pg_stat_statements_info` are extension-provided views, not `pg_catalog` builtins: `CREATE EXTENSION` installs them wherever the current schema was at the time (`public` on stock PostgreSQL, typically `extensions` on Supabase). The manifest references them unqualified and lets `::regclass` resolve them via `search_path`, exactly as any other client of an extension-provided object would.
 
-**Group C: gauges.** Fast tier, 2 hours retention, `debounce = false`. Eight of the fifteen targets below (`pg_stat_activity`, `pg_locks`, `pg_stat_replication`, `pg_stat_subscription`, `pg_replication_slots`, `pg_prepared_xacts`, `pg_stat_ssl`, `pg_stat_gssapi`) also roll up to 365 days at 1-hour buckets; see [Rollups](#rollups).
+**Group C: gauges.** Fast tier, 2 hours retention, `debounce = false`. All fifteen targets below also roll up to 365 days at 1-hour buckets; see [Rollups](#rollups).
 
 | source_view | key | notes |
 |---|---|---|
@@ -288,7 +288,7 @@ Group B's 30-day retention and Group C's 2-hour retention are both far shorter t
 A rollup takes one of two shapes, chosen automatically from what the target's own `column_classes`/`rollup_specs` rows say:
 
 - **Endpoint** (Group B, counters/odometers): one row per `(bucket, key)`, storing the first and last observed value of every counter/odometer column in that bucket, the two points a reset-aware delta needs. Column order follows `payload_schemas`' own order. No primary key, matching the archive tables' own convention: uniqueness is the collector's bucket-close discipline (below), not a database constraint.
-- **Stat** (Group C, gauges): one row per `(bucket, stat_name)`, aggregated across every key in the bucket, since Group C's value is "did this happen in this bucket", not a per-backend/per-slot history. Which statistic to compute is a judgment call, seeded in `pgfr_record.rollup_specs(source_view, stat_name, agg, value_expr, predicate_sql)` for eight of Group C's fifteen targets; the rest (the progress views, `pg_stat_wal_receiver`) have no rollup yet, the same maintenance posture as `column_classes`' own override list.
+- **Stat** (Group C, gauges): one row per `(bucket, stat_name)`, aggregated across every key in the bucket, since Group C's value is "did this happen in this bucket", not a per-backend/per-slot history. Which statistic to compute is a judgment call, seeded in `pgfr_record.rollup_specs(source_view, stat_name, agg, value_expr, predicate_sql)` for fourteen of Group C's fifteen targets, the same maintenance posture as `column_classes`' own override list. The exception, `pg_stat_wal_receiver`, needs no entry: its own LSN odometer columns make it mechanically eligible for the endpoint shape instead, the same rule Group B uses. `generate_rollups()` checks `rollup_specs` before `column_classes`, so a target's explicit hand-picked stat always wins over an incidental odometer column (e.g. `pg_stat_replication` and `pg_replication_slots` also carry LSN odometers, but keep the stat shape their own `rollup_specs` rows specify).
 
 `rollup_specs` is deliberately threshold-free: `value_expr`/`agg` compute a continuous quantity, such as a duration in seconds via `extract(epoch FROM ...)`, or a count of samples in a structurally-defined state, never a pre-thresholded boolean. A cutoff like "longer than 5 minutes" is `pgfr_analyze`'s opinion to apply at read time against the stored value, not `pgfr_record`'s to decide once at capture time.
 

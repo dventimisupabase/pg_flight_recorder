@@ -47,6 +47,22 @@ BEGIN
     SELECT payload, schema_id INTO v_tbl_payload, v_tbl_schema
     FROM pgfr_record.a_pg_stat_all_tables ORDER BY captured_at DESC LIMIT 1;
 
+    -- The rollup table itself is monthly-partitioned regardless of its
+    -- 1-day bucket granularity (_partition_unit() maps its 365d
+    -- rollup_retention to 'month'), so each backdated bucket needs its
+    -- own monthly rollup partition ensured too, in addition to the
+    -- archive table's daily one.
+    IF to_regclass('pgfr_record.' || pgfr_record._partition_child_name('r_pg_stat_all_tables', date_trunc('month', v_bucket_a), 'month')) IS NULL THEN
+        EXECUTE format('CREATE TABLE pgfr_record.%I PARTITION OF pgfr_record.r_pg_stat_all_tables FOR VALUES FROM (%L) TO (%L)',
+            pgfr_record._partition_child_name('r_pg_stat_all_tables', date_trunc('month', v_bucket_a), 'month'),
+            date_trunc('month', v_bucket_a), date_trunc('month', v_bucket_a) + interval '1 month');
+    END IF;
+    IF to_regclass('pgfr_record.' || pgfr_record._partition_child_name('r_pg_stat_all_tables', date_trunc('month', v_bucket_b), 'month')) IS NULL THEN
+        EXECUTE format('CREATE TABLE pgfr_record.%I PARTITION OF pgfr_record.r_pg_stat_all_tables FOR VALUES FROM (%L) TO (%L)',
+            pgfr_record._partition_child_name('r_pg_stat_all_tables', date_trunc('month', v_bucket_b), 'month'),
+            date_trunc('month', v_bucket_b), date_trunc('month', v_bucket_b) + interval '1 month');
+    END IF;
+
     -- Bucket A (2 days ago): synthetic relid, seq_scan = 10.
     IF to_regclass('pgfr_record.' || pgfr_record._partition_child_name('a_pg_stat_all_tables', v_bucket_a, 'day')) IS NULL THEN
         EXECUTE format('CREATE TABLE pgfr_record.%I PARTITION OF pgfr_record.a_pg_stat_all_tables FOR VALUES FROM (%L) TO (%L)',

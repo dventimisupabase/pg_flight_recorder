@@ -136,14 +136,16 @@ ON CONFLICT (source_view) DO NOTHING;
 --
 -- rollup_retention/rollup_granularity (milestone 8): 365d at 1-hour
 -- buckets -- comfortably inside the 2h raw retention, so a bucket always
--- closes while its source rows still exist. Unlike Group B, a Group C
--- rollup is not mechanical (a gauge has no single correct "delta"); it
--- aggregates the hand-seeded statistics in pgfr_record.rollup_specs, below.
--- Set only on targets that have rollup_specs rows -- a rollup_retention
--- with nothing to aggregate would be dead weight. pg_stat_wal_receiver and
--- the pg_stat_progress_* views are deferred (standby-only / rare and
--- bursty; candidates for a later rollup_specs addition, same maintenance
--- posture as column_classes' override list).
+-- closes while its source rows still exist. Group C's rollup is usually
+-- not mechanical (a gauge has no single correct "delta"); it aggregates
+-- the hand-seeded statistics in pgfr_record.rollup_specs, below. A target
+-- needs either a rollup_specs row or, like pg_stat_wal_receiver here,
+-- column_classes odometer columns of its own (LSNs) to roll up -- a
+-- rollup_retention with neither would be dead weight, per
+-- generate_rollups()'s shape-selection rule (rollup_specs wins when both
+-- are present, so a target's explicit hand-picked stat is never
+-- shadowed by an incidental odometer column, e.g. pg_stat_replication's
+-- own LSN columns).
 -- ---------------------------------------------------------------------------
 INSERT INTO pgfr_record.manifest
     (source_view, cadence_tier, natural_key, keyless, retention, size_class, notes, rollup_retention, rollup_granularity)
@@ -158,7 +160,8 @@ VALUES
      'odometers: sent_lsn, write_lsn, flush_lsn, replay_lsn',
      interval '365 days', interval '1 hour'),
     ('pg_catalog.pg_stat_wal_receiver', 'fast', '{}', false, interval '2 hours', 'singleton',
-     'standby-side; odometers on received LSNs', NULL, NULL),
+     'standby-side; odometers on received LSNs. No rollup_specs row: its own odometer columns are enough for generate_rollups() to pick the mechanical endpoint shape, same as Group B',
+     interval '365 days', interval '1 hour'),
     ('pg_catalog.pg_stat_subscription', 'fast', ARRAY['subid'], false, interval '2 hours', 'per_slot', NULL,
      interval '365 days', interval '1 hour'),
     ('pg_catalog.pg_replication_slots', 'fast', ARRAY['slot_name'], false, interval '2 hours', 'per_slot',
@@ -168,12 +171,18 @@ VALUES
      'usually empty; an aging row is itself an anomaly',
      interval '365 days', interval '1 hour'),
     ('pg_catalog.pg_stat_progress_vacuum', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend',
-     'default-on: empty view costs one SELECT', NULL, NULL),
-    ('pg_catalog.pg_stat_progress_cluster', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on', NULL, NULL),
-    ('pg_catalog.pg_stat_progress_create_index', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on', NULL, NULL),
-    ('pg_catalog.pg_stat_progress_basebackup', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on', NULL, NULL),
-    ('pg_catalog.pg_stat_progress_analyze', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on', NULL, NULL),
-    ('pg_catalog.pg_stat_progress_copy', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on', NULL, NULL)
+     'default-on: empty view costs one SELECT',
+     interval '365 days', interval '1 hour'),
+    ('pg_catalog.pg_stat_progress_cluster', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on',
+     interval '365 days', interval '1 hour'),
+    ('pg_catalog.pg_stat_progress_create_index', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on',
+     interval '365 days', interval '1 hour'),
+    ('pg_catalog.pg_stat_progress_basebackup', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on',
+     interval '365 days', interval '1 hour'),
+    ('pg_catalog.pg_stat_progress_analyze', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on',
+     interval '365 days', interval '1 hour'),
+    ('pg_catalog.pg_stat_progress_copy', 'fast', ARRAY['pid'], false, interval '2 hours', 'per_backend', 'default-on',
+     interval '365 days', interval '1 hour')
 ON CONFLICT (source_view) DO NOTHING;
 
 -- Group C addition, seeded after the initial v2 rewrite (additive, per
@@ -196,6 +205,21 @@ ON CONFLICT (source_view) DO NOTHING;
 -- comment on pgfr_record.rollup_specs (02_manifest.sql) for why these are
 -- deliberately not threshold-based (that judgment is pgfr_analyze's, at
 -- read time, against the stored continuous value here).
+--
+-- The six pg_stat_progress_* views share one shape of problem: rare,
+-- bursty, per-backend, and none of them carries a start-time column of
+-- its own (only captured_at says when pgfr saw one in flight), so there
+-- is no duration to compute the way pg_stat_activity's idle_in_xact_max_
+-- duration does. Their per-invocation progress counters (blocks/tuples
+-- processed, etc.) reset with each new operation, so a MAX across a
+-- whole bucket would conflate separate, unrelated operations rather than
+-- describe one of them -- not a continuous quantity in the sense this
+-- table requires. active_sample_count (a plain count of backend-tick
+-- observations where the operation had any row present, no predicate)
+-- sidesteps that: it is exactly the Mode A time-in-state estimation
+-- STATISTICS.md already describes (sample count is proportional to time
+-- observed in that state, not a count of distinct operations), applied
+-- to "was an operation of this type running" instead of a backend state.
 -- ---------------------------------------------------------------------------
 INSERT INTO pgfr_record.rollup_specs
     (source_view, stat_name, agg, value_expr, predicate_sql)
@@ -217,7 +241,19 @@ VALUES
     ('pg_catalog.pg_stat_ssl', 'unencrypted_sample_count', 'count',
      '1', 'ssl = false'),
     ('pg_catalog.pg_stat_gssapi', 'unencrypted_sample_count', 'count',
-     '1', 'encrypted = false')
+     '1', 'encrypted = false'),
+    ('pg_catalog.pg_stat_progress_vacuum', 'active_sample_count', 'count',
+     '1', NULL),
+    ('pg_catalog.pg_stat_progress_cluster', 'active_sample_count', 'count',
+     '1', NULL),
+    ('pg_catalog.pg_stat_progress_create_index', 'active_sample_count', 'count',
+     '1', NULL),
+    ('pg_catalog.pg_stat_progress_basebackup', 'active_sample_count', 'count',
+     '1', NULL),
+    ('pg_catalog.pg_stat_progress_analyze', 'active_sample_count', 'count',
+     '1', NULL),
+    ('pg_catalog.pg_stat_progress_copy', 'active_sample_count', 'count',
+     '1', NULL)
 ON CONFLICT (source_view, stat_name) DO NOTHING;
 
 -- ---------------------------------------------------------------------------

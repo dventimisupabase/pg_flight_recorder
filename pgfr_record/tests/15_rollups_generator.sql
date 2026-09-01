@@ -27,15 +27,15 @@ SELECT is(
        AND pgfr_record._current_major() <= coalesce(m.max_major, 999)),
     'every enabled, version-applicable manifest row with rollup_retention set should have a rollup table'
 );
+-- pg_stat_wal_receiver has no rollup_specs row but does have LSN odometer
+-- columns, so it should pick up the mechanical endpoint shape, same as
+-- Group B -- not be skipped as "nothing to roll up".
 SELECT is(
-    (SELECT rollup_retention FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_stat_wal_receiver'),
-    NULL::interval,
-    'pg_stat_wal_receiver should have no rollup_retention'
-);
-SELECT is(
-    to_regclass('pgfr_record.r_pg_stat_wal_receiver'),
-    NULL::regclass,
-    'pg_stat_wal_receiver should have no rollup table (rollup_retention is NULL)'
+    (SELECT array_agg(column_name::text ORDER BY ordinal_position)
+     FROM information_schema.columns
+     WHERE table_schema = 'pgfr_record' AND table_name = 'r_pg_stat_wal_receiver'),
+    ARRAY['bucket_start','key','key_hash','first_captured_at','last_captured_at','first_values','last_values','first_reset_values','last_reset_values'],
+    'r_pg_stat_wal_receiver should get the endpoint-rollup shape mechanically, via its own odometer columns'
 );
 
 -- ---------------------------------------------------------------------------
@@ -69,6 +69,13 @@ SELECT is(
     'r_pg_stat_activity should have the uniform stat-rollup column set, in order'
 );
 SELECT has_index('pgfr_record', 'r_pg_stat_activity', 'r_pg_stat_activity_stat_idx', 'the (stat_name, bucket_start DESC) lookup index should exist');
+SELECT is(
+    (SELECT array_agg(column_name::text ORDER BY ordinal_position)
+     FROM information_schema.columns
+     WHERE table_schema = 'pgfr_record' AND table_name = 'r_pg_stat_progress_vacuum'),
+    ARRAY['bucket_start','stat_name','value','sample_count'],
+    'r_pg_stat_progress_vacuum should also get the stat shape, from its rollup_specs row alone (no counter/odometer columns of its own)'
+);
 SELECT is(
     (SELECT count(*)::int FROM pg_constraint WHERE conrelid = 'pgfr_record.r_pg_stat_activity'::regclass AND contype = 'p'),
     0,

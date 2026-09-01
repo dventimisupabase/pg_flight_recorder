@@ -10,7 +10,7 @@
 -- those pieces land.
 
 BEGIN;
-SELECT plan(21);
+SELECT plan(22);
 
 -- ---------------------------------------------------------------------------
 -- Schema
@@ -105,25 +105,28 @@ SELECT is(
     'Group C (pg_stat_activity) should roll up to 365d at 1-hour buckets'
 );
 SELECT is(
-    (SELECT rollup_retention FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_stat_wal_receiver'),
-    NULL::interval,
-    'pg_stat_wal_receiver should have no rollup yet (deferred: standby-only, no rollup_specs seeded)'
+    (SELECT (rollup_retention, rollup_granularity) FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_stat_wal_receiver'),
+    (interval '365 days', interval '1 hour'),
+    'pg_stat_wal_receiver should roll up to 365d at 1-hour buckets (mechanical, via its own LSN odometer columns, no rollup_specs needed)'
 );
 SELECT is(
-    (SELECT rollup_retention FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_stat_progress_vacuum'),
-    NULL::interval,
-    'pg_stat_progress_vacuum should have no rollup yet (deferred: rare/bursty, no rollup_specs seeded)'
+    (SELECT (rollup_retention, rollup_granularity) FROM pgfr_record.manifest WHERE source_view = 'pg_catalog.pg_stat_progress_vacuum'),
+    (interval '365 days', interval '1 hour'),
+    'pg_stat_progress_vacuum should roll up to 365d at 1-hour buckets'
 );
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.manifest
      WHERE source_view LIKE '%pg_catalog%' AND rollup_retention IS NOT NULL
        AND source_view IN (
          'pg_catalog.pg_stat_activity', 'pg_catalog.pg_locks', 'pg_catalog.pg_stat_replication',
-         'pg_catalog.pg_stat_subscription', 'pg_catalog.pg_replication_slots',
-         'pg_catalog.pg_prepared_xacts', 'pg_catalog.pg_stat_ssl', 'pg_catalog.pg_stat_gssapi'
+         'pg_catalog.pg_stat_wal_receiver', 'pg_catalog.pg_stat_subscription', 'pg_catalog.pg_replication_slots',
+         'pg_catalog.pg_prepared_xacts', 'pg_catalog.pg_stat_progress_vacuum', 'pg_catalog.pg_stat_progress_cluster',
+         'pg_catalog.pg_stat_progress_create_index', 'pg_catalog.pg_stat_progress_basebackup',
+         'pg_catalog.pg_stat_progress_analyze', 'pg_catalog.pg_stat_progress_copy',
+         'pg_catalog.pg_stat_ssl', 'pg_catalog.pg_stat_gssapi'
        )),
-    8,
-    '8 Group C targets should have a rollup configured'
+    15,
+    'all 15 Group C targets should now have a rollup configured'
 );
 
 -- ---------------------------------------------------------------------------
@@ -131,8 +134,8 @@ SELECT is(
 -- ---------------------------------------------------------------------------
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.rollup_specs),
-    9,
-    'rollup_specs should have 9 seeded rows'
+    15,
+    'rollup_specs should have 15 seeded rows (9 original + 6 for the progress views)'
 );
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.rollup_specs WHERE predicate_sql ~* '[0-9]+ *(second|minute|hour)s?'),
@@ -148,6 +151,11 @@ SELECT is(
      )),
     0,
     'every rollup_specs row should reference a manifest row that actually has a rollup configured'
+);
+SELECT is(
+    (SELECT count(*)::int FROM pgfr_record.rollup_specs WHERE source_view = 'pg_catalog.pg_stat_wal_receiver'),
+    0,
+    'pg_stat_wal_receiver should have no rollup_specs row -- its rollup is mechanical (odometer columns), not hand-picked'
 );
 
 -- ---------------------------------------------------------------------------

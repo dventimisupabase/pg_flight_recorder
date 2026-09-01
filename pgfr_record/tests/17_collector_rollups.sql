@@ -20,13 +20,22 @@ SELECT lives_ok($$SELECT pgfr_record.run_tier('medium')$$, 'run_tier(''medium'')
 -- pending when the failure-containment test corrupts rollup_close_sql --
 -- manufacturing it here too would let this first catch-up call close it
 -- before corruption ever happens.)
+--
+-- The rollup table itself is monthly-partitioned (_partition_unit() maps
+-- its 365d rollup_retention to 'month', independent of the 1-day bucket
+-- granularity), so a backdated point near a month boundary needs its own
+-- monthly partition ensured too -- create-ahead only ever looks forward
+-- from the current month, same reasoning as the archive table above.
 -- ---------------------------------------------------------------------------
 DO $do$
 DECLARE
-    v_days_ago int;
-    v_lower    timestamptz;
-    v_upper    timestamptz;
-    v_child    text;
+    v_days_ago      int;
+    v_lower         timestamptz;
+    v_upper         timestamptz;
+    v_child         text;
+    v_rollup_lower  timestamptz;
+    v_rollup_upper  timestamptz;
+    v_rollup_child  text;
 BEGIN
     FOREACH v_days_ago IN ARRAY ARRAY[1, 2]
     LOOP
@@ -35,6 +44,13 @@ BEGIN
         v_child := pgfr_record._partition_child_name('a_pg_stat_all_tables', v_lower, 'day');
         IF to_regclass('pgfr_record.' || v_child) IS NULL THEN
             EXECUTE format('CREATE TABLE pgfr_record.%I PARTITION OF pgfr_record.a_pg_stat_all_tables FOR VALUES FROM (%L) TO (%L)', v_child, v_lower, v_upper);
+        END IF;
+
+        v_rollup_lower := date_trunc('month', v_lower);
+        v_rollup_upper := v_rollup_lower + interval '1 month';
+        v_rollup_child := pgfr_record._partition_child_name('r_pg_stat_all_tables', v_rollup_lower, 'month');
+        IF to_regclass('pgfr_record.' || v_rollup_child) IS NULL THEN
+            EXECUTE format('CREATE TABLE pgfr_record.%I PARTITION OF pgfr_record.r_pg_stat_all_tables FOR VALUES FROM (%L) TO (%L)', v_rollup_child, v_rollup_lower, v_rollup_upper);
         END IF;
 
         INSERT INTO pgfr_record.a_pg_stat_all_tables (captured_at, key, key_hash, row_hash, schema_id, payload)
@@ -66,12 +82,18 @@ SELECT is(
 -- ---------------------------------------------------------------------------
 DO $do$
 DECLARE
-    v_lower timestamptz := date_trunc('day', clock_timestamp()) - interval '3 days';
-    v_upper timestamptz := v_lower + interval '1 day';
-    v_child text := pgfr_record._partition_child_name('a_pg_stat_all_tables', v_lower, 'day');
+    v_lower        timestamptz := date_trunc('day', clock_timestamp()) - interval '3 days';
+    v_upper        timestamptz := v_lower + interval '1 day';
+    v_child        text := pgfr_record._partition_child_name('a_pg_stat_all_tables', v_lower, 'day');
+    v_rollup_lower timestamptz := date_trunc('month', v_lower);
+    v_rollup_upper timestamptz := v_rollup_lower + interval '1 month';
+    v_rollup_child text := pgfr_record._partition_child_name('r_pg_stat_all_tables', v_rollup_lower, 'month');
 BEGIN
     IF to_regclass('pgfr_record.' || v_child) IS NULL THEN
         EXECUTE format('CREATE TABLE pgfr_record.%I PARTITION OF pgfr_record.a_pg_stat_all_tables FOR VALUES FROM (%L) TO (%L)', v_child, v_lower, v_upper);
+    END IF;
+    IF to_regclass('pgfr_record.' || v_rollup_child) IS NULL THEN
+        EXECUTE format('CREATE TABLE pgfr_record.%I PARTITION OF pgfr_record.r_pg_stat_all_tables FOR VALUES FROM (%L) TO (%L)', v_rollup_child, v_rollup_lower, v_rollup_upper);
     END IF;
 
     INSERT INTO pgfr_record.a_pg_stat_all_tables (captured_at, key, key_hash, row_hash, schema_id, payload)
@@ -112,12 +134,18 @@ SELECT lives_ok($$SELECT pgfr_record.run_tier('fast')$$, 'run_tier(''fast'') sho
 
 DO $do$
 DECLARE
-    v_lower timestamptz := date_trunc('hour', clock_timestamp()) - interval '1 hour';
-    v_upper timestamptz := v_lower + interval '1 hour';
-    v_child text := pgfr_record._partition_child_name('a_pg_stat_activity', v_lower, 'hour');
+    v_lower        timestamptz := date_trunc('hour', clock_timestamp()) - interval '1 hour';
+    v_upper        timestamptz := v_lower + interval '1 hour';
+    v_child        text := pgfr_record._partition_child_name('a_pg_stat_activity', v_lower, 'hour');
+    v_rollup_lower timestamptz := date_trunc('month', v_lower);
+    v_rollup_upper timestamptz := v_rollup_lower + interval '1 month';
+    v_rollup_child text := pgfr_record._partition_child_name('r_pg_stat_activity', v_rollup_lower, 'month');
 BEGIN
     IF to_regclass('pgfr_record.' || v_child) IS NULL THEN
         EXECUTE format('CREATE TABLE pgfr_record.%I PARTITION OF pgfr_record.a_pg_stat_activity FOR VALUES FROM (%L) TO (%L)', v_child, v_lower, v_upper);
+    END IF;
+    IF to_regclass('pgfr_record.' || v_rollup_child) IS NULL THEN
+        EXECUTE format('CREATE TABLE pgfr_record.%I PARTITION OF pgfr_record.r_pg_stat_activity FOR VALUES FROM (%L) TO (%L)', v_rollup_child, v_rollup_lower, v_rollup_upper);
     END IF;
 
     INSERT INTO pgfr_record.a_pg_stat_activity (captured_at, key, key_hash, row_hash, schema_id, payload)
