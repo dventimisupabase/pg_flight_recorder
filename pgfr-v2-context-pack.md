@@ -346,6 +346,7 @@ Load-bearing details:
 **Hash-collision stance:** a 64-bit collision on the *same key* suppresses one changed sample until the next anchor repairs it. Accepted; documented; not defended against further.
 
 **Anchors.** For every debounced target, an unconditional full capture:
+
 - fires when `anchor_every` has elapsed since the target's last anchor, **and** whenever a new partition would otherwise open without one — rule: **anchor cadence = partition width** (daily for Group B, monthly for Group D, matching the §4.2 width rule), so *every partition opens with a full snapshot*.
 - Consequences, both load-bearing: (a) LOCF reconstruction of "state as of t" never reads left of the containing partition's first rows by more than one partition; (b) any prefix of partitions can be dropped without dangling references — retention never orphans history.
 - Anchors answer observability: a key absent since the last anchor was *observed absent* (dropped/idle-and-then-dropped is distinguishable via the catalog identity dimension); a missing *run* is visible in the ledger. "Unchanged," "gone," and "not observed" are three distinguishable states.
@@ -463,6 +464,7 @@ rows_per_capture × captures_per_day × bytes_per_row
 where for debounced targets `rows_per_capture = churn_rate × cardinality` between anchors, plus one full `cardinality` capture per anchor; `bytes_per_row` ≈ serialized jsonb *array* payload (measure per view; dictionary encoding removes the repeated-key tax of object payloads — see §4.4 and acceptance criterion 11).
 
 Dominant terms to call out:
+
 - **Group C / pg_stat_activity:** `max_connections × 1440/day × ~1 KB`, but retention is 2h, so steady-state size ≈ `max_connections × 120 × ~1 KB` — small.
 - **Group B / per-relation:** the frontier. Steady-state ≈ `R × (anchor/day × 30d + churn × 288/day × 30d) × ~0.7 KB` for R relations at 5-min cadence. Worked examples at R = 500, 5,000, 100,000.
 - **The 100k-relation backpressure statement (policy, verbatim):** pgfr does not adaptively defend against pathological relation counts. The cost curve is documented; at ~10⁵ relations, Group B cadence should be slowed or targets disabled in the manifest — and a schema with 10⁵ active relations has observability problems upstream of pgfr.
