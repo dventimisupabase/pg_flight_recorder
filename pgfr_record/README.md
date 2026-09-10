@@ -98,6 +98,8 @@ See [REFERENCE.md](../REFERENCE.md#profiles) for the exact cadence and timeout v
 
 Re-run `install.sql` (or the equivalent bundle/dbdev channel). Every generator function is safe to re-run: it regenerates archive tables, presentation views, the capture plan, and column classes against whatever the live catalog looks like now, and history is untouched. This is also the procedure after a PostgreSQL major version upgrade.
 
+Upgrading from an existing pgfr_record install created by an earlier release: run `uninstall.sql` first (drops both schemas via `CASCADE` and unschedules every `pgfr%` cron job), then install fresh. `uninstall.sql` has no `\ir` includes, so it pastes directly into a SQL editor.
+
 ## Uninstall
 
 ```bash
