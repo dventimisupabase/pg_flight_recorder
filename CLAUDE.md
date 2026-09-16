@@ -42,6 +42,8 @@ When writing or editing markdown files, follow these rules to pass linting:
 
 - **Indentation**: Use 2 spaces for nested list items
 
+- **Table of contents**: Every authored, reader-facing markdown file needs a table of contents near the top, after the title and any intro paragraph and before the first section. Link to every top-level (`##`) heading. Skip this for auto-generated report output and one-off process notes, where a TOC doesn't serve a reader.
+
 ### Example
 
 Wrong:
