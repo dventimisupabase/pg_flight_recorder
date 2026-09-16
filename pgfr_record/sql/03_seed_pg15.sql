@@ -256,6 +256,37 @@ VALUES
      '1', NULL)
 ON CONFLICT (source_view, stat_name) DO NOTHING;
 
+-- pg_stat_activity wait-event rollup specs: one row per (wait_event_type,
+-- wait_event) pair, generated from the live pg_wait_events catalog rather
+-- than hand-listed, so a wait event this PostgreSQL version defines that
+-- pgfr has never been told about is still covered, and a version that
+-- retires one stops generating a row for it, with no seed-file edit either
+-- way. sample_count (agg = count, value_expr = 1) mirrors the
+-- pg_stat_progress_* active_sample_count rows above: Mode A's sample count
+-- estimates time observed in that wait, not a count of distinct wait
+-- episodes (see STATISTICS.md). type is folded into stat_name because
+-- PostgreSQL itself reuses one name (SyncRep) across two different types
+-- (IPC and LWLock). pg_wait_events itself is PG17+ only, so this is guarded
+-- and simply contributes no rows on PG15/16 -- there is no per-wait-event
+-- breakdown to generate there, only the two hand-seeded stats above.
+DO $$
+BEGIN
+    IF to_regclass('pg_catalog.pg_wait_events') IS NOT NULL THEN
+        EXECUTE $sql$
+            INSERT INTO pgfr_record.rollup_specs (source_view, stat_name, agg, value_expr, predicate_sql)
+            SELECT
+                'pg_catalog.pg_stat_activity',
+                'wait_' || lower(type) || '_' || lower(name),
+                'count',
+                '1',
+                format('wait_event_type = %L AND wait_event = %L', type, name)
+            FROM pg_wait_events
+            ON CONFLICT (source_view, stat_name) DO NOTHING
+        $sql$;
+    END IF;
+END;
+$$;
+
 -- ---------------------------------------------------------------------------
 -- Group D -- state history. on_change tier, debounce = true,
 -- anchor_every = 1 month (Group D uses monthly partitions per the §4.2

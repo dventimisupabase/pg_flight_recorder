@@ -10,7 +10,7 @@
 -- those pieces land.
 
 BEGIN;
-SELECT plan(22);
+SELECT plan(24);
 
 -- ---------------------------------------------------------------------------
 -- Schema
@@ -132,10 +132,39 @@ SELECT is(
 -- ---------------------------------------------------------------------------
 -- rollup_specs seed data
 -- ---------------------------------------------------------------------------
+-- pg_wait_events is PG17+ only; referencing it unguarded would fail to
+-- parse at all on PG15/16, not just return zero rows, so its count is
+-- captured into a GUC by a guarded DO block rather than queried directly
+-- in the assertions below.
+DO $$
+DECLARE
+    v_wait_event_count int := 0;
+BEGIN
+    IF to_regclass('pg_catalog.pg_wait_events') IS NOT NULL THEN
+        EXECUTE 'SELECT count(*) FROM pg_wait_events' INTO v_wait_event_count;
+    END IF;
+    PERFORM set_config('pgfr_test.wait_event_count', v_wait_event_count::text, false);
+END;
+$$;
+
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.rollup_specs),
-    15,
-    'rollup_specs should have 15 seeded rows (9 original + 6 for the progress views)'
+    15 + current_setting('pgfr_test.wait_event_count')::int,
+    'rollup_specs should have 15 hand-seeded rows (9 original + 6 for the progress views) plus one generated row per pg_wait_events entry, on PostgreSQL versions that have it'
+);
+SELECT is(
+    (SELECT count(*)::int FROM pgfr_record.rollup_specs
+     WHERE source_view = 'pg_catalog.pg_stat_activity' AND stat_name LIKE 'wait_%'),
+    current_setting('pgfr_test.wait_event_count')::int,
+    'pg_stat_activity should have one generated wait-event rollup_specs row per pg_wait_events entry, when present'
+);
+SELECT is(
+    (SELECT predicate_sql FROM pgfr_record.rollup_specs
+     WHERE source_view = 'pg_catalog.pg_stat_activity' AND stat_name = 'wait_client_clientwrite'),
+    CASE WHEN current_setting('pgfr_test.wait_event_count')::int > 0
+         THEN $$wait_event_type = 'Client' AND wait_event = 'ClientWrite'$$
+         ELSE NULL END,
+    'ClientWrite should have its own generated wait-event rollup_specs row, on PostgreSQL versions with pg_wait_events'
 );
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.rollup_specs WHERE predicate_sql ~* '[0-9]+ *(second|minute|hour)s?'),
