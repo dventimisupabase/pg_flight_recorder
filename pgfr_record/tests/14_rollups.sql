@@ -10,7 +10,7 @@
 -- those pieces land.
 
 BEGIN;
-SELECT plan(24);
+SELECT plan(27);
 
 -- ---------------------------------------------------------------------------
 -- Schema
@@ -149,8 +149,26 @@ $$;
 
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.rollup_specs),
-    15 + current_setting('pgfr_test.wait_event_count')::int,
-    'rollup_specs should have 15 hand-seeded rows (9 original + 6 for the progress views) plus one generated row per pg_wait_events entry, on PostgreSQL versions that have it'
+    42 + current_setting('pgfr_test.wait_event_count')::int,
+    'rollup_specs should have 42 hand-seeded rows (9 original + 6 for the progress views + 27 for the pg_stat_activity/pg_locks/pg_stat_replication per-value breakdowns) plus one generated row per pg_wait_events entry, on PostgreSQL versions that have it'
+);
+SELECT is(
+    (SELECT predicate_sql FROM pgfr_record.rollup_specs
+     WHERE source_view = 'pg_catalog.pg_stat_activity' AND stat_name = 'state_idle_in_transaction_aborted'),
+    $$state = 'idle in transaction (aborted)'$$,
+    'pg_stat_activity should have a hand-seeded per-state rollup_specs row for idle in transaction (aborted)'
+);
+SELECT is(
+    (SELECT count(*)::int FROM pgfr_record.rollup_specs
+     WHERE source_view = 'pg_catalog.pg_locks' AND stat_name LIKE 'locktype_%'),
+    12,
+    'pg_locks should have 12 hand-seeded per-locktype rollup_specs rows'
+);
+SELECT is(
+    (SELECT predicate_sql FROM pgfr_record.rollup_specs
+     WHERE source_view = 'pg_catalog.pg_stat_replication' AND stat_name = 'sync_state_quorum'),
+    $$sync_state = 'quorum'$$,
+    'pg_stat_replication should have a hand-seeded per-sync_state rollup_specs row for quorum'
 );
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.rollup_specs

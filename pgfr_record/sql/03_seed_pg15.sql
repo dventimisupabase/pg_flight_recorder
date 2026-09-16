@@ -228,10 +228,48 @@ VALUES
      'extract(epoch FROM captured_at - xact_start)', $$state = 'idle in transaction'$$),
     ('pg_catalog.pg_stat_activity', 'lock_wait_max_duration', 'max',
      'extract(epoch FROM captured_at - query_start)', $$wait_event_type = 'Lock'$$),
+    -- pg_stat_activity.state: no catalog view enumerates its six
+    -- documented values (unlike wait_event's pg_wait_events), so these are
+    -- hand-seeded, same as the two rows above -- full Mode A time-in-state
+    -- coverage for the other gauge column on this view, not just wait_event.
+    ('pg_catalog.pg_stat_activity', 'state_active', 'count', '1', $$state = 'active'$$),
+    ('pg_catalog.pg_stat_activity', 'state_idle', 'count', '1', $$state = 'idle'$$),
+    ('pg_catalog.pg_stat_activity', 'state_idle_in_transaction', 'count', '1', $$state = 'idle in transaction'$$),
+    ('pg_catalog.pg_stat_activity', 'state_idle_in_transaction_aborted', 'count', '1', $$state = 'idle in transaction (aborted)'$$),
+    ('pg_catalog.pg_stat_activity', 'state_fastpath_function_call', 'count', '1', $$state = 'fastpath function call'$$),
+    ('pg_catalog.pg_stat_activity', 'state_disabled', 'count', '1', $$state = 'disabled'$$),
     ('pg_catalog.pg_locks', 'blocked_sample_count', 'count',
      '1', 'granted = false'),
+    -- pg_locks.locktype: same hand-seeded reasoning as state above.
+    -- applytransaction is PG16+ only; the predicate is harmless on earlier
+    -- versions, it just never matches, so no version gate is needed.
+    ('pg_catalog.pg_locks', 'locktype_relation', 'count', '1', $$locktype = 'relation'$$),
+    ('pg_catalog.pg_locks', 'locktype_extend', 'count', '1', $$locktype = 'extend'$$),
+    ('pg_catalog.pg_locks', 'locktype_frozenid', 'count', '1', $$locktype = 'frozenid'$$),
+    ('pg_catalog.pg_locks', 'locktype_page', 'count', '1', $$locktype = 'page'$$),
+    ('pg_catalog.pg_locks', 'locktype_tuple', 'count', '1', $$locktype = 'tuple'$$),
+    ('pg_catalog.pg_locks', 'locktype_transactionid', 'count', '1', $$locktype = 'transactionid'$$),
+    ('pg_catalog.pg_locks', 'locktype_virtualxid', 'count', '1', $$locktype = 'virtualxid'$$),
+    ('pg_catalog.pg_locks', 'locktype_spectoken', 'count', '1', $$locktype = 'spectoken'$$),
+    ('pg_catalog.pg_locks', 'locktype_object', 'count', '1', $$locktype = 'object'$$),
+    ('pg_catalog.pg_locks', 'locktype_userlock', 'count', '1', $$locktype = 'userlock'$$),
+    ('pg_catalog.pg_locks', 'locktype_advisory', 'count', '1', $$locktype = 'advisory'$$),
+    ('pg_catalog.pg_locks', 'locktype_applytransaction', 'count', '1', $$locktype = 'applytransaction'$$),
     ('pg_catalog.pg_stat_replication', 'non_streaming_sample_count', 'count',
      '1', $$state <> 'streaming'$$),
+    -- pg_stat_replication.state / sync_state: same hand-seeded reasoning.
+    -- state's five values fully subsume non_streaming_sample_count above
+    -- (kept as-is, additive-only); sync_state is a second, independent
+    -- dimension on the same view.
+    ('pg_catalog.pg_stat_replication', 'state_startup', 'count', '1', $$state = 'startup'$$),
+    ('pg_catalog.pg_stat_replication', 'state_catchup', 'count', '1', $$state = 'catchup'$$),
+    ('pg_catalog.pg_stat_replication', 'state_streaming', 'count', '1', $$state = 'streaming'$$),
+    ('pg_catalog.pg_stat_replication', 'state_backup', 'count', '1', $$state = 'backup'$$),
+    ('pg_catalog.pg_stat_replication', 'state_stopping', 'count', '1', $$state = 'stopping'$$),
+    ('pg_catalog.pg_stat_replication', 'sync_state_async', 'count', '1', $$sync_state = 'async'$$),
+    ('pg_catalog.pg_stat_replication', 'sync_state_potential', 'count', '1', $$sync_state = 'potential'$$),
+    ('pg_catalog.pg_stat_replication', 'sync_state_sync', 'count', '1', $$sync_state = 'sync'$$),
+    ('pg_catalog.pg_stat_replication', 'sync_state_quorum', 'count', '1', $$sync_state = 'quorum'$$),
     ('pg_catalog.pg_stat_subscription', 'disconnected_sample_count', 'count',
      '1', 'pid IS NULL'),
     ('pg_catalog.pg_replication_slots', 'inactive_sample_count', 'count',
