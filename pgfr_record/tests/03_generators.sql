@@ -28,7 +28,7 @@ SELECT is(
     'every enabled, version-applicable manifest row should have an archive table'
 );
 SELECT is(
-    (SELECT count(*)::int FROM pgfr_record.payload_schemas),
+    (SELECT count(*)::int FROM pgfr_record.payload_schemas WHERE kind = 'capture'),
     (SELECT count(*)::int FROM pgfr_record.manifest m
      WHERE m.enabled
        AND m.min_major <= pgfr_record._current_major()
@@ -91,7 +91,7 @@ SELECT ok(
 -- ---------------------------------------------------------------------------
 SELECT lives_ok($$SELECT pgfr_record.generate_archives()$$, 're-running generate_archives() should not error');
 SELECT is(
-    (SELECT count(*)::int FROM pgfr_record.payload_schemas),
+    (SELECT count(*)::int FROM pgfr_record.payload_schemas WHERE kind = 'capture'),
     (SELECT count(*)::int FROM pgfr_record.manifest m
      WHERE m.enabled
        AND m.min_major <= pgfr_record._current_major()

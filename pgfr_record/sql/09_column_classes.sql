@@ -65,7 +65,7 @@ BEGIN
         JOIN LATERAL (
             SELECT columns, type_names
             FROM pgfr_record.payload_schemas p
-            WHERE p.source_view = m.source_view
+            WHERE p.source_view = m.source_view AND p.kind = 'capture'
             ORDER BY p.schema_id DESC
             LIMIT 1
         ) ps ON true

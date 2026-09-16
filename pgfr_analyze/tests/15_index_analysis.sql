@@ -34,10 +34,10 @@ BEGIN
     END IF;
 END $do$;
 
-SELECT array_position(columns, 'indexrelname') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_indexes' ORDER BY schema_id DESC LIMIT 1 \gset irn_
-SELECT array_position(columns, 'idx_scan') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_indexes' ORDER BY schema_id DESC LIMIT 1 \gset is_
-SELECT array_position(columns, 'idx_tup_read') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_indexes' ORDER BY schema_id DESC LIMIT 1 \gset itr_
-SELECT array_position(columns, 'idx_tup_fetch') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_indexes' ORDER BY schema_id DESC LIMIT 1 \gset itf_
+SELECT array_position(columns, 'indexrelname') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_indexes' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset irn_
+SELECT array_position(columns, 'idx_scan') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_indexes' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset is_
+SELECT array_position(columns, 'idx_tup_read') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_indexes' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset itr_
+SELECT array_position(columns, 'idx_tup_fetch') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_indexes' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset itf_
 
 -- A busy real index: pgfr_record.payload_schemas_pkey, a genuinely existing
 -- index (pg_relation_size() needs one), given a known 500-scan, 95%-

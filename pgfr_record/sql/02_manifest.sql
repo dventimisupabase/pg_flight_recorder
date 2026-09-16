@@ -113,6 +113,7 @@ COMMENT ON COLUMN pgfr_record.rollup_specs.predicate_sql IS 'Optional structural
 CREATE TABLE IF NOT EXISTS pgfr_record.payload_schemas (
   schema_id   smallint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   source_view text NOT NULL,
+  kind        text NOT NULL DEFAULT 'capture' CHECK (kind IN ('capture', 'rollup')),
   columns     text[] NOT NULL,
   type_names  text[] NOT NULL,
   fingerprint text NOT NULL,
@@ -120,8 +121,15 @@ CREATE TABLE IF NOT EXISTS pgfr_record.payload_schemas (
   UNIQUE (source_view, fingerprint)
 );
 
+-- Additive migration (§7 upgrade path): CREATE TABLE IF NOT EXISTS above
+-- no-ops against an already-existing table, so an install predating the
+-- rollup-schema kind needs the column added explicitly too.
+ALTER TABLE pgfr_record.payload_schemas
+    ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'capture' CHECK (kind IN ('capture', 'rollup'));
+
 COMMENT ON TABLE pgfr_record.payload_schemas IS
-    'Dictionary of positional payload layouts: position i of an archive row''s payload array is columns[i+1]. Minted atomically with each target''s capture statement by the generator; never hand-edited.';
+    'Dictionary of positional payload layouts: position i of an archive row''s payload array is columns[i+1]. Minted atomically with each target''s capture statement by the generator; never hand-edited. kind distinguishes an archive''s full-column capture schema (''capture'') from an endpoint-shape rollup''s narrower counter/odometer-only schema (''rollup'') -- the two are never the same dictionary entry even for one source_view, since the column sets differ.';
+COMMENT ON COLUMN pgfr_record.payload_schemas.kind IS 'capture (an archive table''s full captured column set) or rollup (an endpoint-shape rollup''s counter/odometer-only column set). Every reader resolving "the current schema for this source_view" must filter on the kind it actually wants -- schema_id is a single sequence shared by both kinds, so the highest schema_id for a source_view is not necessarily a capture schema.';
 COMMENT ON COLUMN pgfr_record.payload_schemas.columns IS 'Column names in payload array position order.';
 COMMENT ON COLUMN pgfr_record.payload_schemas.type_names IS 'Column type names in payload array position order; drives presentation-view cast generation.';
 COMMENT ON COLUMN pgfr_record.payload_schemas.fingerprint IS 'Hash of (source_view, columns, type_names); a changed live view shape mints a new schema_id rather than mutating this row.';

@@ -96,11 +96,11 @@ BEGIN
 
             SELECT schema_id INTO v_schema_id
             FROM pgfr_record.payload_schemas
-            WHERE source_view = v_row.source_view AND fingerprint = v_fp;
+            WHERE source_view = v_row.source_view AND kind = 'capture' AND fingerprint = v_fp;
 
             IF v_schema_id IS NULL THEN
-                INSERT INTO pgfr_record.payload_schemas (source_view, columns, type_names, fingerprint)
-                VALUES (v_row.source_view, v_columns, v_types, v_fp)
+                INSERT INTO pgfr_record.payload_schemas (source_view, kind, columns, type_names, fingerprint)
+                VALUES (v_row.source_view, 'capture', v_columns, v_types, v_fp)
                 RETURNING schema_id INTO v_schema_id;
             END IF;
 
@@ -182,7 +182,7 @@ BEGIN
         -- or the target's precondition remains unmet -- nothing to do.
         SELECT * INTO v_current
         FROM pgfr_record.payload_schemas
-        WHERE source_view = v_source_view.source_view
+        WHERE source_view = v_source_view.source_view AND kind = 'capture'
         ORDER BY schema_id DESC
         LIMIT 1;
 
@@ -193,7 +193,7 @@ BEGIN
         v_branches := '{}';
         FOR v_variant IN
             SELECT * FROM pgfr_record.payload_schemas
-            WHERE source_view = v_source_view.source_view
+            WHERE source_view = v_source_view.source_view AND kind = 'capture'
         LOOP
             v_exprs := '{}';
             FOR v_pos IN 1..array_length(v_current.columns, 1) LOOP

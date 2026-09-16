@@ -33,15 +33,15 @@ BEGIN
 END $do$;
 
 SELECT payload, schema_id FROM pgfr_record.a_pg_stat_all_tables ORDER BY captured_at DESC LIMIT 1 \gset tbl_
-SELECT array_position(columns, 'relid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset relid_
-SELECT array_position(columns, 'relname') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset rn_
-SELECT array_position(columns, 'seq_scan') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset ss_
-SELECT array_position(columns, 'seq_tup_read') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset str_
-SELECT array_position(columns, 'n_live_tup') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset live_
-SELECT array_position(columns, 'n_dead_tup') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset dead_
-SELECT array_position(columns, 'n_tup_upd') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset upd_
-SELECT array_position(columns, 'n_tup_hot_upd') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset hot_
-SELECT array_position(columns, 'autovacuum_count') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset av_
+SELECT array_position(columns, 'relid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset relid_
+SELECT array_position(columns, 'relname') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset rn_
+SELECT array_position(columns, 'seq_scan') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset ss_
+SELECT array_position(columns, 'seq_tup_read') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset str_
+SELECT array_position(columns, 'n_live_tup') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset live_
+SELECT array_position(columns, 'n_dead_tup') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset dead_
+SELECT array_position(columns, 'n_tup_upd') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset upd_
+SELECT array_position(columns, 'n_tup_hot_upd') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset hot_
+SELECT array_position(columns, 'autovacuum_count') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset av_
 
 -- :tbl_payload is "whichever row happened to be captured most recently" --
 -- not necessarily a low-activity table, since pg_stat_all_tables captures

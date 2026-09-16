@@ -37,20 +37,20 @@ SELECT jsonb_agg(
         ELSE '0'
     END)::jsonb ORDER BY ord
 ) AS base_payload
-FROM (SELECT columns, type_names FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' ORDER BY schema_id DESC LIMIT 1) ps,
+FROM (SELECT columns, type_names FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1) ps,
      unnest(ps.columns, ps.type_names) WITH ORDINALITY AS u(c, t, ord)
 \gset base_
 
-SELECT schema_id FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' ORDER BY schema_id DESC LIMIT 1 \gset schema_
-SELECT array_position(columns, 'queryid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' ORDER BY schema_id DESC LIMIT 1 \gset queryid_
-SELECT array_position(columns, 'dbid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' ORDER BY schema_id DESC LIMIT 1 \gset dbid_
-SELECT array_position(columns, 'userid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' ORDER BY schema_id DESC LIMIT 1 \gset userid_
-SELECT array_position(columns, 'toplevel') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' ORDER BY schema_id DESC LIMIT 1 \gset toplevel_
-SELECT array_position(columns, 'query') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' ORDER BY schema_id DESC LIMIT 1 \gset query_
-SELECT array_position(columns, 'calls') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' ORDER BY schema_id DESC LIMIT 1 \gset calls_
-SELECT array_position(columns, 'total_exec_time') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' ORDER BY schema_id DESC LIMIT 1 \gset exec_
-SELECT array_position(columns, 'shared_blks_hit') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' ORDER BY schema_id DESC LIMIT 1 \gset hit_
-SELECT array_position(columns, 'shared_blks_read') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' ORDER BY schema_id DESC LIMIT 1 \gset read_
+SELECT schema_id FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset schema_
+SELECT array_position(columns, 'queryid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset queryid_
+SELECT array_position(columns, 'dbid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset dbid_
+SELECT array_position(columns, 'userid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset userid_
+SELECT array_position(columns, 'toplevel') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset toplevel_
+SELECT array_position(columns, 'query') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset query_
+SELECT array_position(columns, 'calls') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset calls_
+SELECT array_position(columns, 'total_exec_time') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset exec_
+SELECT array_position(columns, 'shared_blks_hit') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset hit_
+SELECT array_position(columns, 'shared_blks_read') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_stat_statements' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset read_
 
 -- ---------------------------------------------------------------------------
 -- query_dict / refresh_query_dict()

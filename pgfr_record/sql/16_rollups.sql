@@ -61,6 +61,26 @@ BEGIN
                         v_rollup
                     );
                 END IF;
+                -- Column-add migration: schema_id, so an endpoint-shape
+                -- rollup row can record which 'rollup' kind payload_schemas
+                -- row its first_values/last_values arrays follow (see
+                -- generate_capture_plan()). Nullable, unlike the archive's
+                -- own schema_id: a row written before this column existed
+                -- has no schema_id and keeps its original name-keyed jsonb
+                -- object shape forever -- rollup_deltas() reads either
+                -- shape depending on whether a given row has one.
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = 'pgfr_record' AND table_name = v_rollup AND column_name = 'first_values'
+                ) AND NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = 'pgfr_record' AND table_name = v_rollup AND column_name = 'schema_id'
+                ) THEN
+                    EXECUTE format(
+                        'ALTER TABLE pgfr_record.%I ADD COLUMN schema_id smallint REFERENCES pgfr_record.payload_schemas',
+                        v_rollup
+                    );
+                END IF;
                 CONTINUE;
             END IF;
 
@@ -101,6 +121,7 @@ BEGIN
                          key_hash           bigint,
                          first_captured_at  timestamptz NOT NULL,
                          last_captured_at   timestamptz NOT NULL,
+                         schema_id          smallint REFERENCES pgfr_record.payload_schemas,
                          first_values       jsonb NOT NULL,
                          last_values        jsonb NOT NULL,
                          first_reset_values jsonb,

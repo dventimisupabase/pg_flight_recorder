@@ -64,7 +64,7 @@ SELECT is(
 -- ---------------------------------------------------------------------------
 SELECT key, key_hash, schema_id, payload FROM pgfr_record.a_pg_statio_all_tables a WHERE (a.key->>'relid')::oid = (SELECT oid FROM pg_class WHERE relname = 'manifest' AND relnamespace = 'pgfr_record'::regnamespace) ORDER BY captured_at DESC LIMIT 1 \gset pgfr_
 SELECT key, key_hash, schema_id, payload FROM pgfr_record.a_pg_statio_all_tables a WHERE (a.key->>'relid')::oid = 2619 ORDER BY captured_at DESC LIMIT 1 \gset other_
-SELECT array_position(columns, 'heap_blks_hit') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_statio_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset hh_
+SELECT array_position(columns, 'heap_blks_hit') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_statio_all_tables' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset hh_
 
 INSERT INTO pgfr_record.a_pg_statio_all_tables (captured_at, key, key_hash, row_hash, schema_id, payload) VALUES
     (:'ref_t_ref'::timestamptz - interval '10 minutes', :'pgfr_key'::jsonb, :pgfr_key_hash, 7801, :pgfr_schema_id, jsonb_set(:'pgfr_payload'::jsonb, ARRAY[:'hh_p'], '0'::jsonb)),

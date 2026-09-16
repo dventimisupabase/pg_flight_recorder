@@ -51,7 +51,7 @@ COMMENT ON COLUMN pgfr_record.capture_plan.capture_select_sql IS
 COMMENT ON COLUMN pgfr_record.capture_plan.rollup_table IS 'This target''s rollup table (milestone 8), NULL if it has none. Set alongside rollup_close_sql from the same manifest.rollup_retention check.';
 COMMENT ON COLUMN pgfr_record.capture_plan.rollup_granularity IS 'Copied from manifest.rollup_granularity so the collector''s bucket-close step never has to join back to the manifest on a tick.';
 COMMENT ON COLUMN pgfr_record.capture_plan.rollup_close_sql IS
-    'Cached bucket-close aggregate for this target''s rollup (milestone 8), NULL if it has none. Reads pgfr_record.v_<name> (the presentation view, not the raw payload) filtered to [$1, $2), so mid-major schema accretion is handled by the view''s own UNION/NULL-fill rather than reimplemented here. Endpoint shape (Group B): first/last value per counter/odometer column per key, via a DISTINCT ON self-join. Stat shape (Group C): one UNION ALL branch per pgfr_record.rollup_specs row, each an independent FILTER''d aggregate.';
+    'Cached bucket-close aggregate for this target''s rollup (milestone 8), NULL if it has none. Reads pgfr_record.v_<name> (the presentation view, not the raw payload) filtered to [$1, $2), so mid-major schema accretion is handled by the view''s own UNION/NULL-fill rather than reimplemented here. Endpoint shape (Group B): first/last value per counter/odometer column per key, via a DISTINCT ON self-join; first_values/last_values are a dictionary-encoded jsonb array against a ''rollup'' kind payload_schemas row minted alongside this SQL (the same mint-together invariant as the capture schema), not a name-keyed object -- first_reset_values/last_reset_values stay name-keyed objects. Stat shape (Group C): one UNION ALL branch per pgfr_record.rollup_specs row, each an independent FILTER''d aggregate.';
 
 -- Column list + type names for a source_view, translated into the SQL
 -- fragments generate_capture_plan() needs: the key extractor, the
@@ -84,15 +84,18 @@ DECLARE
     v_stat_selects    text[];
     v_rollup_close_sql text;
     v_ctr_cols        text[];
+    v_ctr_types       text[];
     v_reset_cols      text[];
     v_f_key_exprs     text[];
     v_f_key_join      text;
-    v_f_obj_exprs     text[];
-    v_l_obj_exprs     text[];
+    v_f_val_exprs     text[];
+    v_l_val_exprs     text[];
     v_f_reset_exprs   text[];
     v_l_reset_exprs   text[];
     v_f_key_col_expr  text;
     v_f_key_hash_expr text;
+    v_rollup_fp         text;
+    v_rollup_schema_id  smallint;
 BEGIN
     TRUNCATE pgfr_record.capture_plan;
 
@@ -104,7 +107,7 @@ BEGIN
         JOIN LATERAL (
             SELECT schema_id, columns, type_names
             FROM pgfr_record.payload_schemas p
-            WHERE p.source_view = m.source_view
+            WHERE p.source_view = m.source_view AND p.kind = 'capture'
             ORDER BY p.schema_id DESC
             LIMIT 1
         ) ps ON true
@@ -212,8 +215,8 @@ BEGIN
                 -- needs. Column order follows payload_schemas' own order
                 -- (via the ordinality join below), the same "schema order"
                 -- convention used everywhere else in this design.
-                SELECT array_agg(cc.column_name ORDER BY u.ord)
-                INTO v_ctr_cols
+                SELECT array_agg(cc.column_name ORDER BY u.ord), array_agg(v_row.type_names[u.ord] ORDER BY u.ord)
+                INTO v_ctr_cols, v_ctr_types
                 FROM pgfr_record.column_classes cc
                 JOIN unnest(v_row.columns) WITH ORDINALITY AS u(col, ord) ON u.col = cc.column_name
                 WHERE cc.source_view = v_row.source_view AND cc.class IN ('counter', 'odometer');
@@ -223,12 +226,35 @@ BEGIN
                 FROM pgfr_record.column_classes
                 WHERE source_view = v_row.source_view AND column_name = ANY(v_ctr_cols) AND reset_column IS NOT NULL;
 
-                v_f_obj_exprs := '{}';
-                v_l_obj_exprs := '{}';
+                -- first_values/last_values switch from a name-keyed jsonb
+                -- object to a dictionary-encoded jsonb array (REFERENCE.md's
+                -- Rollups section): mint (or reuse) the 'rollup' kind
+                -- payload_schemas row for exactly this counter/odometer
+                -- column set, mint-together with the array-building
+                -- expressions below so schema_id and array order can never
+                -- drift apart -- the same invariant generate_archives()
+                -- already keeps for the capture schema. first_reset_values/
+                -- last_reset_values are unchanged (still object-encoded):
+                -- a different, usually much narrower column list (dedup'd
+                -- reset_column names), not worth a second dictionary yet.
+                v_rollup_fp := md5(v_row.source_view || ':rollup:' || array_to_string(v_ctr_cols, ',') || ':' || array_to_string(v_ctr_types, ','));
+
+                SELECT schema_id INTO v_rollup_schema_id
+                FROM pgfr_record.payload_schemas
+                WHERE source_view = v_row.source_view AND kind = 'rollup' AND fingerprint = v_rollup_fp;
+
+                IF v_rollup_schema_id IS NULL THEN
+                    INSERT INTO pgfr_record.payload_schemas (source_view, kind, columns, type_names, fingerprint)
+                    VALUES (v_row.source_view, 'rollup', v_ctr_cols, v_ctr_types, v_rollup_fp)
+                    RETURNING schema_id INTO v_rollup_schema_id;
+                END IF;
+
+                v_f_val_exprs := '{}';
+                v_l_val_exprs := '{}';
                 FOR v_i IN 1..array_length(v_ctr_cols, 1) LOOP
                     v_col := v_ctr_cols[v_i];
-                    v_f_obj_exprs := v_f_obj_exprs || format('%L, f.%I', v_col, v_col);
-                    v_l_obj_exprs := v_l_obj_exprs || format('%L, l.%I', v_col, v_col);
+                    v_f_val_exprs := v_f_val_exprs || format('f.%I', v_col);
+                    v_l_val_exprs := v_l_val_exprs || format('l.%I', v_col);
                 END LOOP;
 
                 v_f_reset_exprs := '{}';
@@ -245,13 +271,14 @@ BEGIN
                     -- Singleton: no DISTINCT ON / join key needed, exactly
                     -- one first row and one last row in the whole bucket.
                     v_rollup_close_sql := format(
-                        'INSERT INTO pgfr_record.%I (bucket_start, key, key_hash, first_captured_at, last_captured_at, first_values, last_values, first_reset_values, last_reset_values)
-                         SELECT $1::timestamptz, NULL::jsonb, NULL::bigint, f.captured_at, l.captured_at,
-                                jsonb_build_object(%s), jsonb_build_object(%s), %s, %s
+                        'INSERT INTO pgfr_record.%I (bucket_start, key, key_hash, first_captured_at, last_captured_at, schema_id, first_values, last_values, first_reset_values, last_reset_values)
+                         SELECT $1::timestamptz, NULL::jsonb, NULL::bigint, f.captured_at, l.captured_at, %s,
+                                jsonb_build_array(%s), jsonb_build_array(%s), %s, %s
                          FROM (SELECT * FROM %s WHERE captured_at >= $1 AND captured_at < $2 ORDER BY captured_at ASC LIMIT 1) f
                          CROSS JOIN (SELECT * FROM %s WHERE captured_at >= $1 AND captured_at < $2 ORDER BY captured_at DESC LIMIT 1) l',
                         v_rollup_table,
-                        array_to_string(v_f_obj_exprs, ', '), array_to_string(v_l_obj_exprs, ', '),
+                        v_rollup_schema_id,
+                        array_to_string(v_f_val_exprs, ', '), array_to_string(v_l_val_exprs, ', '),
                         CASE WHEN v_reset_cols IS NULL THEN 'NULL::jsonb' ELSE format('jsonb_build_object(%s)', array_to_string(v_f_reset_exprs, ', ')) END,
                         CASE WHEN v_reset_cols IS NULL THEN 'NULL::jsonb' ELSE format('jsonb_build_object(%s)', array_to_string(v_l_reset_exprs, ', ')) END,
                         v_rollup_view, v_rollup_view
@@ -267,14 +294,14 @@ BEGIN
                     SELECT string_agg(quote_ident(k), ', ') INTO v_f_key_join FROM unnest(v_row.natural_key) k;
 
                     v_rollup_close_sql := format(
-                        'INSERT INTO pgfr_record.%I (bucket_start, key, key_hash, first_captured_at, last_captured_at, first_values, last_values, first_reset_values, last_reset_values)
-                         SELECT $1::timestamptz, %s, %s, f.captured_at, l.captured_at,
-                                jsonb_build_object(%s), jsonb_build_object(%s), %s, %s
+                        'INSERT INTO pgfr_record.%I (bucket_start, key, key_hash, first_captured_at, last_captured_at, schema_id, first_values, last_values, first_reset_values, last_reset_values)
+                         SELECT $1::timestamptz, %s, %s, f.captured_at, l.captured_at, %s,
+                                jsonb_build_array(%s), jsonb_build_array(%s), %s, %s
                          FROM (SELECT DISTINCT ON (%s) * FROM %s WHERE captured_at >= $1 AND captured_at < $2 ORDER BY %s, captured_at ASC) f
                          JOIN (SELECT DISTINCT ON (%s) * FROM %s WHERE captured_at >= $1 AND captured_at < $2 ORDER BY %s, captured_at DESC) l USING (%s)',
                         v_rollup_table,
-                        v_f_key_col_expr, v_f_key_hash_expr,
-                        array_to_string(v_f_obj_exprs, ', '), array_to_string(v_l_obj_exprs, ', '),
+                        v_f_key_col_expr, v_f_key_hash_expr, v_rollup_schema_id,
+                        array_to_string(v_f_val_exprs, ', '), array_to_string(v_l_val_exprs, ', '),
                         CASE WHEN v_reset_cols IS NULL THEN 'NULL::jsonb' ELSE format('jsonb_build_object(%s)', array_to_string(v_f_reset_exprs, ', ')) END,
                         CASE WHEN v_reset_cols IS NULL THEN 'NULL::jsonb' ELSE format('jsonb_build_object(%s)', array_to_string(v_l_reset_exprs, ', ')) END,
                         v_f_key_join, v_rollup_view, v_f_key_join,

@@ -12,10 +12,11 @@ SELECT has_function('pgfr_record', 'generate_presentation_views', 'Function pgfr
 -- ---------------------------------------------------------------------------
 SELECT is(
     (SELECT count(*)::int FROM pgfr_record.payload_schemas ps
-     WHERE ps.schema_id = (SELECT max(schema_id) FROM pgfr_record.payload_schemas WHERE source_view = ps.source_view)
+     WHERE ps.kind = 'capture'
+       AND ps.schema_id = (SELECT max(schema_id) FROM pgfr_record.payload_schemas WHERE source_view = ps.source_view AND kind = 'capture')
        AND to_regclass('pgfr_record.v_' || pgfr_record._short_name(ps.source_view)) IS NOT NULL),
-    (SELECT count(DISTINCT source_view)::int FROM pgfr_record.payload_schemas),
-    'every source_view with a minted schema should have a v_<short_name> presentation view'
+    (SELECT count(DISTINCT source_view)::int FROM pgfr_record.payload_schemas WHERE kind = 'capture'),
+    'every source_view with a minted capture schema should have a v_<short_name> presentation view'
 );
 
 -- ---------------------------------------------------------------------------

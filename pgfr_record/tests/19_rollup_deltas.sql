@@ -3,7 +3,7 @@
 -- =============================================================================
 
 BEGIN;
-SELECT plan(8);
+SELECT plan(13);
 
 SELECT has_function('pgfr_record', 'rollup_deltas', 'Function pgfr_record.rollup_deltas should exist');
 
@@ -31,8 +31,8 @@ SELECT throws_ok(
 -- ---------------------------------------------------------------------------
 SELECT lives_ok($$SELECT pgfr_record.run_tier('medium')$$, 'run_tier(''medium'') should capture a real baseline for pg_stat_all_tables');
 
-SELECT array_position(columns, 'relid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset relid_
-SELECT array_position(columns, 'seq_scan') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset ss_
+SELECT array_position(columns, 'relid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset relid_
+SELECT array_position(columns, 'seq_scan') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset ss_
 SELECT set_config('pgfr_test.relid_p', :'relid_p', true), set_config('pgfr_test.ss_p', :'ss_p', true);
 
 DO $do$
@@ -93,7 +93,7 @@ SELECT 'relid oid, ' || string_agg(
            ', ' ORDER BY u.ord
        ) || ', from_bucket timestamptz, to_bucket timestamptz' AS defs
 FROM (SELECT columns, type_names FROM pgfr_record.payload_schemas
-      WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1) ps,
+      WHERE source_view = 'pg_catalog.pg_stat_all_tables' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1) ps,
      unnest(ps.columns, ps.type_names) WITH ORDINALITY AS u(c, t, ord),
      pgfr_record.column_classes cc
 WHERE cc.source_view = 'pg_catalog.pg_stat_all_tables' AND cc.column_name = u.c AND cc.class IN ('counter', 'odometer')
@@ -118,6 +118,73 @@ SELECT is(
      WHERE relid = 999998900),
     999998900::oid,
     'rollup_deltas() should extract the key column (relid) from the rollup row''s own key jsonb'
+);
+
+-- ---------------------------------------------------------------------------
+-- The bucket run_tier() just closed should be array-encoded: a real
+-- schema_id, resolving to a 'rollup' kind payload_schemas row that lists
+-- seq_scan (REFERENCE.md's Rollups section).
+-- ---------------------------------------------------------------------------
+SELECT ok(
+    (SELECT schema_id FROM pgfr_record.r_pg_stat_all_tables
+     WHERE bucket_start = date_trunc('day', clock_timestamp()) - interval '1 day'
+       AND (key->>'relid')::oid = 999998900) IS NOT NULL,
+    'a freshly closed rollup bucket should record a non-NULL schema_id'
+);
+SELECT ok(
+    (SELECT 'seq_scan' = ANY(columns) FROM pgfr_record.payload_schemas
+     WHERE kind = 'rollup'
+       AND schema_id = (SELECT schema_id FROM pgfr_record.r_pg_stat_all_tables
+                         WHERE bucket_start = date_trunc('day', clock_timestamp()) - interval '1 day'
+                           AND (key->>'relid')::oid = 999998900)),
+    'the rollup row''s schema_id should resolve to a ''rollup'' kind payload_schemas row listing seq_scan'
+);
+
+-- ---------------------------------------------------------------------------
+-- Backward compatibility: a rollup row written before the array-encoding
+-- migration has schema_id NULL and name-keyed jsonb objects for
+-- first_values/last_values -- never rewritten (§1 invariant 1), so
+-- rollup_deltas() must still decode it correctly alongside array-encoded
+-- rows (mirrors generate_presentation_views()'s own multi-schema-id
+-- tolerance for archives).
+-- ---------------------------------------------------------------------------
+SELECT lives_ok(
+    $$INSERT INTO pgfr_record.r_pg_stat_all_tables
+          (bucket_start, key, key_hash, first_captured_at, last_captured_at, schema_id, first_values, last_values)
+      VALUES
+          (date_trunc('day', clock_timestamp()) - interval '2 days',
+           jsonb_build_object('relid', 999998901),
+           hashtextextended((jsonb_build_object('relid', 999998901))::text, 0),
+           date_trunc('day', clock_timestamp()) - interval '2 days' + interval '1 hour',
+           date_trunc('day', clock_timestamp()) - interval '2 days' + interval '1 hour',
+           NULL, jsonb_build_object('seq_scan', 10), jsonb_build_object('seq_scan', 10)),
+          (date_trunc('day', clock_timestamp()) - interval '1 day',
+           jsonb_build_object('relid', 999998901),
+           hashtextextended((jsonb_build_object('relid', 999998901))::text, 0),
+           date_trunc('day', clock_timestamp()) - interval '1 day' + interval '1 hour',
+           date_trunc('day', clock_timestamp()) - interval '1 day' + interval '1 hour',
+           NULL, jsonb_build_object('seq_scan', 50), jsonb_build_object('seq_scan', 50))$$,
+    'manufacturing a legacy, object-encoded rollup row pair (schema_id NULL) should succeed'
+);
+SELECT is(
+    (SELECT seq_scan_delta FROM pgfr_record.rollup_deltas(
+        'pg_catalog.pg_stat_all_tables',
+        date_trunc('day', clock_timestamp()) - interval '2 days',
+        date_trunc('day', clock_timestamp()) - interval '1 day'
+     ) AS d(:tbld_defs)
+     WHERE relid = 999998901),
+    40::bigint,
+    'rollup_deltas() should compute the correct delta from a legacy, object-encoded (schema_id NULL) rollup row pair'
+);
+SELECT is(
+    (SELECT relid FROM pgfr_record.rollup_deltas(
+        'pg_catalog.pg_stat_all_tables',
+        date_trunc('day', clock_timestamp()) - interval '2 days',
+        date_trunc('day', clock_timestamp()) - interval '1 day'
+     ) AS d(:tbld_defs)
+     WHERE relid = 999998901),
+    999998901::oid,
+    'rollup_deltas() should extract the key column from a legacy rollup row exactly as from a current one'
 );
 
 SELECT * FROM finish();

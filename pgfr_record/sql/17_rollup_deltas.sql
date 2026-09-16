@@ -34,6 +34,8 @@ DECLARE
     v_key_list    text[];
     v_join_clause text;
     v_sql         text;
+    v_t_extract   text;
+    v_f_extract   text;
 BEGIN
     SELECT * INTO v_manifest FROM pgfr_record.manifest WHERE source_view = p_source_view;
     IF NOT FOUND THEN
@@ -60,8 +62,8 @@ BEGIN
             SELECT u.col, u.typ
             FROM pgfr_record.payload_schemas ps
             JOIN unnest(ps.columns, ps.type_names) WITH ORDINALITY AS u(col, typ, ord) ON u.col = ANY(v_manifest.natural_key)
-            WHERE ps.source_view = p_source_view
-              AND ps.schema_id = (SELECT max(schema_id) FROM pgfr_record.payload_schemas WHERE source_view = p_source_view)
+            WHERE ps.source_view = p_source_view AND ps.kind = 'capture'
+              AND ps.schema_id = (SELECT max(schema_id) FROM pgfr_record.payload_schemas WHERE source_view = p_source_view AND kind = 'capture')
             ORDER BY u.ord
         LOOP
             v_key_list := v_key_list || format('(t.key->>%L)::%s AS %I', v_col, v_type, v_col);
@@ -72,35 +74,55 @@ BEGIN
     -- exactly like deltas() (§4.5): a counter's decreased value, or its
     -- linked reset_column advancing, yields NULL; an odometer skips reset
     -- detection entirely.
+    --
+    -- first_values/last_values may be either the legacy name-keyed jsonb
+    -- object (schema_id IS NULL -- a row written before the 'rollup' kind
+    -- payload_schemas dictionary existed) or the current dictionary-
+    -- encoded array (schema_id set, position resolved via the matching
+    -- 'rollup' kind row, joined in below as ps_t/ps_f). Old rows are never
+    -- rewritten to the new shape (§1 invariant 1: no UPDATE, ever), so both
+    -- shapes must decode correctly, same as generate_presentation_views()
+    -- already tolerates every schema_id an archive has ever had.
+    -- first_reset_values/last_reset_values are untouched by this and stay
+    -- name-keyed objects regardless of schema_id.
     v_select_list := '{}';
     FOR v_col, v_class, v_reset_col, v_type IN
         SELECT cc.column_name, cc.class, cc.reset_column, u.typ
         FROM pgfr_record.column_classes cc
-        JOIN pgfr_record.payload_schemas ps ON ps.source_view = cc.source_view
+        JOIN pgfr_record.payload_schemas ps ON ps.source_view = cc.source_view AND ps.kind = 'capture'
         JOIN unnest(ps.columns, ps.type_names) WITH ORDINALITY AS u(col, typ, ord) ON u.col = cc.column_name
         WHERE cc.source_view = p_source_view AND cc.class IN ('counter', 'odometer')
-          AND ps.schema_id = (SELECT max(schema_id) FROM pgfr_record.payload_schemas WHERE source_view = p_source_view)
+          AND ps.schema_id = (SELECT max(schema_id) FROM pgfr_record.payload_schemas WHERE source_view = p_source_view AND kind = 'capture')
         ORDER BY u.ord
     LOOP
+        v_t_extract := format(
+            'CASE WHEN t.schema_id IS NULL THEN (t.last_values->>%L) ELSE (t.last_values->>(array_position(ps_t.columns, %L) - 1)) END',
+            v_col, v_col
+        );
+        v_f_extract := format(
+            'CASE WHEN f.schema_id IS NULL THEN (f.first_values->>%L) ELSE (f.first_values->>(array_position(ps_f.columns, %L) - 1)) END',
+            v_col, v_col
+        );
+
         IF v_class = 'counter' THEN
             IF v_reset_col IS NOT NULL THEN
                 v_select_list := v_select_list || format(
-                    'CASE WHEN (t.last_values->>%L)::%s < (f.first_values->>%L)::%s
+                    'CASE WHEN (%s)::%s < (%s)::%s
                           OR (t.last_reset_values->>%L) IS DISTINCT FROM (f.first_reset_values->>%L)
-                          THEN NULL ELSE (t.last_values->>%L)::%s - (f.first_values->>%L)::%s END AS %I',
-                    v_col, v_type, v_col, v_type, v_reset_col, v_reset_col, v_col, v_type, v_col, v_type, v_col || '_delta'
+                          THEN NULL ELSE (%s)::%s - (%s)::%s END AS %I',
+                    v_t_extract, v_type, v_f_extract, v_type, v_reset_col, v_reset_col, v_t_extract, v_type, v_f_extract, v_type, v_col || '_delta'
                 );
             ELSE
                 v_select_list := v_select_list || format(
-                    'CASE WHEN (t.last_values->>%L)::%s < (f.first_values->>%L)::%s THEN NULL
-                          ELSE (t.last_values->>%L)::%s - (f.first_values->>%L)::%s END AS %I',
-                    v_col, v_type, v_col, v_type, v_col, v_type, v_col, v_type, v_col || '_delta'
+                    'CASE WHEN (%s)::%s < (%s)::%s THEN NULL
+                          ELSE (%s)::%s - (%s)::%s END AS %I',
+                    v_t_extract, v_type, v_f_extract, v_type, v_t_extract, v_type, v_f_extract, v_type, v_col || '_delta'
                 );
             END IF;
         ELSE
             v_select_list := v_select_list || format(
-                '((t.last_values->>%L)::%s - (f.first_values->>%L)::%s) AS %I',
-                v_col, v_type, v_col, v_type, v_col || '_delta'
+                '((%s)::%s - (%s)::%s) AS %I',
+                v_t_extract, v_type, v_f_extract, v_type, v_col || '_delta'
             );
         END IF;
     END LOOP;
@@ -119,6 +141,8 @@ BEGIN
         'SELECT %s, f.bucket_start AS from_bucket, t.bucket_start AS to_bucket
          FROM pgfr_record.%I t
          JOIN pgfr_record.%I f %s
+         LEFT JOIN pgfr_record.payload_schemas ps_t ON ps_t.schema_id = t.schema_id
+         LEFT JOIN pgfr_record.payload_schemas ps_f ON ps_f.schema_id = f.schema_id
          WHERE t.bucket_start = %L AND f.bucket_start = %L',
         array_to_string(v_key_list || v_select_list, ', '),
         v_rollup, v_rollup, v_join_clause, v_to, v_from
@@ -129,4 +153,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION pgfr_record.rollup_deltas(text, timestamptz, timestamptz) IS
-    'The long-horizon analog of deltas() (milestone 8), for endpoint-shaped (Group B) rollup targets: diffs the last_values of the bucket containing p_to_bucket against the first_values of the bucket containing p_from_bucket, per key, reset-aware exactly like deltas(). Raises for a stat-shaped (Group C) target -- read pgfr_record.r_<name> directly instead, its rows are already the final per-bucket value. Returns SETOF record; supply a column-definition list, e.g. rollup_deltas(''pg_catalog.pg_stat_all_tables'', t1, t2) AS d(relid oid, seq_scan_delta bigint, ..., from_bucket timestamptz, to_bucket timestamptz).';
+    'The long-horizon analog of deltas() (milestone 8), for endpoint-shaped (Group B) rollup targets: diffs the last_values of the bucket containing p_to_bucket against the first_values of the bucket containing p_from_bucket, per key, reset-aware exactly like deltas(). Raises for a stat-shaped (Group C) target -- read pgfr_record.r_<name> directly instead, its rows are already the final per-bucket value. Reads first_values/last_values as either a dictionary-encoded jsonb array (schema_id set, position resolved via the matching ''rollup'' kind payload_schemas row) or the legacy name-keyed jsonb object (schema_id NULL) -- old rows are never rewritten to the new shape, so both must decode correctly. Returns SETOF record; supply a column-definition list, e.g. rollup_deltas(''pg_catalog.pg_stat_all_tables'', t1, t2) AS d(relid oid, seq_scan_delta bigint, ..., from_bucket timestamptz, to_bucket timestamptz).';

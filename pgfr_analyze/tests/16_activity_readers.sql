@@ -38,7 +38,7 @@ END $do$;
 -- wal_archiver_status(): a 5-file archiving jump.
 -- ---------------------------------------------------------------------------
 SELECT payload, schema_id FROM pgfr_record.a_pg_stat_archiver ORDER BY captured_at DESC LIMIT 1 \gset arc_
-SELECT array_position(columns, 'archived_count') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_archiver' ORDER BY schema_id DESC LIMIT 1 \gset ac_
+SELECT array_position(columns, 'archived_count') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_archiver' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset ac_
 
 INSERT INTO pgfr_record.a_pg_stat_archiver (captured_at, key, key_hash, row_hash, schema_id, payload) VALUES
     (:'ref_t_ref'::timestamptz - interval '10 minutes', NULL, NULL, 8801, :arc_schema_id, jsonb_set(:'arc_payload'::jsonb, ARRAY[:'ac_p'], '0'::jsonb)),
@@ -62,14 +62,14 @@ SELECT jsonb_agg(
         ELSE '0'
     END)::jsonb ORDER BY ord
 ) AS base_payload
-FROM (SELECT columns, type_names FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_progress_vacuum' ORDER BY schema_id DESC LIMIT 1) ps,
+FROM (SELECT columns, type_names FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_progress_vacuum' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1) ps,
      unnest(ps.columns, ps.type_names) WITH ORDINALITY AS u(c, t, ord)
 \gset vac_base_
-SELECT schema_id FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_progress_vacuum' ORDER BY schema_id DESC LIMIT 1 \gset vacschema_
-SELECT array_position(columns, 'pid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_progress_vacuum' ORDER BY schema_id DESC LIMIT 1 \gset vpid_
-SELECT array_position(columns, 'phase') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_progress_vacuum' ORDER BY schema_id DESC LIMIT 1 \gset phase_
-SELECT array_position(columns, 'heap_blks_total') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_progress_vacuum' ORDER BY schema_id DESC LIMIT 1 \gset hbt_
-SELECT array_position(columns, 'heap_blks_scanned') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_progress_vacuum' ORDER BY schema_id DESC LIMIT 1 \gset hbs_
+SELECT schema_id FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_progress_vacuum' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset vacschema_
+SELECT array_position(columns, 'pid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_progress_vacuum' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset vpid_
+SELECT array_position(columns, 'phase') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_progress_vacuum' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset phase_
+SELECT array_position(columns, 'heap_blks_total') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_progress_vacuum' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset hbt_
+SELECT array_position(columns, 'heap_blks_scanned') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_progress_vacuum' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset hbs_
 
 INSERT INTO pgfr_record.a_pg_stat_progress_vacuum (captured_at, key, key_hash, row_hash, schema_id, payload) VALUES
     (:'ref_t_ref'::timestamptz, NULL, NULL, 8901, :vacschema_schema_id,
@@ -89,9 +89,9 @@ SELECT is(
 -- transaction has been open for 10 minutes -- broader than IDLE_IN_TRANSACTION.
 -- ---------------------------------------------------------------------------
 SELECT payload, schema_id FROM pgfr_record.a_pg_stat_activity ORDER BY captured_at DESC LIMIT 1 \gset act_
-SELECT array_position(columns, 'pid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' ORDER BY schema_id DESC LIMIT 1 \gset apid_
-SELECT array_position(columns, 'state') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' ORDER BY schema_id DESC LIMIT 1 \gset astate_
-SELECT array_position(columns, 'xact_start') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' ORDER BY schema_id DESC LIMIT 1 \gset axact_
+SELECT array_position(columns, 'pid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset apid_
+SELECT array_position(columns, 'state') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset astate_
+SELECT array_position(columns, 'xact_start') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset axact_
 
 INSERT INTO pgfr_record.a_pg_stat_activity (captured_at, key, key_hash, row_hash, schema_id, payload) VALUES
     (:'ref_t_ref'::timestamptz, NULL, NULL, 8902, :act_schema_id,

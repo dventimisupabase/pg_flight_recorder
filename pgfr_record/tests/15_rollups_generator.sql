@@ -7,7 +7,7 @@
 -- fresh.
 
 BEGIN;
-SELECT plan(24);
+SELECT plan(26);
 
 SELECT has_function('pgfr_record', 'generate_rollups', 'Function pgfr_record.generate_rollups should exist');
 
@@ -34,7 +34,7 @@ SELECT is(
     (SELECT array_agg(column_name::text ORDER BY ordinal_position)
      FROM information_schema.columns
      WHERE table_schema = 'pgfr_record' AND table_name = 'r_pg_stat_wal_receiver'),
-    ARRAY['bucket_start','key','key_hash','first_captured_at','last_captured_at','first_values','last_values','first_reset_values','last_reset_values'],
+    ARRAY['bucket_start','key','key_hash','first_captured_at','last_captured_at','schema_id','first_values','last_values','first_reset_values','last_reset_values'],
     'r_pg_stat_wal_receiver should get the endpoint-rollup shape mechanically, via its own odometer columns'
 );
 
@@ -47,7 +47,7 @@ SELECT is(
     (SELECT array_agg(column_name::text ORDER BY ordinal_position)
      FROM information_schema.columns
      WHERE table_schema = 'pgfr_record' AND table_name = 'r_pg_stat_all_tables'),
-    ARRAY['bucket_start','key','key_hash','first_captured_at','last_captured_at','first_values','last_values','first_reset_values','last_reset_values'],
+    ARRAY['bucket_start','key','key_hash','first_captured_at','last_captured_at','schema_id','first_values','last_values','first_reset_values','last_reset_values'],
     'r_pg_stat_all_tables should have the uniform endpoint-rollup column set, in order'
 );
 SELECT has_index('pgfr_record', 'r_pg_stat_all_tables', 'r_pg_stat_all_tables_key_hash_idx', 'the (key_hash, bucket_start DESC) lookup index should exist');
@@ -149,6 +149,23 @@ SELECT is(
      WHERE table_schema = 'pgfr_record' AND table_name = 'r_pg_stat_progress_vacuum' AND column_name = 'value'),
     'double precision',
     're-running generate_rollups() should migrate an existing numeric value column to double precision'
+);
+
+-- ---------------------------------------------------------------------------
+-- Endpoint-shape rollups' schema_id column (dictionary-encoded
+-- first_values/last_values arrays, see REFERENCE.md's Rollups section):
+-- re-running generate_rollups() against an existing table predating this
+-- column adds it back.
+-- ---------------------------------------------------------------------------
+ALTER TABLE pgfr_record.r_pg_stat_wal_receiver DROP COLUMN schema_id;
+SELECT lives_ok(
+    $$SELECT pgfr_record.generate_rollups()$$,
+    're-running generate_rollups() against an endpoint-shape table missing schema_id should not error'
+);
+SELECT ok(
+    (SELECT count(*)::int FROM information_schema.columns
+     WHERE table_schema = 'pgfr_record' AND table_name = 'r_pg_stat_wal_receiver' AND column_name = 'schema_id') = 1,
+    're-running generate_rollups() should add schema_id back to an endpoint-shape table missing it'
 );
 
 -- ---------------------------------------------------------------------------

@@ -23,7 +23,7 @@ LANGUAGE sql STABLE AS $$
     FROM (
         SELECT columns, type_names
         FROM pgfr_record.payload_schemas
-        WHERE source_view = p_source_view
+        WHERE source_view = p_source_view AND kind = 'capture'
         ORDER BY schema_id DESC LIMIT 1
     ) ps,
     unnest(ps.columns, ps.type_names) WITH ORDINALITY AS u(c, t, ord)
@@ -46,7 +46,7 @@ LANGUAGE sql STABLE AS $$
     FROM (
         SELECT columns, type_names
         FROM pgfr_record.payload_schemas
-        WHERE source_view = p_source_view
+        WHERE source_view = p_source_view AND kind = 'capture'
         ORDER BY schema_id DESC LIMIT 1
     ) ps,
     unnest(ps.columns, ps.type_names) WITH ORDINALITY AS u(c, t, ord);

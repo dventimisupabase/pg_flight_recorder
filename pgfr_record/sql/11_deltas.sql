@@ -44,7 +44,7 @@ BEGIN
 
     SELECT schema_id, columns, type_names INTO v_ps
     FROM pgfr_record.payload_schemas
-    WHERE source_view = p_source_view
+    WHERE source_view = p_source_view AND kind = 'capture'
     ORDER BY schema_id DESC
     LIMIT 1;
     IF NOT FOUND THEN

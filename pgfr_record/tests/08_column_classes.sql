@@ -17,7 +17,7 @@ SELECT is(
      FROM pgfr_record.manifest m
      JOIN LATERAL (
         SELECT columns FROM pgfr_record.payload_schemas p
-        WHERE p.source_view = m.source_view ORDER BY p.schema_id DESC LIMIT 1
+        WHERE p.source_view = m.source_view AND p.kind = 'capture' ORDER BY p.schema_id DESC LIMIT 1
      ) ps ON true
      WHERE m.enabled
        AND m.min_major <= pgfr_record._current_major()
@@ -140,7 +140,7 @@ SELECT is(
      FROM pgfr_record.manifest m
      JOIN LATERAL (
         SELECT columns FROM pgfr_record.payload_schemas p
-        WHERE p.source_view = m.source_view ORDER BY p.schema_id DESC LIMIT 1
+        WHERE p.source_view = m.source_view AND p.kind = 'capture' ORDER BY p.schema_id DESC LIMIT 1
      ) ps ON true
      WHERE m.enabled
        AND m.min_major <= pgfr_record._current_major()

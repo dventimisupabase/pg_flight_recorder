@@ -91,7 +91,7 @@ DECLARE
     v_fsyncs_pos      int;
 BEGIN
     SELECT schema_id, columns INTO v_ckpt_schema_id, v_ckpt_columns
-    FROM pgfr_record.payload_schemas WHERE source_view = v_ckpt_view ORDER BY schema_id DESC LIMIT 1;
+    FROM pgfr_record.payload_schemas WHERE source_view = v_ckpt_view AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1;
     EXECUTE format('SELECT payload FROM pgfr_record.a_%I ORDER BY captured_at DESC LIMIT 1', v_ckpt_short) INTO v_ckpt_payload;
     v_req_pos := array_position(v_ckpt_columns, v_req_col) - 1;
     v_wt_pos  := array_position(v_ckpt_columns, v_wt_col) - 1;
@@ -113,7 +113,7 @@ BEGIN
         FROM pgfr_record.a_pg_stat_io
         WHERE (key->>'backend_type') = 'client backend' AND (key->>'object') = 'relation' AND (key->>'context') = 'normal'
         ORDER BY captured_at DESC LIMIT 1;
-        SELECT columns INTO v_io_columns FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_io' ORDER BY schema_id DESC LIMIT 1;
+        SELECT columns INTO v_io_columns FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_io' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1;
         v_writes_pos := array_position(v_io_columns, 'writes') - 1;
         v_fsyncs_pos := array_position(v_io_columns, 'fsyncs') - 1;
 
@@ -127,7 +127,7 @@ BEGIN
         -- Same table (pg_stat_bgwriter): merge checkpoint + buffer-pressure
         -- columns into one row-pair.
         SELECT schema_id, columns INTO v_bgw_schema_id, v_bgw_columns
-        FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_bgwriter' ORDER BY schema_id DESC LIMIT 1;
+        FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_bgwriter' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1;
         SELECT payload INTO v_bgw_payload FROM pgfr_record.a_pg_stat_bgwriter ORDER BY captured_at DESC LIMIT 1;
         v_be_pos := array_position(v_bgw_columns, 'buffers_backend') - 1;
         v_fs_pos := array_position(v_bgw_columns, 'buffers_backend_fsync') - 1;
@@ -169,8 +169,8 @@ SELECT is(
 SELECT key, key_hash, schema_id, payload FROM pgfr_record.a_pg_stat_database a
     WHERE (a.key->>'datid')::oid = (SELECT oid FROM pg_database WHERE datname = current_database())
     ORDER BY captured_at DESC LIMIT 1 \gset db_row_
-SELECT array_position(columns, 'temp_files') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_database' ORDER BY schema_id DESC LIMIT 1 \gset tf_
-SELECT array_position(columns, 'temp_bytes') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_database' ORDER BY schema_id DESC LIMIT 1 \gset tb_
+SELECT array_position(columns, 'temp_files') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_database' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset tf_
+SELECT array_position(columns, 'temp_bytes') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_database' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset tb_
 
 INSERT INTO pgfr_record.a_pg_stat_database (captured_at, key, key_hash, row_hash, schema_id, payload) VALUES
     (:'ref_t_ref'::timestamptz - interval '10 minutes', :'db_row_key'::jsonb, :db_row_key_hash, 9001, :db_row_schema_id,
@@ -190,11 +190,11 @@ SELECT is(
 -- hours (a connection-leak scenario).
 -- ---------------------------------------------------------------------------
 SELECT payload, schema_id FROM pgfr_record.a_pg_stat_activity ORDER BY captured_at DESC LIMIT 1 \gset act_row_
-SELECT array_position(columns, 'pid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' ORDER BY schema_id DESC LIMIT 1 \gset pid_
-SELECT array_position(columns, 'backend_start') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' ORDER BY schema_id DESC LIMIT 1 \gset bs_
-SELECT array_position(columns, 'state') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' ORDER BY schema_id DESC LIMIT 1 \gset state_
-SELECT array_position(columns, 'xact_start') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' ORDER BY schema_id DESC LIMIT 1 \gset xact_
-SELECT array_position(columns, 'state_change') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' ORDER BY schema_id DESC LIMIT 1 \gset chg_
+SELECT array_position(columns, 'pid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset pid_
+SELECT array_position(columns, 'backend_start') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset bs_
+SELECT array_position(columns, 'state') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset state_
+SELECT array_position(columns, 'xact_start') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset xact_
+SELECT array_position(columns, 'state_change') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset chg_
 
 INSERT INTO pgfr_record.a_pg_stat_activity (captured_at, key, key_hash, row_hash, schema_id, payload)
 VALUES (
@@ -227,8 +227,8 @@ SELECT is(
     'anomaly_report() should flag 25 backends idle for 2+ hours as CONNECTION_LEAK/MEDIUM (below the 50-backend HIGH band)'
 );
 
-SELECT array_position(columns, 'wait_event_type') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' ORDER BY schema_id DESC LIMIT 1 \gset wet_
-SELECT array_position(columns, 'query_start') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' ORDER BY schema_id DESC LIMIT 1 \gset qs_
+SELECT array_position(columns, 'wait_event_type') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset wet_
+SELECT array_position(columns, 'query_start') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_activity' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset qs_
 
 INSERT INTO pgfr_record.a_pg_stat_activity (captured_at, key, key_hash, row_hash, schema_id, payload)
 VALUES (
@@ -250,13 +250,13 @@ SELECT is(
 -- 60%-dead-tuple table, and a never-vacuumed table with 200000 dead tuples.
 -- ---------------------------------------------------------------------------
 SELECT payload, schema_id FROM pgfr_record.a_pg_stat_all_tables ORDER BY captured_at DESC LIMIT 1 \gset tbl_row_
-SELECT array_position(columns, 'relid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset relid_
-SELECT array_position(columns, 'schemaname') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset sn_
-SELECT array_position(columns, 'relname') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset rn_
-SELECT array_position(columns, 'n_live_tup') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset live_
-SELECT array_position(columns, 'n_dead_tup') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset dead_
-SELECT array_position(columns, 'last_vacuum') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset lv_
-SELECT array_position(columns, 'last_autovacuum') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' ORDER BY schema_id DESC LIMIT 1 \gset lav_
+SELECT array_position(columns, 'relid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset relid_
+SELECT array_position(columns, 'schemaname') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset sn_
+SELECT array_position(columns, 'relname') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset rn_
+SELECT array_position(columns, 'n_live_tup') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset live_
+SELECT array_position(columns, 'n_dead_tup') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset dead_
+SELECT array_position(columns, 'last_vacuum') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset lv_
+SELECT array_position(columns, 'last_autovacuum') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_all_tables' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset lav_
 
 INSERT INTO pgfr_record.a_pg_stat_all_tables (captured_at, key, key_hash, row_hash, schema_id, payload)
 VALUES (
@@ -301,9 +301,9 @@ SELECT is(
 -- of exactly N, with no dependency on how old the database actually is.
 -- ---------------------------------------------------------------------------
 SELECT key, key_hash, schema_id, payload FROM pgfr_record.a_pg_database ORDER BY captured_at DESC LIMIT 1 \gset dbrow_
-SELECT array_position(columns, 'datfrozenxid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_database' ORDER BY schema_id DESC LIMIT 1 \gset fxid_
-SELECT array_position(columns, 'datminmxid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_database' ORDER BY schema_id DESC LIMIT 1 \gset fmxid_
-SELECT array_position(columns, 'datname') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_database' ORDER BY schema_id DESC LIMIT 1 \gset dn_
+SELECT array_position(columns, 'datfrozenxid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_database' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset fxid_
+SELECT array_position(columns, 'datminmxid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_database' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset fmxid_
+SELECT array_position(columns, 'datname') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_database' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset dn_
 SELECT ((pg_current_xact_id()::text::bigint - 250000001 + 4294967296) % 4294967296)::text::xid AS x \gset oldxid_
 SELECT ((next_multixact_id::text::bigint - 250000001 + 4294967296) % 4294967296)::text::xid AS x FROM pg_control_checkpoint() \gset oldmxid_
 
@@ -326,11 +326,11 @@ SELECT is(
 );
 
 SELECT key, key_hash, schema_id, payload FROM pgfr_record.a_src_catalog_identity ORDER BY captured_at DESC LIMIT 1 \gset catrow_
-SELECT array_position(columns, 'oid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pgfr_record.src_catalog_identity' ORDER BY schema_id DESC LIMIT 1 \gset roid_
-SELECT array_position(columns, 'relfrozenxid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pgfr_record.src_catalog_identity' ORDER BY schema_id DESC LIMIT 1 \gset rfxid_
-SELECT array_position(columns, 'relminmxid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pgfr_record.src_catalog_identity' ORDER BY schema_id DESC LIMIT 1 \gset rfmxid_
-SELECT array_position(columns, 'relname') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pgfr_record.src_catalog_identity' ORDER BY schema_id DESC LIMIT 1 \gset rn_
-SELECT array_position(columns, 'relkind') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pgfr_record.src_catalog_identity' ORDER BY schema_id DESC LIMIT 1 \gset rk_
+SELECT array_position(columns, 'oid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pgfr_record.src_catalog_identity' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset roid_
+SELECT array_position(columns, 'relfrozenxid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pgfr_record.src_catalog_identity' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset rfxid_
+SELECT array_position(columns, 'relminmxid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pgfr_record.src_catalog_identity' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset rfmxid_
+SELECT array_position(columns, 'relname') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pgfr_record.src_catalog_identity' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset rn_
+SELECT array_position(columns, 'relkind') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pgfr_record.src_catalog_identity' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset rk_
 SELECT ((pg_current_xact_id()::text::bigint - 1600000001 + 4294967296) % 4294967296)::text::xid AS x \gset oldrelxid_
 SELECT ((next_multixact_id::text::bigint - 1600000001 + 4294967296) % 4294967296)::text::xid AS x FROM pg_control_checkpoint() \gset oldrelmxid_
 SELECT (:'catrow_key'::jsonb->>'oid')::bigint + 1 AS oid \gset newoid_
@@ -384,13 +384,13 @@ SELECT jsonb_agg(
         ELSE '0'
     END)::jsonb ORDER BY ord
 ) AS base_payload
-FROM (SELECT columns, type_names FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_replication' ORDER BY schema_id DESC LIMIT 1) ps,
+FROM (SELECT columns, type_names FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_replication' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1) ps,
      unnest(ps.columns, ps.type_names) WITH ORDINALITY AS u(c, t, ord)
 \gset repl_base_
-SELECT schema_id FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_replication' ORDER BY schema_id DESC LIMIT 1 \gset replschema_
-SELECT array_position(columns, 'replay_lag') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_replication' ORDER BY schema_id DESC LIMIT 1 \gset lag_
-SELECT array_position(columns, 'application_name') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_replication' ORDER BY schema_id DESC LIMIT 1 \gset an_
-SELECT array_position(columns, 'pid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_replication' ORDER BY schema_id DESC LIMIT 1 \gset repid_
+SELECT schema_id FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_replication' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset replschema_
+SELECT array_position(columns, 'replay_lag') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_replication' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset lag_
+SELECT array_position(columns, 'application_name') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_replication' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset an_
+SELECT array_position(columns, 'pid') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_replication' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset repid_
 
 INSERT INTO pgfr_record.a_pg_stat_replication (captured_at, key, key_hash, row_hash, schema_id, payload) VALUES
     (:'ref_t_ref'::timestamptz, NULL, NULL, 9301, :replschema_schema_id,
@@ -416,12 +416,12 @@ SELECT jsonb_agg(
         ELSE '0'
     END)::jsonb ORDER BY ord
 ) AS base_payload
-FROM (SELECT columns, type_names FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_replication_slots' ORDER BY schema_id DESC LIMIT 1) ps,
+FROM (SELECT columns, type_names FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_replication_slots' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1) ps,
      unnest(ps.columns, ps.type_names) WITH ORDINALITY AS u(c, t, ord)
 \gset slot_base_
-SELECT schema_id FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_replication_slots' ORDER BY schema_id DESC LIMIT 1 \gset slotschema_
-SELECT array_position(columns, 'active') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_replication_slots' ORDER BY schema_id DESC LIMIT 1 \gset act_
-SELECT array_position(columns, 'slot_name') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_replication_slots' ORDER BY schema_id DESC LIMIT 1 \gset sn_
+SELECT schema_id FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_replication_slots' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset slotschema_
+SELECT array_position(columns, 'active') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_replication_slots' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset act_
+SELECT array_position(columns, 'slot_name') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_replication_slots' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset sn_
 
 INSERT INTO pgfr_record.a_pg_replication_slots (captured_at, key, key_hash, row_hash, schema_id, payload) VALUES
     (:'ref_t_ref'::timestamptz, NULL, NULL, 9401, :slotschema_schema_id,

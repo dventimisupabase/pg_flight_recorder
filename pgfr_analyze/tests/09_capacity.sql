@@ -81,7 +81,7 @@ BEGIN
             FROM pgfr_record.a_pg_stat_io
             WHERE (key->>'backend_type') = 'client backend' AND (key->>'object') = 'relation' AND (key->>'context') = 'normal'
             ORDER BY captured_at DESC LIMIT 1;
-            SELECT columns INTO v_columns FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_io' ORDER BY schema_id DESC LIMIT 1;
+            SELECT columns INTO v_columns FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_io' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1;
             v_writes_pos := array_position(v_columns, 'writes') - 1;
 
             EXECUTE format(
@@ -98,7 +98,7 @@ BEGIN
             v_be_pos    int;
         BEGIN
             SELECT schema_id, payload INTO v_schema_id, v_payload FROM pgfr_record.a_pg_stat_bgwriter ORDER BY captured_at DESC LIMIT 1;
-            SELECT array_position(columns, 'buffers_backend') - 1 INTO v_be_pos FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_bgwriter' ORDER BY schema_id DESC LIMIT 1;
+            SELECT array_position(columns, 'buffers_backend') - 1 INTO v_be_pos FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_bgwriter' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1;
 
             EXECUTE format(
                 'INSERT INTO pgfr_record.a_pg_stat_bgwriter (captured_at, key, key_hash, row_hash, schema_id, payload) VALUES
@@ -123,9 +123,9 @@ SELECT is(
 SELECT key, key_hash, schema_id, payload FROM pgfr_record.a_pg_stat_database a
     WHERE (a.key->>'datid')::oid = (SELECT oid FROM pg_database WHERE datname = current_database())
     ORDER BY captured_at DESC LIMIT 1 \gset db_
-SELECT array_position(columns, 'temp_bytes') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_database' ORDER BY schema_id DESC LIMIT 1 \gset tb_
-SELECT array_position(columns, 'blks_hit') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_database' ORDER BY schema_id DESC LIMIT 1 \gset bh_
-SELECT array_position(columns, 'blks_read') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_database' ORDER BY schema_id DESC LIMIT 1 \gset br_
+SELECT array_position(columns, 'temp_bytes') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_database' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset tb_
+SELECT array_position(columns, 'blks_hit') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_database' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset bh_
+SELECT array_position(columns, 'blks_read') - 1 AS p FROM pgfr_record.payload_schemas WHERE source_view = 'pg_catalog.pg_stat_database' AND kind = 'capture' ORDER BY schema_id DESC LIMIT 1 \gset br_
 
 INSERT INTO pgfr_record.a_pg_stat_database (captured_at, key, key_hash, row_hash, schema_id, payload) VALUES
     (:'ref_t_ref'::timestamptz - interval '10 minutes', :'db_key'::jsonb, :db_key_hash, 7700, :db_schema_id,
