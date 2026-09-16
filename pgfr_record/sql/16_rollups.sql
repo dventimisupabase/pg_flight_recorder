@@ -45,6 +45,22 @@ BEGIN
             v_rollup := 'r_' || v_short;
 
             IF to_regclass('pgfr_record.' || v_rollup) IS NOT NULL THEN
+                -- Column-type migration: value was originally numeric,
+                -- narrowed to double precision (a real per-row storage win
+                -- across every partition, since these are already
+                -- error-bounded Mode A estimates, not exact figures -- see
+                -- STATISTICS.md). One-time per table: the next re-run finds
+                -- the column already double precision and this is a no-op.
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = 'pgfr_record' AND table_name = v_rollup
+                      AND column_name = 'value' AND data_type = 'numeric'
+                ) THEN
+                    EXECUTE format(
+                        'ALTER TABLE pgfr_record.%I ALTER COLUMN value TYPE double precision USING value::double precision',
+                        v_rollup
+                    );
+                END IF;
                 CONTINUE;
             END IF;
 
@@ -71,7 +87,7 @@ BEGIN
                     'CREATE TABLE pgfr_record.%I (
                          bucket_start  timestamptz NOT NULL,
                          stat_name     text NOT NULL,
-                         value         numeric,
+                         value         double precision,
                          sample_count  int NOT NULL DEFAULT 0
                      ) PARTITION BY RANGE (bucket_start)',
                     v_rollup

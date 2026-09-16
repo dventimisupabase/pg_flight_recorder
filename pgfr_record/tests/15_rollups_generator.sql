@@ -7,7 +7,7 @@
 -- fresh.
 
 BEGIN;
-SELECT plan(21);
+SELECT plan(24);
 
 SELECT has_function('pgfr_record', 'generate_rollups', 'Function pgfr_record.generate_rollups should exist');
 
@@ -124,6 +124,31 @@ SELECT is(
        AND m.min_major <= pgfr_record._current_major()
        AND pgfr_record._current_major() <= coalesce(m.max_major, 999)),
     're-running generate_rollups() should not create duplicate rollup tables'
+);
+
+-- ---------------------------------------------------------------------------
+-- Stat-shape rollups' value column: double precision, not numeric (a real
+-- per-row storage win; see REFERENCE.md's Rollups section). Re-running
+-- generate_rollups() against an existing table with the old numeric column
+-- migrates it in place.
+-- ---------------------------------------------------------------------------
+SELECT is(
+    (SELECT data_type FROM information_schema.columns
+     WHERE table_schema = 'pgfr_record' AND table_name = 'r_pg_stat_activity' AND column_name = 'value'),
+    'double precision',
+    'r_pg_stat_activity''s value column should be double precision, not numeric'
+);
+
+ALTER TABLE pgfr_record.r_pg_stat_progress_vacuum ALTER COLUMN value TYPE numeric USING value::numeric;
+SELECT lives_ok(
+    $$SELECT pgfr_record.generate_rollups()$$,
+    're-running generate_rollups() against a table with the old numeric value column should not error'
+);
+SELECT is(
+    (SELECT data_type FROM information_schema.columns
+     WHERE table_schema = 'pgfr_record' AND table_name = 'r_pg_stat_progress_vacuum' AND column_name = 'value'),
+    'double precision',
+    're-running generate_rollups() should migrate an existing numeric value column to double precision'
 );
 
 -- ---------------------------------------------------------------------------
