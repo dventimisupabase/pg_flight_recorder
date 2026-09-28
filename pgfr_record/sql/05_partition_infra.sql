@@ -44,12 +44,25 @@ COMMENT ON FUNCTION pgfr_record._partition_unit(interval) IS 'retention <= 6h ->
 -- through the exact same mechanism. to_regclass returns NULL (rather than
 -- erroring) for a table not yet created, so this function is safe to call
 -- before generate_archives()/generate_rollups() has run for every row.
+--
+-- ledger_captures is listed before ledger_runs deliberately, matching the
+-- order run_tier() (08_collector.sql) writes them in: an INSERT into
+-- ledger_captures per target across its whole loop, then the single
+-- ledger_runs row at the very end. maintain_partitions() locks these same
+-- two tables (ACCESS EXCLUSIVE, when a new partition is needed for either --
+-- true once per rollover, since both are daily-partitioned) in whatever
+-- order this function returns them. The reverse order deadlocked against a
+-- concurrent run_tier(): maintain_partitions() would hold ledger_runs and
+-- block wanting ledger_captures while run_tier() held ledger_captures and
+-- blocked wanting ledger_runs (reproduced by
+-- scripts/deadlock_maintain_partitions_test.sh). Keep this order matched to
+-- run_tier()'s -- do not reorder without checking that function too.
 CREATE OR REPLACE FUNCTION pgfr_record._partition_targets()
 RETURNS TABLE(parent_table text, retention interval, logged boolean)
 LANGUAGE sql STABLE AS $$
-    SELECT 'ledger_runs'::text, interval '30 days', true
-    UNION ALL
     SELECT 'ledger_captures'::text, interval '30 days', true
+    UNION ALL
+    SELECT 'ledger_runs'::text, interval '30 days', true
     UNION ALL
     SELECT 'a_' || pgfr_record._short_name(m.source_view), m.retention, m.logged
     FROM pgfr_record.manifest m
