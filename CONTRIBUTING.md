@@ -2,6 +2,13 @@
 
 Thanks for your interest in contributing.
 
+## Contents
+
+- [License of contributions](#license-of-contributions)
+- [Before you open a PR](#before-you-open-a-pr)
+- [Reporting issues](#reporting-issues)
+- [Source file headers](#source-file-headers)
+
 ## License of contributions
 
 By submitting a pull request, issue patch, or any other contribution to this

@@ -1,38 +1,20 @@
 -- SPDX-License-Identifier: Apache-2.0
 -- Copyright 2026 David A. Ventimiglia
 
+-- pgfr_record v2: schema bootstrap.
+--
+-- pgfr_record appends debounced, dictionary-encoded jsonb samples of
+-- PostgreSQL's own stats views and system views into time-partitioned
+-- tables, and drops old partitions. Every collector and generator behavior
+-- is a pure function of pgfr_record.manifest (see 02_manifest.sql).
+
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
-        RAISE EXCEPTION E'\n\nFlight Recorder requires pg_cron extension.\n\nInstall pg_cron first:\n  CREATE EXTENSION pg_cron;\n\nSee: https://github.com/citusdata/pg_cron\n';
+        RAISE EXCEPTION E'\n\npgfr_record requires pg_cron.\n\nInstall pg_cron first:\n  CREATE EXTENSION pg_cron;\n\nSee: https://github.com/citusdata/pg_cron\n';
     END IF;
-END $$;
-
--- Check for existing installation and warn about upgrade path
-DO $$
-DECLARE
-    existing_version TEXT;
-BEGIN
-    SELECT value INTO existing_version
-    FROM pgfr_record.config WHERE key = 'schema_version';
-
-    IF existing_version IS NOT NULL THEN
-        RAISE NOTICE E'\n=== Existing installation detected (v%) ===', existing_version;
-        RAISE NOTICE 'This install script will update functions and views.';
-        RAISE NOTICE 'Your data will be preserved.';
-        RAISE NOTICE E'===\n';
-    END IF;
-EXCEPTION
-    WHEN undefined_table THEN
-        -- Fresh install, continue normally
-        NULL;
-    WHEN invalid_schema_name THEN
-        -- Schema doesn't exist yet, fresh install
-        NULL;
 END $$;
 
 CREATE SCHEMA IF NOT EXISTS pgfr_record;
-
--- Stores periodic snapshots of PostgreSQL system performance metrics
--- Captures WAL activity, checkpoint behavior, IO operations, transactions,
--- and resource utilization to enable performance analysis and historical trending
+COMMENT ON SCHEMA pgfr_record IS
+    'pg_flight_recorder v2 core: manifest-driven capture of PostgreSQL stats/system views into time-partitioned, dictionary-encoded archive tables. Append-only; retention is partition drop. Start at pgfr_record.manifest.';
